@@ -72,6 +72,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     sysinfo_probe();
     hal_probe();
     if (!k.gop) panic("no Graphics Output Protocol - cannot start the shell");
+    if (!hwreport_save()) klog("hwreport: boot volume not writable, skipped");
 
     shell_main();
     return EFI_SUCCESS;

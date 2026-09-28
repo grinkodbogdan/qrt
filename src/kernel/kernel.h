@@ -111,6 +111,7 @@ void hal_setting_set(const c16 *name, u32 value);
 /* ---- boot-time probing ---- */
 void hal_probe(void);
 void sysinfo_probe(void);
+int  hwreport_save(void);            /* ACPI/SMBIOS/PCI dump to \qrt\hwdump */
 
 /* ---- the shell (user interface) takes over after boot ---- */
 void shell_main(void);

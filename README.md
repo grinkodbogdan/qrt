@@ -70,6 +70,20 @@ A future step would be native Tessera drivers for the Intel DesignWare I2C
 controller and HID-over-I2C. That would take over touch from the firmware and
 allow `ExitBootServices()`.
 
+## Hardware report (step one toward native drivers)
+
+On every boot QRT writes the machine's hardware description to the stick,
+under `\qrt\hwdump\`:
+
+- every ACPI table (`DSDT.aml`, `SSDT*.aml`, `APIC.aml`, and so on)
+- the raw SMBIOS table
+- `report.txt`, which lists the PCI devices, the ACPI device IDs (`_HID`)
+  found in the AML, and the boot log
+
+Native drivers for the tablet's I2C touch, SDIO, audio and battery have to be
+written against this real data. Decompile the tables with
+`iasl -d DSDT.aml SSDT*.aml`.
+
 ## Which Venue 8 Pro?
 
 - The **5830** (2013–14) has a Bay Trail Z3740D, 1–2 GB of RAM and an
