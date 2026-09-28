@@ -14,6 +14,7 @@ typedef struct {
     u32 *px;
     int w, h, stride;
     rect_t clip;
+    rect_t limit;      /* outer bound for gfx_clip(): the region being redrawn */
 } canvas_t;
 
 typedef enum { F_REGULAR, F_SEMIBOLD, F_LIGHT } face_t;
@@ -22,6 +23,9 @@ canvas_t canvas_new(int w, int h);
 void     canvas_free(canvas_t *c);
 void     gfx_clip(canvas_t *c, rect_t r);
 void     gfx_unclip(canvas_t *c);
+void     gfx_limit(canvas_t *c, rect_t r);   /* restrict all drawing (partial redraw) */
+rect_t   rect_union(rect_t a, rect_t b);      /* empty rects are ignored */
+rect_t   rect_intersect(rect_t a, rect_t b);
 
 void gfx_fill(canvas_t *c, rect_t r, u32 color);             /* alpha-blended */
 void gfx_rrect(canvas_t *c, rect_t r, int radius, u32 color);

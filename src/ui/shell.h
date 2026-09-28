@@ -29,7 +29,14 @@ typedef struct app {
 extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life, app_lab;
 
 /* shell services for apps */
-void shell_redraw(void);
+void shell_redraw(void);                /* redraw the whole screen */
+void shell_damage(rect_t r);            /* redraw only r (logical coords); call from event/tick */
+
+typedef struct {
+    u32 compose_us, present_us, area_permille, frames;
+    char bench[3][96];
+} shell_stats_t;
+extern shell_stats_t shell_stats;
 void shell_go_home(void);
 void shell_set_rotation(int rot);
 int  shell_rotation(void);

@@ -3,19 +3,22 @@
 #include "kernel.h"
 
 void *memset(void *d, int c, usize n) {
-    u8 *p = d;
-    while (n--) *p++ = (u8)c;
+    void *p = d;
+    __asm__ volatile("rep stosb" : "+D"(p), "+c"(n) : "a"(c) : "memory");
     return d;
 }
 
+/* x86 string instructions: fast-string microcode on Silvermont/Airmont moves
+ * whole cache lines, several times quicker than a C loop for frame buffers. */
 void *memcpy(void *d, const void *s, usize n) {
-    u8 *dp = d;
-    const u8 *sp = s;
-    while (n >= sizeof(usize)) {
-        *(usize *)dp = *(const usize *)sp;
-        dp += sizeof(usize); sp += sizeof(usize); n -= sizeof(usize);
-    }
-    while (n--) *dp++ = *sp++;
+    void *dst = d;
+    usize words = n / sizeof(usize), tail = n % sizeof(usize);
+#if defined(__x86_64__)
+    __asm__ volatile("rep movsq" : "+D"(dst), "+S"(s), "+c"(words) : : "memory");
+#else
+    __asm__ volatile("rep movsl" : "+D"(dst), "+S"(s), "+c"(words) : : "memory");
+#endif
+    __asm__ volatile("rep movsb" : "+D"(dst), "+S"(s), "+c"(tail) : : "memory");
     return d;
 }
 

@@ -10,6 +10,7 @@ static inline u64 rdtsc(void) {
 }
 
 u64 k_now_ms(void) { return (rdtsc() - k.tsc_boot) / k.tsc_per_ms; }
+u64 k_now_us(void) { return (rdtsc() - k.tsc_boot) * 1000 / k.tsc_per_ms; }
 
 void k_walltime(EFI_TIME *t) {
     memset(t, 0, sizeof *t);

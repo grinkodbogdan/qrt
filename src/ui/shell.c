@@ -34,10 +34,18 @@ static struct {
     char query[48];
     int ask_pressed;
     int cursor_x, cursor_y, cursor_on, cursor_dirty;
+    rect_t dmg;          /* content that must be recomposed */
+    rect_t pdmg;         /* extra area to push to the panel (cursor moves) */
+    int app_damaged, bench_pending;
+    rect_t cursor_drawn;
     int last_minute;
 } sh;
 
+shell_stats_t shell_stats;
+
 void shell_redraw(void) { sh.dirty = 1; }
+void shell_damage(rect_t r) { sh.dmg = rect_union(sh.dmg, r); sh.app_damaged = 1; }
+static rect_t full_rect(void) { return (rect_t){ 0, 0, ui.W, ui.H }; }
 int  shell_rotation(void) { return sh.rot; }
 int  shell_accent_index(void) { return sh.accent_idx; }
 
@@ -201,26 +209,31 @@ static void to_logical(int px, int py, int *lx, int *ly) {
     }
 }
 
-static void present(const canvas_t *src) {
-    const u32 *out = src->px;
-    if (sh.rot) {
-        int fw = (int)k.fb_w, fh = (int)k.fb_h;
-        u32 *d = sh.phys.px;
-        for (int ly = 0; ly < ui.H; ly++) {
-            const u32 *row = src->px + (usize)ly * ui.W;
-            for (int lx = 0; lx < ui.W; lx++) {
-                int px, py;
-                switch (sh.rot) {
-                case 1:  px = fw - 1 - ly; py = lx;          break;
-                case 2:  px = fw - 1 - lx; py = fh - 1 - ly; break;
-                default: px = ly;          py = fh - 1 - lx; break;
-                }
-                d[(usize)py * fw + px] = row[lx];
-            }
-        }
-        out = sh.phys.px;
+/* Push rectangle d (logical coords) of src to the panel, rotating on the way. */
+static void present(const canvas_t *src, rect_t d) {
+    d = rect_intersect(d, full_rect());
+    if (d.w <= 0 || d.h <= 0) return;
+    if (!sh.rot) {
+        k.gop->Blt(k.gop, src->px, EfiBltBufferToVideo, d.x, d.y, d.x, d.y, d.w, d.h, (UINTN)src->stride * 4);
+        return;
     }
-    k.gop->Blt(k.gop, (u32 *)out, EfiBltBufferToVideo, 0, 0, 0, 0, k.fb_w, k.fb_h, 0);
+    int fw = (int)k.fb_w, fh = (int)k.fb_h;
+    u32 *p = sh.phys.px;
+    for (int ly = d.y; ly < d.y + d.h; ly++) {
+        const u32 *row = src->px + (usize)ly * src->stride;
+        switch (sh.rot) {
+        case 1: { u32 *o = p + (fw - 1 - ly);            for (int lx = d.x; lx < d.x + d.w; lx++) o[(usize)lx * fw] = row[lx]; break; }
+        case 2: { u32 *o = p + (usize)(fh - 1 - ly) * fw; for (int lx = d.x; lx < d.x + d.w; lx++) o[fw - 1 - lx] = row[lx]; break; }
+        default: { u32 *o = p + ly;                        for (int lx = d.x; lx < d.x + d.w; lx++) o[(usize)(fh - 1 - lx) * fw] = row[lx]; break; }
+        }
+    }
+    rect_t r;
+    switch (sh.rot) {
+    case 1:  r = (rect_t){ fw - (d.y + d.h), d.x, d.h, d.w }; break;
+    case 2:  r = (rect_t){ fw - (d.x + d.w), fh - (d.y + d.h), d.w, d.h }; break;
+    default: r = (rect_t){ d.y, fh - (d.x + d.w), d.h, d.w }; break;
+    }
+    k.gop->Blt(k.gop, p, EfiBltBufferToVideo, r.x, r.y, r.x, r.y, r.w, r.h, (UINTN)fw * 4);
 }
 
 static void draw_cursor(canvas_t *c, int x, int y) {
@@ -371,7 +384,7 @@ static void draw_home(canvas_t *c, const EFI_TIME *t) {
 /* ---- ask (launcher + command line) ---------------------------------------- */
 typedef struct { const char *title, *sub; int app; int action; } suggestion_t;
 enum { ACT_NONE, ACT_SHUTDOWN, ACT_REBOOT, ACT_FIRMWARE, ACT_ROTATE, ACT_ACCENT,
-       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET };
+       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET, ACT_BENCH };
 
 static int suggestions(suggestion_t *out, int max) {
     static const suggestion_t actions[] = {
@@ -380,6 +393,7 @@ static int suggestions(suggestion_t *out, int max) {
         { "Restart", "Cold reset through UEFI", -1, ACT_REBOOT },
         { "Shut down", "Power off through UEFI", -1, ACT_SHUTDOWN },
         { "Firmware setup", "Reboot into the BIOS/UEFI menu", -1, ACT_FIRMWARE },
+        { "Graphics benchmark", "Time full and partial redraws", -1, ACT_BENCH },
         { "Touch: swap axes", "Fix a touchscreen mounted sideways", -1, ACT_TOUCH_SWAP },
         { "Touch: flip X", "Mirror touch left-right", -1, ACT_TOUCH_FLIPX },
         { "Touch: flip Y", "Mirror touch top-bottom", -1, ACT_TOUCH_FLIPY },
@@ -465,16 +479,26 @@ static void draw_app(canvas_t *c) {
 }
 
 /* ---- compose ---------------------------------------------------------------- */
-static void compose(void) {
+/*
+ * Redraw only rectangle d of the scene.  Everything is drawn as before but
+ * with d as the canvas limit, so primitives outside it are rejected by their
+ * clip test and the cost scales with the damaged area, not the screen.
+ */
+static void compose(rect_t d) {
     EFI_TIME t;
     k_walltime(&t);
-    sh.last_minute = t.Minute;
+    if (d.w >= ui.W && d.h >= ui.H) sh.last_minute = t.Minute;
     canvas_t *c = &sh.scene;
-    memcpy(c->px, (sh.view == VIEW_APP ? sh.wall_dim : sh.wall).px, (usize)ui.W * ui.H * 4);
+    gfx_limit(c, d);
+    d = c->limit;
+    const canvas_t *wall = sh.view == VIEW_APP ? &sh.wall_dim : &sh.wall;
+    for (int y = d.y; y < d.y + d.h; y++)
+        memcpy(c->px + (usize)y * c->stride + d.x, wall->px + (usize)y * wall->stride + d.x, (usize)d.w * 4);
     draw_status(c, &t);
     if (sh.view == VIEW_HOME) draw_home(c, &t);
     else draw_app(c);
     if (sh.ask_open) draw_ask(c);
+    gfx_limit(c, full_rect());
 }
 
 /* ---- navigation ---------------------------------------------------------------- */
@@ -504,6 +528,7 @@ static void run_action(int act) {
     case ACT_TOUCH_FLIPX: hal_set_touch_map(k.touch_map ^ TOUCH_FLIP_X); break;
     case ACT_TOUCH_FLIPY: hal_set_touch_map(k.touch_map ^ TOUCH_FLIP_Y); break;
     case ACT_TOUCH_RESET: hal_set_touch_map(0); break;
+    case ACT_BENCH: sh.bench_pending = 1; break;
     }
 }
 
@@ -594,7 +619,8 @@ static void dispatch(event_t e) {
         sh.tap.down = 0;
         return;
     }
-    if (sh.app->event && sh.app->event(&e, app_area())) sh.dirty = 1;
+    sh.app_damaged = 0;
+    if (sh.app->event && sh.app->event(&e, app_area()) && !sh.app_damaged) shell_damage(app_area());
 }
 
 /* ---- boot splash ------------------------------------------------------------- */
@@ -617,7 +643,60 @@ static void splash(float t) {
     while (klog_line(total)) total++;
     for (int i = MAX(0, total - 8); i < total; i++, y += ui.small->line)
         gfx_text_fit(c, ui.small, dp(24), y, ui.W - dp(48), klog_line(i), ui.text3);
-    present(c);
+    present(c, full_rect());
+}
+
+/* ---- frame pipeline ------------------------------------------------------------ */
+static rect_t cursor_rect(int x, int y) { return (rect_t){ x - dp(3), y - dp(3), dp(20), dp(28) }; }
+
+static void render(void) {
+    rect_t pd = rect_intersect(rect_union(sh.dmg, sh.pdmg), full_rect());
+    if (pd.w <= 0 || pd.h <= 0) { sh.dmg = sh.pdmg = (rect_t){ 0 }; return; }
+    u64 t0 = k_now_us();
+    if (sh.dmg.w > 0 && sh.dmg.h > 0) compose(sh.dmg);
+    u64 t1 = k_now_us();
+    if (sh.cursor_on) {
+        for (int y = pd.y; y < pd.y + pd.h; y++)
+            memcpy(sh.frame.px + (usize)y * ui.W + pd.x, sh.scene.px + (usize)y * ui.W + pd.x, (usize)pd.w * 4);
+        gfx_limit(&sh.frame, pd);
+        draw_cursor(&sh.frame, sh.cursor_x, sh.cursor_y);
+        gfx_limit(&sh.frame, full_rect());
+        present(&sh.frame, pd);
+    } else {
+        present(&sh.scene, pd);
+    }
+    u64 t2 = k_now_us();
+    shell_stats.compose_us = (u32)(t1 - t0);
+    shell_stats.present_us = (u32)(t2 - t1);
+    shell_stats.area_permille = (u32)((u64)pd.w * pd.h * 1000 / ((u64)ui.W * ui.H));
+    shell_stats.frames++;
+    sh.dmg = sh.pdmg = (rect_t){ 0 };
+}
+
+static void run_benchmark(void) {
+    rect_t full = full_rect();
+    int side = dp(96);
+    rect_t small = { (ui.W - side) / 2, (ui.H - side) / 2, side, side };
+    u64 t0 = k_now_us();
+    for (int i = 0; i < 8; i++) { compose(full); present(&sh.scene, full); }
+    u64 t1 = k_now_us();
+    for (int i = 0; i < 64; i++) { compose(small); present(&sh.scene, small); }
+    u64 t2 = k_now_us();
+    for (int i = 0; i < 8; i++) memcpy(sh.frame.px, sh.scene.px, (usize)ui.W * ui.H * 4);
+    u64 t3 = k_now_us();
+    for (int i = 0; i < 8; i++) present(&sh.scene, full);
+    u64 t4 = k_now_us();
+    u64 full_us = (t1 - t0) / 8, small_us = (t2 - t1) / 64, copy_us = (t3 - t2) / 8, blt_us = (t4 - t3) / 8;
+    u64 mbps = copy_us ? (u64)ui.W * ui.H * 4 / copy_us : 0;    /* bytes/us == MB/s */
+    fmt(shell_stats.bench[0], sizeof shell_stats.bench[0], "full frame %llu.%llu ms (%llu fps), of which present %llu.%llu ms",
+        full_us / 1000, full_us / 100 % 10, full_us ? 1000000 / full_us : 0, blt_us / 1000, blt_us / 100 % 10);
+    fmt(shell_stats.bench[1], sizeof shell_stats.bench[1], "96 dp partial redraw %llu.%llu ms (%llu fps)",
+        small_us / 1000, small_us / 100 % 10, small_us ? 1000000 / small_us : 0);
+    fmt(shell_stats.bench[2], sizeof shell_stats.bench[2], "frame copy %llu.%llu ms (%llu MB/s)",
+        copy_us / 1000, copy_us / 100 % 10, mbps);
+    for (int i = 0; i < 3; i++) klog("bench: %s", shell_stats.bench[i]);
+    for (int i = 0; i < N_APPS; i++) if (apps[i] == &app_system) open_app(i);
+    sh.dirty = 1;
 }
 
 /* ---- main loop ------------------------------------------------------------------ */
@@ -651,7 +730,9 @@ void shell_main(void) {
         for (int i = 0; i < n; i++) dispatch(ev[i]);
 
         u64 now = k_now_ms();
-        if (sh.view == VIEW_APP && sh.app->tick && sh.app->tick(now)) sh.dirty = 1;
+        if (sh.bench_pending) { sh.bench_pending = 0; run_benchmark(); }
+        sh.app_damaged = 0;
+        if (sh.view == VIEW_APP && sh.app->tick && sh.app->tick(now) && !sh.app_damaged) shell_damage(app_area());
         if (!sh.dirty) {
             EFI_TIME t;
             static u64 last_check;
@@ -661,16 +742,14 @@ void shell_main(void) {
                 if (t.Minute != sh.last_minute) sh.dirty = 1;
             }
         }
-        if (sh.dirty) { compose(); sh.dirty = 0; sh.cursor_dirty = 1; }
+        if (sh.dirty) { sh.dmg = full_rect(); sh.dirty = 0; }
         if (sh.cursor_dirty) {
+            /* repaint where the cursor was and where it is now */
             sh.cursor_dirty = 0;
-            if (sh.cursor_on) {
-                memcpy(sh.frame.px, sh.scene.px, (usize)ui.W * ui.H * 4);
-                draw_cursor(&sh.frame, sh.cursor_x, sh.cursor_y);
-                present(&sh.frame);
-            } else {
-                present(&sh.scene);
-            }
+            sh.pdmg = rect_union(sh.pdmg, sh.cursor_drawn);
+            sh.cursor_drawn = sh.cursor_on ? cursor_rect(sh.cursor_x, sh.cursor_y) : (rect_t){ 0 };
+            sh.pdmg = rect_union(sh.pdmg, sh.cursor_drawn);
         }
+        render();
     }
 }

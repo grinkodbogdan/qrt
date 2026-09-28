@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.2.1"
+#define QRT_VERSION "0.3.0"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8
@@ -80,6 +80,7 @@ extern kernel_t k;
 
 /* ---- clock ---- */
 u64  k_now_ms(void);
+u64  k_now_us(void);
 void k_walltime(EFI_TIME *t);
 
 /* ---- input: normalised event stream (physical framebuffer coords) ---- */

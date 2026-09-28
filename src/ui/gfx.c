@@ -2,7 +2,7 @@
 #include "gfx.h"
 
 canvas_t canvas_new(int w, int h) {
-    canvas_t c = { kalloc((usize)w * h * 4), w, h, w, { 0, 0, w, h } };
+    canvas_t c = { kalloc((usize)w * h * 4), w, h, w, { 0, 0, w, h }, { 0, 0, w, h } };
     return c;
 }
 
@@ -15,8 +15,20 @@ static rect_t intersect(rect_t a, rect_t b) {
     return r;
 }
 
-void gfx_clip(canvas_t *c, rect_t r) { rect_t full = { 0, 0, c->w, c->h }; c->clip = intersect(full, r); }
-void gfx_unclip(canvas_t *c) { rect_t full = { 0, 0, c->w, c->h }; c->clip = full; }
+void gfx_clip(canvas_t *c, rect_t r) { c->clip = intersect(c->limit, r); }
+void gfx_unclip(canvas_t *c) { c->clip = c->limit; }
+void gfx_limit(canvas_t *c, rect_t r) {
+    rect_t full = { 0, 0, c->w, c->h };
+    c->limit = c->clip = intersect(full, r);
+}
+rect_t rect_intersect(rect_t a, rect_t b) { return intersect(a, b); }
+rect_t rect_union(rect_t a, rect_t b) {
+    if (a.w <= 0 || a.h <= 0) return b;
+    if (b.w <= 0 || b.h <= 0) return a;
+    int x0 = MIN(a.x, b.x), y0 = MIN(a.y, b.y);
+    int x1 = MAX(a.x + a.w, b.x + b.w), y1 = MAX(a.y + a.h, b.y + b.h);
+    return (rect_t){ x0, y0, x1 - x0, y1 - y0 };
+}
 
 u32 mix(u32 a, u32 b, int t) {
     u32 rb = ((a & 0xff00ff) * (255 - t) + (b & 0xff00ff) * t) >> 8;

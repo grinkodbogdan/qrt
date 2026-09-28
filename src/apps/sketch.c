@@ -66,20 +66,26 @@ static int event(const event_t *e, rect_t a) {
     rect_t p = paper_rect(a);
     ensure_paper(p);
     if (e->type == EV_KEY && (e->ch == 'c' || e->ch == 'C')) goto clear;
+    int pad = dp(sizes[st.size]) / 2 + 2;
     if (e->type == EV_DOWN && in_rect(p, e->x, e->y)) {
+        int was_blank = st.blank;
         st.drawing = 1;
         st.blank = 0;
         st.lx = (float)(e->x - p.x); st.ly = (float)(e->y - p.y);
         gfx_circle(&st.paper, st.lx, st.ly, dp(sizes[st.size]) / 2.0f, inks[st.ink]);
+        /* only the dot changed, unless the "draw with your finger" hint must go */
+        if (!was_blank) shell_damage((rect_t){ e->x - pad, e->y - pad, 2 * pad, 2 * pad });
         return 1;
     }
     if (e->type == EV_MOVE && st.drawing) {
         float x = (float)(e->x - p.x), y = (float)(e->y - p.y);
         gfx_line(&st.paper, st.lx, st.ly, x, y, (float)dp(sizes[st.size]), inks[st.ink]);
+        int x0 = (int)MIN(st.lx, x), y0 = (int)MIN(st.ly, y), x1 = (int)MAX(st.lx, x), y1 = (int)MAX(st.ly, y);
+        shell_damage((rect_t){ p.x + x0 - pad, p.y + y0 - pad, x1 - x0 + 2 * pad + 1, y1 - y0 + 2 * pad + 1 });
         st.lx = x; st.ly = y;
         return 1;
     }
-    if (e->type == EV_UP && st.drawing) { st.drawing = 0; st.tap.down = 0; return 1; }
+    if (e->type == EV_UP && st.drawing) { st.drawing = 0; st.tap.down = 0; return 0; }
     if (!tap_track(&st.tap, e, dp(12))) return 0;
     for (int i = 0; i < (int)ARRAY_LEN(inks); i++) if (in_rect(ink_rect(a, i), e->x, e->y)) { st.ink = i; return 1; }
     for (int i = 0; i < 3; i++) if (in_rect(size_rect(a, i), e->x, e->y)) { st.size = i; return 1; }

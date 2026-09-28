@@ -44,6 +44,17 @@ static void draw(canvas_t *c, rect_t a) {
         gfx_text(c, ui.label, inner.x + dp(14), f.y + (dp(44) - ui.label->line) / 2, "Dell Venue 8 Pro detected", ui.text);
         f.y += dp(48);
     }
+    heading(&f, "GRAPHICS");
+    fmt(b, sizeof b, "%u.%u ms draw + %u.%u ms present, %u%% of screen",
+        shell_stats.compose_us / 1000, shell_stats.compose_us / 100 % 10,
+        shell_stats.present_us / 1000, shell_stats.present_us / 100 % 10, shell_stats.area_permille / 10);
+    kv(&f, "Last frame", b);
+    if (shell_stats.bench[0][0]) {
+        kv(&f, "Benchmark", shell_stats.bench[0]);
+        kv(&f, "", shell_stats.bench[1]);
+        kv(&f, "", shell_stats.bench[2]);
+    } else kv(&f, "Benchmark", "type \"bench\" in the Ask bar");
+
     heading(&f, "DEVICE");
     kv(&f, "Manufacturer", k.sys_vendor[0] ? k.sys_vendor : "unknown");
     kv(&f, "Model", k.sys_product[0] ? k.sys_product : "unknown");
