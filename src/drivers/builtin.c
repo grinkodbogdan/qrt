@@ -8,6 +8,7 @@
 #include "../kernel/dev.h"
 #include "uart.h"
 #include "touch.h"
+#include "buttons.h"
 #if defined(__x86_64__)
 #include "../arch/x64/irq.h"
 #endif
@@ -91,4 +92,22 @@ static void hid_status(device_t *d) {
 static int hid_probe(device_t *d) { hid_status(d); return 0; }
 static const driver_t drv_i2chid = { "i2c-hid", NULL, hid_acpi, NULL, hid_probe, hid_status };
 
-const driver_t *const builtin_drivers[] = { &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_chipset, NULL };
+/* ---- hardware buttons (Venue 8 Pro 5855: GPIO pads, see buttons.c) ---------- */
+static const char *const btn_acpi[] = { "ACPI0011", "INTCFD9", "PNP0C40", NULL };
+static int btn_owner;                       /* several ACPI ids describe the same buttons */
+static void btn_status(device_t *d) {
+    if (d->priv) buttons_status(d->status, sizeof d->status);
+    else strlcpy(d->status, "the same buttons as ACPI0011", sizeof d->status);
+}
+static int btn_probe(device_t *d) {
+    if (!btn_owner) {
+        if (!buttons_init()) return DEV_NOT_MINE;
+        btn_owner = 1;
+        d->priv = d;
+    }
+    btn_status(d);
+    return 0;
+}
+static const driver_t drv_buttons = { "gpio-buttons", NULL, btn_acpi, NULL, btn_probe, btn_status };
+
+const driver_t *const builtin_drivers[] = { &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_chipset, NULL };

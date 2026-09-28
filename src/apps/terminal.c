@@ -188,6 +188,7 @@ static int event(const event_t *e, rect_t a) {
 #endif
             if (st.line[0]) { run(st.line); st.line[0] = 0; }
         }
+        if (tapped && in_rect(input_rect(a), e->x, e->y)) shell_keyboard(1);
         st.pressed_chip = -1;
         return 1;
     }

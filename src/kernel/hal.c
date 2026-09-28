@@ -2,6 +2,7 @@
  * hal.c - device discovery and the firmware-backed driver layer.
  */
 #include "kernel.h"
+#include "../drivers/buttons.h"
 #include "../drivers/touch.h"
 #include "../drivers/uart.h"
 #if defined(__x86_64__)
@@ -145,10 +146,20 @@ static int inject_key(c16 ch, event_t *out) {
  */
 static int serial_keys(event_t *out, int max) {
     int n = 0, c;
-    static int esc;
+    static int esc, num;
     while (n < max && (c = uart_getc()) >= 0) {
         if (inject_key((c16)c, &out[n])) { if (out[n].type) n++; continue; }
         if (esc == 1) { esc = c == '[' ? 2 : 0; if (!esc) goto plain; continue; }
+        if (esc == 2 && c >= '0' && c <= '9') { esc = 3; num = c - '0'; continue; }
+        if (esc == 3) {
+            /* ESC [ n ~ : F9/F10/F11 stand in for the tablet's volume up/down and power buttons */
+            if (c >= '0' && c <= '9') { num = num * 10 + (c - '0'); continue; }
+            esc = 0;
+            u16 sc = c != '~' ? 0 : num == 20 ? SCAN_VOLUP : num == 21 ? SCAN_VOLDN : num == 23 ? SCAN_POWER
+                   : num == 5 ? SCAN_PGUP : num == 6 ? SCAN_PGDN : 0;
+            if (sc) out[n++] = (event_t){ .type = EV_KEY, .scan = sc };
+            continue;
+        }
         if (esc == 2) {
             esc = 0;
             u16 sc = c == 'A' ? SCAN_UP : c == 'B' ? SCAN_DOWN : c == 'C' ? SCAN_RIGHT : c == 'D' ? SCAN_LEFT : 0;
@@ -237,7 +248,10 @@ int hal_poll(event_t *out, int max) {
         }
     }
 
-    if (k.native) return n + serial_keys(out + n, max - n);
+    if (k.native) {
+        n += buttons_poll(out + n, max - n);
+        return n + serial_keys(out + n, max - n);
+    }
     EFI_INPUT_KEY key;
     while (n < max && !EFI_ERROR(k.st->ConIn->ReadKeyStroke(k.st->ConIn, &key))) {
         if (inject_key(key.UnicodeChar, &out[n])) {

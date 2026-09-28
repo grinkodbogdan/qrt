@@ -26,12 +26,14 @@ typedef struct app {
     int  (*tick)(u64 now_ms);                      /* called ~60 Hz while open; 1 = redraw */
 } app_t;
 
-extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life, app_lab, app_terminal;
+extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life, app_lab, app_terminal, app_wifi;
 
 /* shell services for apps */
 void shell_redraw(void);                /* redraw the whole screen */
 void shell_damage(rect_t r);            /* redraw only r (logical coords); call from event/tick */
 rect_t shell_app_area(void);            /* where the open app draws */
+void shell_keyboard(int show);          /* show/hide the on-screen keyboard (call when a text field is tapped) */
+const char *shell_net_status(void);     /* one line about the network for the home screen, or NULL */
 /* Wall-clock time of the frame being drawn.  draw() callbacks may run on any
  * CPU core, so they must use this instead of k_walltime() and must not
  * allocate memory, call firmware services or change app state. */

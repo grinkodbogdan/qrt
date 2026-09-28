@@ -14,10 +14,10 @@ PYTHON  ?= python3
 HOSTCC  ?= gcc
 
 SRC := src/kernel/kernel.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
-       src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c \
+       src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c \
        src/ui/gfx.c src/ui/shell.c src/ui/fontdata.c \
        src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c \
-       src/apps/settings.c src/apps/life.c src/apps/lab.c src/apps/terminal.c \
+       src/apps/settings.c src/apps/life.c src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/ui/osk.c \
        src/drivers/dwi2c.c src/drivers/i2chid.c src/drivers/hidparse.c src/drivers/touch.c
 
 CFLAGS := -std=c11 -O2 -ffreestanding -fno-stack-protector -fno-stack-check \

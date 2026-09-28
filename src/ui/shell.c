@@ -9,6 +9,7 @@
  */
 #include "shell.h"
 #include "../kernel/smp.h"
+#include "osk.h"
 
 ui_t ui;
 
@@ -18,7 +19,7 @@ const u32 accent_palette[N_ACCENTS] = {
 };
 const char *accent_names[N_ACCENTS] = { "Fuchsia", "Iris", "Lagoon", "Ember", "Sky", "Lime" };
 
-static const app_t *apps[] = { &app_clock, &app_sketch, &app_files, &app_system, &app_settings, &app_life, &app_lab, &app_terminal };
+static const app_t *apps[] = { &app_files, &app_terminal, &app_wifi, &app_sketch, &app_settings, &app_system, &app_clock, &app_life, &app_lab };
 #define N_APPS ((int)ARRAY_LEN(apps))
 
 typedef enum { VIEW_HOME, VIEW_APP } view_t;
@@ -29,11 +30,10 @@ static struct {
     view_t view;
     const app_t *app;
     int dirty;
-    int focus, pressed;           /* home grid */
     tap_t tap;
-    int ask_open;
+    int launcher_open, launch_pressed, dock_pressed, power_open, owner, keyboard_pending;
+    u32 running;                  /* bit i: apps[i] was opened */
     char query[48];
-    int ask_pressed;
     int cursor_x, cursor_y, cursor_on, cursor_dirty;
     rect_t dmg;          /* content that must be recomposed */
     rect_t pdmg;         /* extra area to push to the panel (cursor moves) */
@@ -297,58 +297,87 @@ static void draw_status(canvas_t *c, const EFI_TIME *t) {
     gfx_text(c, f, ui.W - pad - w, y, buf, ui.text2);
 }
 
-static rect_t ask_bar_rect(void) {
-    int w = MIN(ui.W - dp(40), dp(560)), h = dp(52);
-    return (rect_t){ (ui.W - w) / 2, ui.H - dp(28) - h, w, h };
-}
+/* ---- geometry ----------------------------------------------------------------
+ * A status bar across the top, the app dock down the right edge and the
+ * content area (home, launcher, apps) in between.  The on-screen keyboard,
+ * when shown, takes the bottom of the content area. */
+#define STATUS_H dp(32)
+static int dock_w(void) { return dp(76); }
+static rect_t dock_rect(void) { return (rect_t){ ui.W - dock_w(), STATUS_H, dock_w(), ui.H - STATUS_H }; }
+static rect_t content_rect(void) { return (rect_t){ 0, STATUS_H, ui.W - dock_w(), ui.H - STATUS_H }; }
+/* content minus the keyboard */
+static rect_t work_rect(void) { rect_t c = content_rect(); c.h -= osk_height(); return c; }
 
-static void draw_ask_bar(canvas_t *c) {
-    rect_t r = ask_bar_rect();
-    gfx_shadow(c, r, r.h / 2, dp(18), RGBA(0, 0, 0, 90));
-    gfx_rrect(c, r, r.h / 2, RGBA(0xf5, 0xf3, 0xfa, 235));
-    float cx = r.x + r.h / 2.0f + dp(6), cy = r.y + r.h / 2.0f;
-    gfx_ring(c, cx, cy, dp(11), dp(3), ui.accent);
-    gfx_circle(c, cx, cy, dp(4), ui.accent);
-    gfx_text(c, ui.body, r.x + r.h + dp(8), r.y + (r.h - ui.body->line) / 2, "Ask for anything", RGBA(0x20, 0x1a, 0x30, 150));
-}
+/* ---- dock ------------------------------------------------------------------- */
+static const app_t *const pinned[] = { &app_files, &app_terminal, &app_wifi, &app_sketch, &app_settings };
 
-/* ---- home ----------------------------------------------------------------- */
-static void grid_geometry(rect_t *area, int *cols, int *cw, int *ch, int *gap) {
-    int pad = dp(20);
-    *gap = dp(14);
-    *cols = ui.landscape ? 3 : 2;
-    int top = ui.landscape ? dp(40) + ui.huge->line + dp(70) : dp(64) + ui.huge->line + dp(96);
-    rect_t ask = ask_bar_rect();
-    int avail_h = ask.y - dp(28) - top;
-    int rows = (N_APPS + *cols - 1) / *cols;
-    *cw = (ui.W - 2 * pad - (*cols - 1) * *gap) / *cols;
-    *ch = MIN(dp(150), (avail_h - (rows - 1) * *gap) / rows);
-    /* in landscape, the grid sits in the right-hand column beside the clock */
-    area->x = pad; area->y = top;
-    area->w = ui.W - 2 * pad;
-    area->h = rows * *ch + (rows - 1) * *gap;
-    if (ui.landscape) {
-        area->x = ui.W / 2 - dp(10);
-        area->w = ui.W - area->x - pad;
-        *cols = 2;
-        rows = (N_APPS + 1) / 2;
-        area->y = dp(56);
-        *cw = (area->w - *gap) / 2;
-        *ch = MIN(dp(150), (ask.y - dp(28) - area->y - (rows - 1) * *gap) / rows);
-        area->h = rows * *ch + (rows - 1) * *gap;
+static int app_index(const app_t *a) { for (int i = 0; i < N_APPS; i++) if (apps[i] == a) return i; return -1; }
+
+/* pinned apps first, then apps that were opened and are not pinned */
+static int dock_items(int *out) {
+    int n = 0;
+    for (usize i = 0; i < ARRAY_LEN(pinned); i++) { int ix = app_index(pinned[i]); if (ix >= 0) out[n++] = ix; }
+    for (int i = 0; i < N_APPS; i++) {
+        if (!(sh.running & (1u << i))) continue;
+        int dup = 0;
+        for (int j = 0; j < n; j++) dup |= out[j] == i;
+        if (!dup) out[n++] = i;
     }
+    return n;
 }
 
-static rect_t card_rect(int i) {
-    rect_t area; int cols, cw, ch, gap;
-    grid_geometry(&area, &cols, &cw, &ch, &gap);
-    return (rect_t){ area.x + (i % cols) * (cw + gap), area.y + (i / cols) * (ch + gap), cw, ch };
+/* cells shrink when many apps are open, so every one keeps a place */
+static int dock_cell(void) {
+    int items[16], n = dock_items(items);
+    int avail = dock_rect().h - dp(20) - dp(60) - dp(12);        /* minus the launcher button */
+    return CLAMP(avail / MAX(1, n) - dp(4), dp(40), dp(60));
+}
+static rect_t dock_slot(int i) {
+    rect_t d = dock_rect();
+    int c = dock_cell();
+    return (rect_t){ d.x + (d.w - c) / 2, d.y + dp(10) + i * (c + dp(4)), c, c };
+}
+static rect_t dock_launcher_rect(void) {
+    rect_t d = dock_rect();
+    int c = dp(60);
+    return (rect_t){ d.x + (d.w - c) / 2, d.y + d.h - dp(10) - c, c, c };
 }
 
+static void app_icon(canvas_t *c, const app_t *a, float cx, float cy, float r) {
+    gfx_circle(c, cx, cy, r, a->color);
+    a->icon(c, cx, cy, r * 0.62f, RGB(255, 255, 255));
+}
+
+static void draw_dock(canvas_t *c) {
+    rect_t d = dock_rect();
+    gfx_fill(c, d, RGBA(8, 6, 18, 170));
+    gfx_fill(c, (rect_t){ d.x, d.y, 1, d.h }, ui.stroke);
+    int items[16], n = dock_items(items);
+    rect_t lr = dock_launcher_rect();
+    for (int i = 0; i < n; i++) {
+        rect_t r = dock_slot(i);
+        if (r.y + r.h > lr.y - dp(4)) break;               /* no room left */
+        const app_t *a = apps[items[i]];
+        int active = sh.view == VIEW_APP && sh.app == a && !sh.launcher_open;
+        if (active || sh.dock_pressed == i) gfx_rrect(c, r, dp(14), RGBA(255, 255, 255, active ? 42 : 28));
+        app_icon(c, a, r.x + r.w / 2.0f, r.y + r.h / 2.0f, r.w * 0.35f);
+        if (sh.running & (1u << items[i]))
+            gfx_circle(c, d.x + d.w - dp(6), r.y + r.h / 2.0f, dp(2.5f), active ? ui.accent : ui.text);
+    }
+    /* "show applications": a 3x3 grid of dots */
+    if (sh.launcher_open || sh.dock_pressed == 99) gfx_rrect(c, lr, dp(14), RGBA(255, 255, 255, sh.launcher_open ? 42 : 28));
+    float cx = lr.x + lr.w / 2.0f, cy = lr.y + lr.h / 2.0f, g = dp(8);
+    for (int yy = -1; yy <= 1; yy++)
+        for (int xx = -1; xx <= 1; xx++) gfx_circle(c, cx + xx * g, cy + yy * g, dp(2.6f), ui.text);
+}
+
+/* ---- home ------------------------------------------------------------------- */
 static void draw_home(canvas_t *c, const EFI_TIME *t) {
-    int pad = dp(24);
+    rect_t area = content_rect();
+    int pad = dp(28);
     char buf[64];
-    int y = ui.landscape ? dp(56) : dp(64);
+    int y = area.y + (ui.landscape ? dp(28) : dp(48));
+    int colw = area.w - 2 * pad;
 
     clock_text(buf, sizeof buf, t);
     gfx_text(c, ui.huge, pad - dp(4), y, buf, ui.text);
@@ -358,121 +387,130 @@ static void draw_home(canvas_t *c, const EFI_TIME *t) {
     y += ui.title->line + dp(6);
     const char *greet = t->Hour < 5 ? "Up late" : t->Hour < 12 ? "Good morning" : t->Hour < 18 ? "Good afternoon" : "Good evening";
     fmt(buf, sizeof buf, k.native ? "%s. Running on the Tessera kernel." : "%s. Everything runs on your firmware.", greet);
-    gfx_text_fit(c, ui.body, pad, y, (ui.landscape ? ui.W / 2 - dp(40) : ui.W - 2 * pad), buf, ui.text2);
+    gfx_text_fit(c, ui.body, pad, y, colw, buf, ui.text2);
+    y += ui.body->line + dp(24);
 
-    {
-        /* hardware summary: under the greeting in landscape, under the grid in portrait */
-        rect_t ga; int gc, gw, gh, gg;
-        grid_geometry(&ga, &gc, &gw, &gh, &gg);
-        int yy = ui.landscape ? y + ui.body->line + dp(28) : ga.y + ga.h + dp(24);
-        char ram[24], line[96];
-        fmt_bytes(ram, sizeof ram, k.ram_bytes);
-        fmt(line, sizeof line, "%s  \xc2\xb7  %s RAM", k.cpu, ram);
-        int colw = ui.landscape ? ui.W / 2 - dp(40) : ui.W - 2 * pad;
-        gfx_text_fit(c, ui.small, pad, yy, colw, line, ui.text3);
-        fmt(line, sizeof line, "%d touch  \xc2\xb7  %d pointer  \xc2\xb7  %d volume%s",
-            k.n_abs, k.n_rel, k.n_vol, k.n_vol == 1 ? "" : "s");
-        gfx_text(c, ui.small, pad, yy + ui.small->line, line, ui.text3);
-    }
+    char ram[24], line[96];
+    fmt_bytes(ram, sizeof ram, k.ram_bytes);
+    fmt(line, sizeof line, "%s  \xc2\xb7  %s RAM", k.cpu, ram);
+    gfx_text_fit(c, ui.small, pad, y, colw, line, ui.text3);
+    const char *net = shell_net_status();
+    if (net) gfx_text_fit(c, ui.small, pad, y + ui.small->line, colw, net, ui.text3);
 
-    rect_t area; int cols, cw, ch, gap;
-    grid_geometry(&area, &cols, &cw, &ch, &gap);
-    if (!ui.landscape) ui_section(c, area.x + dp(4), area.y - ui.small->line - dp(8), "STORIES");
-    for (int i = 0; i < N_APPS; i++) {
-        const app_t *a = apps[i];
-        rect_t r = card_rect(i);
-        int rad = dp(22);
-        ui_card(c, r, rad, sh.pressed == i);
-        if (sh.focus == i) gfx_rrect_outline(c, r, rad, dp(2), ui.accent);
-        float ir = (float)MIN(dp(22), r.h / 5);
-        float icx = r.x + dp(18) + ir, icy = r.y + dp(18) + ir;
-        gfx_circle(c, icx, icy, ir, a->color);
-        a->icon(c, icx, icy, ir * 0.62f, RGB(255, 255, 255));
-        int ty = r.y + r.h - dp(16) - ui.small->line - ui.label->line;
-        gfx_text_fit(c, ui.label, r.x + dp(18), ty, r.w - dp(30), a->name, ui.text);
-        gfx_text_fit(c, ui.small, r.x + dp(18), ty + ui.label->line, r.w - dp(30), a->blurb, ui.text2);
-    }
-    draw_ask_bar(c);
+    const char *hint = "Your apps are in the dock on the right; the dots at its foot show them all.";
+    gfx_text_fit(c, ui.small, pad, area.y + area.h - dp(24) - ui.small->line, colw, hint, ui.text3);
 }
 
-/* ---- ask (launcher + command line) ---------------------------------------- */
+/* ---- launcher: every app, plus search over apps and actions ------------------ */
 typedef struct { const char *title, *sub; int app; int action; } suggestion_t;
 enum { ACT_NONE, ACT_SHUTDOWN, ACT_REBOOT, ACT_FIRMWARE, ACT_ROTATE, ACT_ACCENT,
-       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET, ACT_BENCH, ACT_SMP };
+       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET, ACT_BENCH, ACT_SMP, ACT_KEYBOARD };
 
-static int suggestions(suggestion_t *out, int max) {
-    static const suggestion_t actions[] = {
-        { "Rotate screen", "Turn the canvas 90\xc2\xb0", -1, ACT_ROTATE },
-        { "Next accent colour", "Cycle the theme", -1, ACT_ACCENT },
-        { "Restart", "Cold reset through UEFI", -1, ACT_REBOOT },
-        { "Shut down", "Power off through UEFI", -1, ACT_SHUTDOWN },
-        { "Firmware setup", "Reboot into the BIOS/UEFI menu", -1, ACT_FIRMWARE },
-        { "Graphics benchmark", "Time full and partial redraws", -1, ACT_BENCH },
-        { "Multicore rendering on/off", "Draw with the other CPU cores", -1, ACT_SMP },
-        { "Touch: swap axes", "Fix a touchscreen mounted sideways", -1, ACT_TOUCH_SWAP },
-        { "Touch: flip X", "Mirror touch left-right", -1, ACT_TOUCH_FLIPX },
-        { "Touch: flip Y", "Mirror touch top-bottom", -1, ACT_TOUCH_FLIPY },
-        { "Touch: reset", "Use the firmware's mapping as-is", -1, ACT_TOUCH_RESET },
-    };
+static const suggestion_t actions[] = {
+    { "Rotate screen", "Turn the canvas 90\xc2\xb0", -1, ACT_ROTATE },
+    { "Next accent colour", "Cycle the theme", -1, ACT_ACCENT },
+    { "Restart", "Cold reset through UEFI", -1, ACT_REBOOT },
+    { "Shut down", "Power off through UEFI", -1, ACT_SHUTDOWN },
+    { "Firmware setup", "Reboot into the BIOS/UEFI menu", -1, ACT_FIRMWARE },
+    { "Graphics benchmark", "Time full and partial redraws (bench)", -1, ACT_BENCH },
+    { "Multicore rendering on/off", "Draw with the other CPU cores", -1, ACT_SMP },
+    { "On-screen keyboard", "Show or hide the keyboard", -1, ACT_KEYBOARD },
+    { "Touch: swap axes", "Fix a touchscreen mounted sideways", -1, ACT_TOUCH_SWAP },
+    { "Touch: flip X", "Mirror touch left-right", -1, ACT_TOUCH_FLIPX },
+    { "Touch: flip Y", "Mirror touch top-bottom", -1, ACT_TOUCH_FLIPY },
+    { "Touch: reset", "Use the firmware's mapping as-is", -1, ACT_TOUCH_RESET },
+};
+
+static int match_apps(int *out) {
     int n = 0;
-    for (int i = 0; i < N_APPS && n < max; i++)
-        if (str_icontains(apps[i]->name, sh.query) || str_icontains(apps[i]->blurb, sh.query))
-            out[n++] = (suggestion_t){ apps[i]->name, apps[i]->blurb, i, ACT_NONE };
-    for (int i = 0; i < (int)ARRAY_LEN(actions) && n < max; i++)
-        if (str_icontains(actions[i].title, sh.query) || str_icontains(actions[i].sub, sh.query))
-            out[n++] = actions[i];
+    for (int i = 0; i < N_APPS; i++)
+        if (!sh.query[0] || str_icontains(apps[i]->name, sh.query) || str_icontains(apps[i]->blurb, sh.query)) out[n++] = i;
+    return n;
+}
+static int match_actions(int *out) {
+    int n = 0;
+    if (!sh.query[0]) return 0;
+    for (int i = 0; i < (int)ARRAY_LEN(actions); i++)
+        if (str_icontains(actions[i].title, sh.query) || str_icontains(actions[i].sub, sh.query)) out[n++] = i;
     return n;
 }
 
-static rect_t ask_panel_rect(int n) {
-    rect_t bar = ask_bar_rect();
-    int row = dp(56);
-    int h = dp(76) + n * row + dp(12);
-    h = MIN(h, ui.H - dp(80));
-    return (rect_t){ bar.x, bar.y + bar.h - h, bar.w, h };
+static rect_t search_rect(void) {
+    rect_t a = work_rect();
+    int w = MIN(a.w - dp(48), dp(520));
+    return (rect_t){ a.x + (a.w - w) / 2, a.y + dp(20), w, dp(48) };
+}
+static int grid_cols(void) { rect_t a = work_rect(); return MAX(1, MIN(6, (a.w - dp(32)) / dp(116))); }
+static rect_t grid_cell(int i) {
+    rect_t a = work_rect(), s = search_rect();
+    int cols = grid_cols(), cw = dp(116), ch = dp(112);
+    int x0 = a.x + (a.w - cols * cw) / 2;
+    return (rect_t){ x0 + (i % cols) * cw, s.y + s.h + dp(40) + (i / cols) * ch, cw, ch };
+}
+static rect_t action_row(int napps, int i) {
+    rect_t s = search_rect();
+    int rows = (napps + grid_cols() - 1) / grid_cols();
+    int y0 = napps ? grid_cell((rows - 1) * grid_cols()).y + dp(112) + dp(28) : s.y + s.h + dp(40);
+    return (rect_t){ s.x, y0 + i * dp(56), s.w, dp(52) };
 }
 
-static rect_t ask_row_rect(rect_t panel, int i) {
-    return (rect_t){ panel.x + dp(10), panel.y + dp(70) + i * dp(56), panel.w - dp(20), dp(52) };
-}
-
-static void draw_ask(canvas_t *c) {
-    suggestion_t s[16];
-    int n = suggestions(s, 16);
-    gfx_fill(c, (rect_t){ 0, 0, ui.W, ui.H }, RGBA(0, 0, 0, 120));
-    rect_t p = ask_panel_rect(n);
-    gfx_shadow(c, p, dp(26), dp(24), RGBA(0, 0, 0, 120));
-    gfx_rrect(c, p, dp(26), RGB(0xf5, 0xf3, 0xfa));
-
-    rect_t field = { p.x + dp(12), p.y + dp(12), p.w - dp(24), dp(48) };
-    gfx_rrect(c, field, field.h / 2, RGB(0xe8, 0xe4, 0xf0));
-    float cx = field.x + dp(26), cy = field.y + field.h / 2.0f;
-    gfx_ring(c, cx, cy, dp(10), dp(3), ui.accent);
-    gfx_circle(c, cx, cy, dp(4), ui.accent);
-    int tx = field.x + dp(48), ty = field.y + (field.h - ui.body->line) / 2;
+static void draw_launcher(canvas_t *c) {
+    rect_t a = content_rect();
+    gfx_fill(c, a, RGBA(6, 4, 14, 215));
+    rect_t f = search_rect();
+    gfx_rrect(c, f, f.h / 2, RGBA(0xf5, 0xf3, 0xfa, 235));
+    float cx = f.x + dp(26), cy = f.y + f.h / 2.0f;
+    gfx_ring(c, cx - dp(2), cy - dp(2), dp(8), dp(2.4f), ui.accent);
+    gfx_line(c, cx + dp(4), cy + dp(4), cx + dp(9), cy + dp(9), dp(2.6f), ui.accent);
+    int tx = f.x + dp(48), ty = f.y + (f.h - ui.body->line) / 2;
     int end = sh.query[0] ? gfx_text(c, ui.body, tx, ty, sh.query, RGB(0x20, 0x1a, 0x30))
-                          : (gfx_text(c, ui.body, tx, ty, "Type, or tap a suggestion", RGBA(0x20, 0x1a, 0x30, 120)), tx);
+                          : (gfx_text(c, ui.body, tx, ty, "Search apps and actions", RGBA(0x20, 0x1a, 0x30, 120)), tx);
     gfx_fill(c, (rect_t){ end + 1, ty + dp(2), MAX(1, dp(2)), ui.body->line - dp(4) }, ui.accent);
 
-    for (int i = 0; i < n; i++) {
-        rect_t r = ask_row_rect(p, i);
-        if (r.y + r.h > p.y + p.h) break;
-        if (sh.ask_pressed == i || (i == 0 && sh.query[0])) gfx_rrect(c, r, dp(14), RGBA(0x7c, 0x6c, 0xff, 30));
-        u32 dot = s[i].app >= 0 ? apps[s[i].app]->color : RGB(0x55, 0x50, 0x66);
-        float icx = r.x + dp(24), icy = r.y + r.h / 2.0f;
-        gfx_circle(c, icx, icy, dp(15), dot);
-        if (s[i].app >= 0) apps[s[i].app]->icon(c, icx, icy, dp(9), RGB(255, 255, 255));
-        else gfx_ring(c, icx, icy, dp(6), dp(2), RGB(255, 255, 255));
-        gfx_text(c, ui.label, r.x + dp(50), r.y + dp(6), s[i].title, RGB(0x1a, 0x16, 0x28));
-        gfx_text_fit(c, ui.small, r.x + dp(50), r.y + dp(6) + ui.label->line, r.w - dp(60), s[i].sub, RGBA(0x1a, 0x16, 0x28, 150));
+    int ia[32], na = match_apps(ia), ix[32], nx = match_actions(ix);
+    rect_t w = work_rect();
+    gfx_clip(c, w);
+    ui_section(c, grid_cell(0).x + dp(12), f.y + f.h + dp(14), sh.query[0] ? "APPS" : "ALL APPS");
+    for (int i = 0; i < na; i++) {
+        rect_t r = grid_cell(i);
+        if (sh.launch_pressed == i) gfx_rrect(c, (rect_t){ r.x + dp(6), r.y, r.w - dp(12), r.h - dp(6) }, dp(18), RGBA(255, 255, 255, 30));
+        const app_t *ap = apps[ia[i]];
+        app_icon(c, ap, r.x + r.w / 2.0f, r.y + dp(40), dp(29));
+        if (sh.query[0] && i == 0) gfx_ring(c, r.x + r.w / 2.0f, r.y + dp(40), dp(33), dp(2), ui.accent);
+        gfx_text_center(c, ui.label, (rect_t){ r.x + dp(4), r.y + dp(76), r.w - dp(8), ui.label->line }, ap->name, ui.text);
     }
+    if (nx) ui_section(c, action_row(na, 0).x + dp(12), action_row(na, 0).y - ui.small->line - dp(6), "ACTIONS");
+    for (int i = 0; i < nx; i++) {
+        rect_t r = action_row(na, i);
+        gfx_rrect(c, r, dp(14), sh.launch_pressed == 100 + i || (!na && i == 0) ? RGBA(255, 255, 255, 40) : RGBA(255, 255, 255, 16));
+        gfx_circle(c, r.x + dp(24), r.y + r.h / 2.0f, dp(14), RGB(0x55, 0x50, 0x66));
+        gfx_ring(c, r.x + dp(24), r.y + r.h / 2.0f, dp(6), dp(2), RGB(255, 255, 255));
+        gfx_text(c, ui.label, r.x + dp(48), r.y + dp(6), actions[ix[i]].title, ui.text);
+        gfx_text_fit(c, ui.small, r.x + dp(48), r.y + dp(6) + ui.label->line, r.w - dp(56), actions[ix[i]].sub, ui.text2);
+    }
+    gfx_unclip(c);
 }
 
-/* ---- app chrome ------------------------------------------------------------- */
-static rect_t app_area(void) { return (rect_t){ 0, dp(96), ui.W, ui.H - dp(96) - dp(28) }; }
+/* ---- power menu (hardware power button) ---------------------------------------- */
+static const char *power_items[] = { "Restart", "Shut down", "Firmware setup", "Cancel" };
+static rect_t power_panel(void) {
+    int w = MIN(ui.W - dp(40), dp(360)), h = dp(76) + 4 * dp(56);
+    return (rect_t){ (ui.W - w) / 2, (ui.H - h) / 2, w, h };
+}
+static rect_t power_row(int i) { rect_t p = power_panel(); return (rect_t){ p.x + dp(14), p.y + dp(64) + i * dp(56), p.w - dp(28), dp(50) }; }
+static void draw_power(canvas_t *c) {
+    gfx_fill(c, full_rect(), RGBA(0, 0, 0, 150));
+    rect_t p = power_panel();
+    ui_card(c, p, dp(24), 1);
+    gfx_text(c, ui.title, p.x + dp(20), p.y + dp(20), "Power", ui.text);
+    for (int i = 0; i < 4; i++)
+        ui_button(c, power_row(i), power_items[i], i == 1 ? RGB(0xe5, 0x48, 0x4d) : RGBA(255, 255, 255, 30), ui.text);
+}
+
+/* ---- app chrome ----------------------------------------------------------------- */
+static rect_t app_area(void) { rect_t w = work_rect(); return (rect_t){ w.x, dp(96), w.w, w.y + w.h - dp(96) - dp(10) }; }
 rect_t shell_app_area(void) { return app_area(); }
 static rect_t back_rect(void) { return (rect_t){ dp(14), dp(40), dp(48), dp(48) }; }
-static rect_t home_zone(void) { return (rect_t){ 0, ui.H - dp(28), ui.W, dp(28) }; }
 
 static void draw_app(canvas_t *c) {
     rect_t b = back_rect();
@@ -488,10 +526,6 @@ static void draw_app(canvas_t *c) {
     gfx_clip(c, area);
     sh.app->draw(c, area);
     gfx_unclip(c);
-
-    rect_t hz = home_zone();
-    int hw = dp(120);
-    gfx_rrect(c, (rect_t){ (ui.W - hw) / 2, hz.y + hz.h / 2 - dp(2), hw, dp(5) }, dp(3), RGBA(255, 255, 255, 170));
 }
 
 /* ---- compose ---------------------------------------------------------------- */
@@ -509,13 +543,16 @@ static void compose_rect(rect_t d) {
     canvas_t c = sh.scene;
     gfx_limit(&c, d);
     d = c.limit;
-    const canvas_t *wall = sh.view == VIEW_APP ? &sh.wall_dim : &sh.wall;
+    const canvas_t *wall = sh.view == VIEW_APP || sh.launcher_open ? &sh.wall_dim : &sh.wall;
     for (int y = d.y; y < d.y + d.h; y++)
         memcpy(c.px + (usize)y * c.stride + d.x, wall->px + (usize)y * wall->stride + d.x, (usize)d.w * 4);
     draw_status(&c, &frame_time);
     if (sh.view == VIEW_HOME) draw_home(&c, &frame_time);
     else draw_app(&c);
-    if (sh.ask_open) draw_ask(&c);
+    if (sh.launcher_open) draw_launcher(&c);
+    osk_draw(&c, content_rect());
+    draw_dock(&c);
+    if (sh.power_open) draw_power(&c);
 }
 
 static rect_t compose_area;
@@ -543,8 +580,10 @@ static void compose(rect_t d) {
 static void open_app(int i) {
     sh.app = apps[i];
     sh.view = VIEW_APP;
-    sh.ask_open = 0;
-    sh.pressed = -1;
+    sh.launcher_open = 0;
+    sh.query[0] = 0;
+    sh.running |= 1u << i;
+    osk_hide();
     if (sh.app->open) sh.app->open();
     sh.dirty = 1;
 }
@@ -552,6 +591,21 @@ static void open_app(int i) {
 void shell_go_home(void) {
     sh.view = VIEW_HOME;
     sh.app = NULL;
+    sh.launcher_open = 0;
+    osk_hide();
+    sh.dirty = 1;
+}
+
+void shell_keyboard(int show) {
+    if (show && !osk_visible()) { osk_show(); sh.dirty = 1; }
+    else if (!show && osk_visible()) { osk_hide(); sh.dirty = 1; }
+}
+
+static void open_launcher(int on) {
+    sh.launcher_open = on;
+    sh.query[0] = 0;
+    sh.launch_pressed = -1;
+    if (!on) osk_hide();
     sh.dirty = 1;
 }
 
@@ -568,94 +622,142 @@ static void run_action(int act) {
     case ACT_TOUCH_RESET: hal_set_touch_map(0); break;
     case ACT_BENCH: sh.bench_pending = 1; break;
     case ACT_SMP: smp_set_enabled(!smp_enabled()); break;
+    case ACT_KEYBOARD: sh.keyboard_pending = 1; break;
     }
 }
 
-static void activate(const suggestion_t *s) {
-    sh.ask_open = 0;
-    sh.query[0] = 0;
-    if (s->app >= 0) open_app(s->app);
-    else run_action(s->action);
-    sh.dirty = 1;
+/* Enter in the launcher: the first app, else the first action. */
+static void launcher_activate_first(void) {
+    int ia[32], na = match_apps(ia), ix[32], nx = match_actions(ix);
+    if (!strcmp(sh.query, "bench")) { open_launcher(0); run_action(ACT_BENCH); return; }
+    if (na) { open_app(ia[0]); return; }
+    if (nx) { int act = actions[ix[0]].action; open_launcher(0); run_action(act); }
 }
 
-static void ask_key(const event_t *e) {
+static void launcher_key(const event_t *e) {
     usize n = strlen(sh.query);
-    suggestion_t s[16];
-    if (e->scan == SCAN_ESC) { sh.ask_open = 0; sh.query[0] = 0; }
-    else if (e->ch == '\r' || e->ch == '\n') { if (suggestions(s, 16) > 0) activate(&s[0]); }
-    else if (e->ch == 8) { if (n) sh.query[n - 1] = 0; else sh.ask_open = 0; }
+    if (e->scan == SCAN_ESC) open_launcher(0);
+    else if (e->ch == '\r' || e->ch == '\n') launcher_activate_first();
+    else if (e->ch == 8) { if (n) sh.query[n - 1] = 0; }
     else if (e->ch >= 32 && e->ch < 127 && n + 1 < sizeof sh.query) { sh.query[n] = (char)e->ch; sh.query[n + 1] = 0; }
     sh.dirty = 1;
 }
 
-static void ask_pointer(const event_t *e) {
-    suggestion_t s[16];
-    int n = suggestions(s, 16);
-    rect_t p = ask_panel_rect(n);
+static void launcher_pointer(const event_t *e) {
+    int ia[32], na = match_apps(ia), ix[32], nx = match_actions(ix);
     int hit = -1;
-    for (int i = 0; i < n; i++) {
-        rect_t r = ask_row_rect(p, i);
-        if (r.y + r.h <= p.y + p.h && in_rect(r, e->x, e->y)) hit = i;
+    rect_t w = work_rect();
+    for (int i = 0; i < na; i++) if (in_rect(grid_cell(i), e->x, e->y) && in_rect(w, e->x, e->y)) hit = i;
+    for (int i = 0; i < nx; i++) if (in_rect(action_row(na, i), e->x, e->y) && in_rect(w, e->x, e->y)) hit = 100 + i;
+    if (e->type == EV_DOWN) { sh.launch_pressed = hit; sh.dirty = 1; }
+    if (tap_track(&sh.tap, e, dp(12))) {
+        if (in_rect(search_rect(), e->x, e->y)) shell_keyboard(1);
+        else if (hit >= 0 && hit == sh.launch_pressed) {
+            if (hit < 100) open_app(ia[hit]);
+            else { int act = actions[ix[hit - 100]].action; open_launcher(0); run_action(act); }
+        } else if (hit < 0) open_launcher(0);
     }
-    if (e->type == EV_DOWN) { sh.ask_pressed = hit; sh.dirty = 1; }
-    if (tap_track(&sh.tap, e, dp(10))) {
-        if (hit >= 0 && hit == sh.ask_pressed) activate(&s[hit]);
-        else if (!in_rect(p, e->x, e->y)) { sh.ask_open = 0; sh.query[0] = 0; }
-        sh.ask_pressed = -1;
-        sh.dirty = 1;
-    }
-    if (e->type == EV_UP) { sh.ask_pressed = -1; sh.dirty = 1; }
+    if (e->type == EV_UP) { sh.launch_pressed = -1; sh.dirty = 1; }
 }
 
-static void home_pointer(const event_t *e) {
-    int hit = -1;
-    for (int i = 0; i < N_APPS; i++) if (in_rect(card_rect(i), e->x, e->y)) hit = i;
-    if (e->type == EV_DOWN) { sh.pressed = hit; sh.focus = -1; sh.dirty = 1; }
-    if (e->type == EV_MOVE && sh.tap.down && sh.pressed != hit && sh.pressed >= 0) { sh.pressed = -1; sh.dirty = 1; }
-    int tapped = tap_track(&sh.tap, e, dp(12));
-    if (tapped) {
-        if (hit >= 0 && hit == sh.pressed) open_app(hit);
-        else if (in_rect(ask_bar_rect(), e->x, e->y)) { sh.ask_open = 1; sh.ask_pressed = -1; }
+static void dock_pointer(const event_t *e) {
+    int items[16], n = dock_items(items), hit = -1;
+    for (int i = 0; i < n; i++) if (in_rect(dock_slot(i), e->x, e->y)) hit = i;
+    if (in_rect(dock_launcher_rect(), e->x, e->y)) hit = 99;
+    if (e->type == EV_DOWN) { sh.dock_pressed = hit; shell_damage(dock_rect()); }
+    if (tap_track(&sh.tap, e, dp(12))) {
+        if (hit == 99 && sh.dock_pressed == 99) open_launcher(!sh.launcher_open);
+        else if (hit >= 0 && hit == sh.dock_pressed) {
+            const app_t *a = apps[items[hit]];
+            /* like Ubuntu: tapping the app in front minimises it */
+            if (sh.view == VIEW_APP && sh.app == a && !sh.launcher_open) shell_go_home();
+            else open_app(items[hit]);
+        }
     }
-    if (e->type == EV_UP) { sh.pressed = -1; sh.dirty = 1; }
+    if (e->type == EV_UP) { sh.dock_pressed = -1; shell_damage(dock_rect()); }
 }
 
-static void home_key(const event_t *e) {
-    int cols = 2;
-    if (e->ch >= 32 && e->ch < 127) { sh.ask_open = 1; sh.query[0] = 0; ask_key(e); return; }
-    if (sh.focus < 0) { sh.focus = 0; sh.dirty = 1; return; }
-    switch (e->scan) {
-    case SCAN_RIGHT: sh.focus = (sh.focus + 1) % N_APPS; break;
-    case SCAN_LEFT:  sh.focus = (sh.focus + N_APPS - 1) % N_APPS; break;
-    case SCAN_DOWN:  sh.focus = MIN(sh.focus + cols, N_APPS - 1); break;
-    case SCAN_UP:    sh.focus = MAX(sh.focus - cols, 0); break;
-    }
-    if (e->ch == '\r' || e->ch == ' ') open_app(sh.focus);
+static void power_pointer(const event_t *e) {
+    if (!tap_track(&sh.tap, e, dp(12))) return;
+    int hit = -1;
+    for (int i = 0; i < 4; i++) if (in_rect(power_row(i), e->x, e->y)) hit = i;
+    if (hit == 0) hal_reboot();
+    else if (hit == 1) hal_shutdown();
+    else if (hit == 2) hal_reboot_to_firmware();
+    sh.power_open = 0;
     sh.dirty = 1;
 }
 
-static void dispatch(event_t e) {
-    if (e.type == EV_DOWN || e.type == EV_MOVE || e.type == EV_UP || e.type == EV_SCROLL) {
-        int lx, ly;
-        to_logical(e.x, e.y, &lx, &ly);
-        e.x = lx; e.y = ly;
-        if (e.from_mouse) { sh.cursor_x = lx; sh.cursor_y = ly; sh.cursor_on = 1; sh.cursor_dirty = 1; }
-        else if (sh.cursor_on) { sh.cursor_on = 0; sh.cursor_dirty = 1; }
+/* Hardware buttons: power opens the power menu, volume up the launcher,
+ * volume down goes back (keyboard, launcher, then the open app). */
+static int hardware_key(const event_t *e) {
+    switch (e->scan) {
+    case SCAN_POWER: sh.power_open = !sh.power_open; sh.dirty = 1; return 1;
+    case SCAN_VOLUP: case SCAN_HOMEBTN: open_launcher(!sh.launcher_open); return 1;
+    case SCAN_VOLDN:
+        if (sh.power_open) sh.power_open = 0;
+        else if (osk_visible()) osk_hide();
+        else if (sh.launcher_open) open_launcher(0);
+        else if (sh.view == VIEW_APP) shell_go_home();
+        sh.dirty = 1;
+        return 1;
     }
-    if (sh.ask_open) {
-        if (e.type == EV_KEY) ask_key(&e); else ask_pointer(&e);
-        return;
-    }
+    return 0;
+}
+
+static void key_event(const event_t *e) {
+    if (hardware_key(e)) return;
+    if (sh.power_open) { if (e->scan == SCAN_ESC) { sh.power_open = 0; sh.dirty = 1; } return; }
+    if (sh.launcher_open) { launcher_key(e); return; }
     if (sh.view == VIEW_HOME) {
-        if (e.type == EV_KEY) home_key(&e); else home_pointer(&e);
+        /* typing on the home screen searches */
+        if (e->ch >= 32 && e->ch < 127) { open_launcher(1); launcher_key(e); }
         return;
     }
-    /* app view: chrome first, then the app */
-    if (e.type == EV_KEY && e.scan == SCAN_ESC) { shell_go_home(); return; }
-    if (e.type == EV_DOWN && (in_rect(back_rect(), e.x, e.y) || in_rect(home_zone(), e.x, e.y))) {
+    if (e->scan == SCAN_ESC) { shell_go_home(); return; }
+    sh.app_damaged = 0;
+    if (sh.app->event && sh.app->event(e, app_area()) && !sh.app_damaged) shell_damage(app_area());
+}
+
+enum { OWN_NONE, OWN_OSK, OWN_DOCK, OWN_MAIN, OWN_POWER };
+
+static void dispatch(event_t e) {
+    if (e.type == EV_KEY) { key_event(&e); return; }
+    int lx, ly;
+    to_logical(e.x, e.y, &lx, &ly);
+    e.x = lx; e.y = ly;
+    if (e.from_mouse) { sh.cursor_x = lx; sh.cursor_y = ly; sh.cursor_on = 1; sh.cursor_dirty = 1; }
+    else if (sh.cursor_on) { sh.cursor_on = 0; sh.cursor_dirty = 1; }
+
+    /* a touch belongs to whatever it started on until it lifts */
+    if (e.type == EV_DOWN || e.type == EV_SCROLL) {
+        if (sh.power_open) sh.owner = OWN_POWER;
+        else if (osk_visible() && in_rect(osk_rect(content_rect()), e.x, e.y)) sh.owner = OWN_OSK;
+        else if (in_rect(dock_rect(), e.x, e.y)) sh.owner = OWN_DOCK;
+        else sh.owner = OWN_MAIN;
+    }
+    int owner = sh.owner;
+    if (e.type == EV_UP || e.type == EV_SCROLL) sh.owner = OWN_NONE;
+
+    switch (owner) {
+    case OWN_POWER: power_pointer(&e); return;
+    case OWN_OSK: {
+        event_t keys[4];
+        int n = osk_pointer(&e, content_rect(), keys, 4);
+        shell_damage(osk_rect(content_rect()));
+        if (!osk_visible()) sh.dirty = 1;                  /* hidden: the app gets its space back */
+        for (int i = 0; i < n; i++) key_event(&keys[i]);
+        return;
+    }
+    case OWN_DOCK: dock_pointer(&e); return;
+    case OWN_MAIN: break;
+    default: return;
+    }
+    if (sh.launcher_open) { launcher_pointer(&e); return; }
+    if (sh.view == VIEW_HOME) return;
+    if (e.type == EV_DOWN && in_rect(back_rect(), e.x, e.y)) {
         shell_go_home();
-        sh.tap.down = 0;
+        sh.owner = OWN_NONE;
         return;
     }
     sh.app_damaged = 0;
@@ -676,7 +778,7 @@ static void splash(float t) {
     rect_t word = { 0, (int)cy + dp(110), ui.W, ui.h1->line };
     gfx_text_center(c, ui.h1, word, "QRT", ALPHA(ui.text, (u32)(255 * t)));
     rect_t sub = { 0, word.y + word.h, ui.W, ui.body->line };
-    gfx_text_center(c, ui.body, sub, "Tessera kernel \xc2\xb7 firmware-hosted", ui.text2);
+    gfx_text_center(c, ui.body, sub, "Tessera kernel", ui.text2);
     int y = ui.H - dp(24) - ui.small->line * 8;
     int total = 0;
     while (klog_line(total)) total++;
@@ -753,7 +855,7 @@ static void run_benchmark(void) {
 void shell_main(void) {
     sh.rot = (int)hal_setting_get(u"QrtRotation", 0) & 3;
     sh.accent_idx = (int)hal_setting_get(u"QrtAccent", 0) % N_ACCENTS;
-    sh.focus = -1; sh.pressed = -1; sh.ask_pressed = -1;
+    sh.launch_pressed = sh.dock_pressed = -1;
     k.graphics_up = 1;
     if (!k.native) k.st->ConOut->EnableCursor(k.st->ConOut, 0);
     relayout();
@@ -776,7 +878,12 @@ void shell_main(void) {
         for (int i = 0; i < n; i++) dispatch(ev[i]);
 
         u64 now = k_now_ms();
+        event_t rep[4];
+        int nr = osk_tick(now, rep, 4);
+        if (nr) shell_damage(osk_rect(content_rect()));
+        for (int i = 0; i < nr; i++) key_event(&rep[i]);
         if (sh.bench_pending) { sh.bench_pending = 0; run_benchmark(); }
+        if (sh.keyboard_pending) { sh.keyboard_pending = 0; shell_keyboard(!osk_visible()); }
         sh.app_damaged = 0;
         if (sh.view == VIEW_APP && sh.app->tick && sh.app->tick(now) && !sh.app_damaged) shell_damage(app_area());
         if (!sh.dirty) {

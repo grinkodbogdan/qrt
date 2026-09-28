@@ -60,7 +60,9 @@ class QMP:
     # Keys go over the serial console: the firmware's terminal driver and QRT's
     # native UART driver both read it, while native mode has no USB keyboard yet.
     KEYMAP = {"ret": "\r", "esc": "\x1b", "backspace": "\x08", "spc": " ", "tab": "\t",
-              "up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D"}
+              "up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D",
+              # the tablet's buttons, as F9/F10/F11 on the serial console
+              "volup": "\x1b[20~", "voldown": "\x1b[21~", "power": "\x1b[23~"}
 
     def keys(self, *names, settle=0.6):
         for n in names:
@@ -141,62 +143,87 @@ def main():
 
 
 def default_script(q, shots):
-    """Walk every app with touch + keyboard.  Coordinates are for the
-    1280x800 landscape layout the QEMU VGA device reports."""
+    """Walk the shell and every app with touch, the on-screen keyboard and the
+    serial keyboard.  Coordinates are for the 1280x800 landscape layout the
+    QEMU VGA device reports (UI scale 1.18: the dock is the right-most 89 px)."""
     back = (38, 64)
-    # Sketch: open, draw a stroke, change ink, draw another
-    q.tap(1100, 135)
-    q.drag([(200 + i * 40, 400 + (i % 5) * 30) for i in range(20)])
-    q.tap(90, 124)                       # second ink swatch
-    q.drag([(300 + i * 30, 600 - i * 12) for i in range(25)])
-    shots.append(q.shot("02-sketch"))
-    q.tap(*back)
-    # Files: open the volume, then the qrt folder, then welcome.txt
-    q.tap(780, 290)
-    q.tap(400, 200)                       # row 0: the QRT volume
-    # firmware volume: "..", EFI, qrt; native RAM root: "..", bin, dev, EFI, etc, proc, qrt, tmp
-    q.tap(400, 626 if ARCH == "x64" else 350)
-    shots.append(q.shot("03-files-dir"))
-    q.tap(400, 350)                       # rows: "..", hwdump, welcome.txt
-    shots.append(q.shot("03-files-text"))
-    q.keys("backspace")
-    # System info
-    q.tap(*back)
-    q.tap(1100, 290)
-    shots.append(q.shot("04-system"))
-    q.tap(*back)
-    # Clock
-    q.tap(780, 135)
-    shots.append(q.shot("05-clock"))
-    q.keys("esc")
-    # Ask bar with the keyboard: type "li", Enter -> Life
-    q.keys("l", "i", settle=1.0)
-    shots.append(q.shot("06-ask"))
-    q.keys("ret", settle=3.0)
-    shots.append(q.shot("07-life"))
-    q.keys("esc")
-    # Touch Lab: probe + "Go native" (no LPSS I2C in QEMU, so it must refuse cleanly)
-    q.tap(780, 600)
-    q.tap(640, 141, settle=2)
-    shots.append(q.shot("12-touchlab"))
-    q.keys("esc")
-    # Terminal: run the glibc test program and a busybox applet (native x64 only)
-    q.tap(1100, 600)
+    dock = {"files": 85, "terminal": 160, "wifi": 236, "sketch": 311, "settings": 386, "launcher": 753}
+
+    def dock_tap(name, settle=1.2):
+        q.tap(1235, dock[name], settle=settle)
+
+    def launch(name, settle=1.5):
+        """Type on the home screen (opens the launcher search), Enter opens the first hit."""
+        q.keys("esc", settle=0.8)
+        q.keys(*list(name), settle=0.3)
+        q.keys("ret", settle=settle)
+
+    # Launcher from the dock, then search with the on-screen keyboard
+    dock_tap("launcher")
+    shots.append(q.shot("02-launcher"))
+    q.tap(640, 90)                         # search field -> keyboard
+    for x, y in [(550, 563), (373, 563), (462, 563)]:   # t, e, r
+        q.tap(x, y, settle=0.3)
+    shots.append(q.shot("03-launcher-search"))
+    q.tap(913, 752, settle=1.5)            # Enter -> Terminal
+    # Terminal: type "ls /bin" on the on-screen keyboard, then run programs over serial
+    q.tap(500, 243)                        # input field -> keyboard
+    for x, y in [(948, 627), (329, 627), (594, 752), (384, 752), (683, 690), (815, 563), (770, 690)]:
+        q.tap(x, y, settle=0.3)            # l s space / b i n
+    q.tap(913, 752, settle=5)              # Enter
+    shots.append(q.shot("04-terminal-osk"))
+    q.tap(1020, 752, settle=1)             # hide the keyboard
     for cmd in ["hello", "uname -a"]:
         q.keys(*[c if c != " " else "spc" for c in cmd], settle=0.2)
         q.keys("ret", settle=6.0)
-    shots.append(q.shot("13-terminal"))
-    q.keys("esc")
-    # Settings: rotate to portrait, pick an accent
-    q.tap(780, 445)
-    shots.append(q.shot("08-settings"))
-    q.tap(488, 305)                       # rotation 90 deg -> 800x1280 portrait canvas
+    shots.append(q.shot("05-terminal"))
+    # Sketch from the dock: draw a stroke, change ink, draw another
+    dock_tap("sketch")
+    q.drag([(200 + i * 40, 400 + (i % 5) * 30) for i in range(20)])
+    q.tap(90, 124)                         # second ink swatch
+    q.drag([(300 + i * 30, 600 - i * 12) for i in range(25)])
+    shots.append(q.shot("06-sketch"))
+    # Files from the dock: the volume, the qrt folder, welcome.txt
+    dock_tap("files")
+    q.tap(400, 200)                        # row 0: the QRT volume
+    # firmware volume: "..", EFI, qrt; native RAM root: "..", bin, dev, EFI, etc, proc, qrt, tmp
+    q.tap(400, 626 if ARCH == "x64" else 350)
+    shots.append(q.shot("07-files-dir"))
+    q.tap(400, 350)                        # rows: "..", hwdump, welcome.txt
+    shots.append(q.shot("07-files-text"))
+    q.keys("backspace")
+    # Wi-Fi (no Intel 8260 in QEMU: the app must say so cleanly)
+    dock_tap("wifi")
+    shots.append(q.shot("08-wifi"))
+    # System, Clock, Life, Touch Lab through the launcher search
+    launch("system")
+    shots.append(q.shot("09-system"))
+    launch("clock")
+    shots.append(q.shot("10-clock"))
+    launch("li", settle=3.0)
+    shots.append(q.shot("11-life"))
+    launch("touch")
+    q.tap(640, 141, settle=2)              # probe (no LPSS I2C in QEMU: must refuse cleanly)
+    shots.append(q.shot("12-touchlab"))
+    # hardware buttons: volume up = launcher, volume down = back, power = power menu
+    q.keys("volup", settle=1.0)
+    shots.append(q.shot("13-button-launcher"))
+    q.keys("voldown", settle=1.0)
+    q.keys("voldown", settle=1.0)
+    q.keys("power", settle=1.0)
+    shots.append(q.shot("13-button-power"))
+    q.keys("voldown", settle=1.0)
+    shots.append(q.shot("13-home"))
+    # Settings: rotate to portrait
+    dock_tap("settings")
+    shots.append(q.shot("14-settings"))
+    q.tap(456, 305)                        # rotation 90 deg -> 800x1280 portrait canvas
     time.sleep(2)
-    shots.append(q.shot("09-settings-portrait"))
+    shots.append(q.shot("15-settings-portrait"))
     q.keys("esc", settle=2)
-    shots.append(q.shot("10-home-portrait"))
+    shots.append(q.shot("16-home-portrait"))
     q.keys("l", "i", "f", "e", "ret", settle=2)
-    shots.append(q.shot("11-life-portrait"))
+    shots.append(q.shot("17-life-portrait"))
 
 
 if __name__ == "__main__":
