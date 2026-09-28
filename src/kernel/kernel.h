@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.4.0"
+#define QRT_VERSION "0.5.0"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8
@@ -41,6 +41,7 @@ typedef struct {
     int graphics_up;
     int native;         /* 1 once the firmware's boot services are gone (x86-64) */
     u64 image_base, image_size;
+    u64 epoch_at_boot;  /* Unix time (local RTC) when the kernel started */
 
     /* display */
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
@@ -128,6 +129,7 @@ void hal_probe(void);
 void sysinfo_probe(void);
 int  hwreport_save(void);            /* ACPI/SMBIOS/PCI dump to \qrt\hwdump */
 int  hwreport_write(const char *name, const void *data, usize len);
+const char *hwreport_hid(int i);     /* i-th ACPI _HID/_CID found in the AML, NULL past the end */
 void hal_reprobe_input(void);        /* forget and rediscover firmware pointers */
 
 /* ---- ACPI ---- */

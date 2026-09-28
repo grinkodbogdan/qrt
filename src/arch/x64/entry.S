@@ -49,3 +49,95 @@ thread_start:
     call thread_exit
 2:  hlt
     jmp 2b
+
+/* void enter_user(u64 rip, u64 rsp) - first entry of a process into ring 3 */
+    .globl enter_user
+enter_user:
+    cli
+    pushq $0x23                 /* user SS (0x20 | 3) */
+    pushq %rdx                  /* user RSP */
+    pushq $0x202                /* RFLAGS: IF */
+    pushq $0x2b                 /* user CS (0x28 | 3) */
+    pushq %rcx                  /* RIP */
+    xorl %eax, %eax
+    xorl %ebx, %ebx
+    xorl %ecx, %ecx
+    xorl %edx, %edx
+    xorl %esi, %esi
+    xorl %edi, %edi
+    xorl %ebp, %ebp
+    xorq %r8, %r8
+    xorq %r9, %r9
+    xorq %r10, %r10
+    xorq %r11, %r11
+    xorq %r12, %r12
+    xorq %r13, %r13
+    xorq %r14, %r14
+    xorq %r15, %r15
+    swapgs
+    iretq
+
+/*
+ * SYSCALL lands here: RCX = user RIP, R11 = user RFLAGS, interrupts off
+ * (SFMASK).  Build the same frame an interrupt would (so frame_t works for
+ * both), call syscall_dispatch(frame) with interrupts on, and return with
+ * IRETQ, which also copes with any RIP/RSP the program left behind.
+ */
+    .globl syscall_entry
+syscall_entry:
+    swapgs
+    movq %rsp, %gs:16           /* user rsp */
+    movq %gs:8, %rsp            /* this thread's kernel stack */
+    pushq $0x23                 /* ss */
+    pushq %gs:16                /* rsp */
+    pushq %r11                  /* rflags */
+    pushq $0x2b                 /* cs */
+    pushq %rcx                  /* rip */
+    pushq $0                    /* err */
+    pushq $0x80                 /* "vector" marker */
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, %r12
+    subq $528, %rsp
+    andq $-16, %rsp
+    fxsave64 (%rsp)
+    movq %r12, %rcx
+    subq $32, %rsp
+    sti
+    cld
+    call syscall_dispatch
+    cli
+    addq $32, %rsp
+    fxrstor64 (%rsp)
+    movq %r12, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    addq $16, %rsp
+    swapgs
+    iretq

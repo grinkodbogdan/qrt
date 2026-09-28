@@ -87,10 +87,12 @@ static const char *exc_name(u64 v) {
 
 /* user-mode faults are handed to the process layer (which kills the process) */
 int (*user_fault_hook)(frame_t *f);
+int (*page_fault_hook)(frame_t *f);      /* demand paging of user memory */
 
 void isr_dispatch(frame_t *f) {
     u64 v = f->vector;
     if (v < 32) {
+        if (v == 14 && page_fault_hook && page_fault_hook(f)) return;
         if ((f->cs & 3) && user_fault_hook && user_fault_hook(f)) return;
         native_panic(exc_name(v), f);
     }

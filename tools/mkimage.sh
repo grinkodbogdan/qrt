@@ -7,7 +7,7 @@
 # boots on 32-bit UEFI (Venue 8 Pro 5830, Bay Trail) and 64-bit UEFI
 # (Venue 8 Pro 5855, Cherry Trail) firmware.
 set -euo pipefail
-out=$1 ia32=$2 x64=$3
+out=$1 ia32=$2 x64=$3 rootfs=${4:-}
 here=$(cd "$(dirname "$0")/.." && pwd)
 
 size_mib=64
@@ -32,6 +32,14 @@ mcopy -i "$esp" "$x64"  ::/EFI/BOOT/BOOTX64.EFI
 for f in "$here"/image/*; do
     [ -e "$f" ] && mcopy -i "$esp" "$f" ::/qrt/
 done
+
+# Linux programs for the Terminal (/bin), skipping empty placeholders
+if [ -n "$rootfs" ] && [ -d "$rootfs/bin" ]; then
+    mmd -i "$esp" ::/bin
+    for f in "$rootfs"/bin/*; do
+        [ -s "$f" ] && mcopy -i "$esp" "$f" ::/bin/
+    done
+fi
 
 dd if="$esp" of="$out" bs=512 seek=$part_start conv=notrunc status=none
 echo "wrote $out ($(du -h "$out" | cut -f1) on disk, ${size_mib} MiB image)"

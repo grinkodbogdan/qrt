@@ -1,4 +1,5 @@
-/* uart.c - polled 16550 driver for COM1 (I/O port 0x3F8). */
+/* uart.c - 16550 driver for COM1 (I/O port 0x3F8): polled until the native
+ * kernel routes IRQ 4, then receive is interrupt-driven into a ring. */
 #include "uart.h"
 
 #define COM1 0x3f8
@@ -38,7 +39,40 @@ void uart_write(const char *s) {
     }
 }
 
+static u8 ring[1024];
+static volatile u32 head, tail;          /* producer: the IRQ handler; consumer: uart_getc */
+static int irq_mode;
+static volatile u64 rx_count;
+
+void uart_irq(void *arg) {
+    (void)arg;
+    while (in8(COM1 + 5) & 1) {
+        u8 c = in8(COM1);
+        rx_count++;
+        u32 h = head;
+        if (h - tail < sizeof ring) { ring[h % sizeof ring] = c; __atomic_store_n(&head, h + 1, __ATOMIC_RELEASE); }
+    }
+}
+
+void uart_irq_enable(void) {
+    if (!present) return;
+    out8(COM1 + 4, 0x0b);          /* DTR + RTS + OUT2 (gates the IRQ line) */
+    irq_mode = 1;
+    out8(COM1 + 1, 0x01);          /* interrupt on received data (fires at once if bytes are waiting) */
+}
+
+u64 uart_rx_count(void) { return rx_count; }
+
 int uart_getc(void) {
-    if (!present || !(in8(COM1 + 5) & 1)) return -1;
+    if (!present) return -1;
+    if (irq_mode) {
+        u32 t = tail;
+        if (t == __atomic_load_n(&head, __ATOMIC_ACQUIRE)) return -1;
+        int c = ring[t % sizeof ring];
+        tail = t + 1;
+        return c;
+    }
+    if (!(in8(COM1 + 5) & 1)) return -1;
+    rx_count++;
     return in8(COM1);
 }

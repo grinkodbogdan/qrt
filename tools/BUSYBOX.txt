@@ -1,0 +1,5 @@
+/bin/busybox is BusyBox (https://busybox.net), a separate program licensed
+under the GNU GPL version 2, copied unmodified from the Ubuntu package
+busybox-static (source: https://packages.ubuntu.com/source/noble/busybox or
+`apt-get source busybox`). QRT runs it through its Linux system-call layer;
+QRT itself does not include BusyBox code.

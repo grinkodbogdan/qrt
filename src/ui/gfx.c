@@ -226,7 +226,8 @@ void gfx_line(canvas_t *c, float x0, float y0, float x1, float y1, float width, 
 
 /* ---- text ---------------------------------------------------------------- */
 const font_t *font_pick(face_t face, int px) {
-    const font_t *f = face == F_LIGHT ? font_light : face == F_SEMIBOLD ? font_semibold : font_regular;
+    const font_t *f = face == F_LIGHT ? font_light : face == F_SEMIBOLD ? font_semibold :
+                      face == F_MONO ? font_mono : font_regular;
     const font_t *best = f;
     for (; f->size; f++)
         if (f->size <= px || (best->size > px && f->size < best->size)) best = f;

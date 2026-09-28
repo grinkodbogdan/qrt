@@ -1,8 +1,8 @@
 # QRT
 
 A small custom operating system for the **Dell Venue 8 Pro**, with a touch-first
-UI inspired by Fuchsia's Armadillo/Ermine shells. It is not Linux, it does not
-use a Linux kernel and it has no Linux drivers.
+UI inspired by Fuchsia's Armadillo/Ermine shells. Its kernel, **Tessera**, is
+written from scratch. It is not Linux, but it can run Linux programs.
 
 <p>
 <img src="docs/screenshots/home-portrait.png" width="30%">
@@ -11,181 +11,200 @@ use a Linux kernel and it has no Linux drivers.
 
 | | |
 |---|---|
-| ![sketch](docs/screenshots/sketch.png) | ![system](docs/screenshots/system.png) |
-| ![files](docs/screenshots/files-text.png) | ![ask](docs/screenshots/ask.png) |
+| ![terminal](docs/screenshots/terminal.png) | ![system](docs/screenshots/system.png) |
+| ![sketch](docs/screenshots/sketch.png) | ![files](docs/screenshots/files-text.png) |
 
-## The kernel: Tessera, a firmware-hosted exokernel
+## The kernel: Tessera
 
-Tessera never calls `ExitBootServices()`. The tablet's own UEFI firmware stays
-resident underneath it and serves as the driver layer. That firmware is the
-same code that runs the Venue's touch-driven BIOS setup screen:
+QRT is one UEFI application, and it boots in two stages.
 
-| Subsystem | Provided by (UEFI protocol) | Tessera's job on top |
-|---|---|---|
-| Display | Graphics Output Protocol (native panel mode) | software compositor, AA rasteriser, 0/90/180/270° rotation |
-| Touchscreen | Absolute Pointer | tap/drag gestures, axis swap/flip calibration |
-| Mouse / trackpad | Simple Pointer | cursor with sub-pixel accumulation |
-| Keys & hardware buttons | Simple Text Input | Ask bar, keyboard navigation |
-| eMMC / microSD / USB storage | Block I/O + Simple File System (FAT) | volume discovery, Files app |
-| Clock | Runtime `GetTime` + TSC calibrated against `Stall` | monotonic clock, wall time |
-| Settings | NVRAM variables | persisted rotation, accent colour, touch mapping |
-| Power | `ResetSystem`, `OsIndications` | restart, shut down, reboot into firmware setup |
-| Identity | SMBIOS, ACPI RSDP, CPUID, memory map | System app, Venue detection |
+**1. Under the firmware.** Tessera starts as a UEFI program. It does the
+following:
+- reads the machine's identity (SMBIOS, ACPI, CPUID, memory map)
+- asks the firmware to connect every driver
+- dumps the ACPI tables
+- copies the boot stick into RAM
+- probes the touchscreen with its own I2C driver
 
-At boot the kernel runs the equivalent of `connect -r`: it asks the firmware to
-bind every driver to every controller, so hardware that "fast boot" skipped
-(touch, SD, USB) comes up. It also turns off the 5-minute boot-loader watchdog.
-After that it hands control to the shell's event loop.
+**2. Native (64-bit firmware).** Tessera then calls `ExitBootServices()` and
+takes over the machine. From then on, everything is QRT's own code:
 
-Why this approach and not an existing kernel? Every other non-Linux option was
-checked against this tablet, and none could drive it:
+| Subsystem | Native Tessera |
+|---|---|
+| Memory | physical page allocator, kernel heap, 4-level page tables (identity map with 2 MB pages, write-combining framebuffer via PAT) |
+| CPU | per-core GDT/TSS/IDT, exception handling with a crash screen |
+| Interrupts | local APIC (xAPIC/x2APIC); I/O APIC routing from the MADT; MSI for PCI |
+| Time | TSC calibrated at boot, 1 kHz local-APIC timer |
+| Scheduling | preemptive threads, 10 ms round-robin; idle cores halt |
+| Multicore | other cores started by QRT itself (INIT/SIPI through a real-mode trampoline) and used for rendering |
+| Files | in-memory file system: the boot stick plus `/proc`, `/etc`, `/tmp`, `/dev` |
+| Processes | ring-3 address spaces, ELF loader, demand paging, `SYSCALL` entry |
+| Linux ABI | the system calls static glibc, musl and busybox programs need |
+| Drivers | a driver model over PCI, ACPI and platform devices; see below |
 
-- Haiku, FreeBSD, Redox and Zircon/Fuchsia all lack working drivers for the
-  Venue's Bay Trail/Cherry Trail I2C touch, SDIO Wi-Fi and 32-bit UEFI mix.
-- Fuchsia itself can't boot 32-bit UEFI at all.
+The firmware is kept only for its *runtime* services: the RTC, NVRAM
+variables (where settings are stored) and reset/power-off.
 
-Borrowing the firmware's drivers is the only non-Linux way to get working
-touch, display, storage and buttons on this device today.
+The UI and the apps behave the same in both stages. Underneath, a HAL
+(`src/kernel/hal.c`) hands them either firmware services or native drivers.
 
-## What works, what doesn't
+### Safety
 
-**Works (tested in QEMU/OVMF, both 32-bit and 64-bit UEFI):** boot, the shell,
-all six apps, rotation, NVRAM settings, FAT volumes, keyboard input and the
-Ask launcher. Touch is tested through a serial injection channel, because
-stock OVMF has no pointer drivers.
+Native mode has fallbacks, because without the firmware QRT must bring
+touch back up on its own:
 
-**Should work on the Venue (it uses the same firmware services), but is untested on real hardware:**
-- Touch, through the firmware's absolute-pointer driver. If the axes come out
-  wrong, type `touch` in the Ask bar on a USB keyboard to swap or flip them.
-- The volume buttons, if the firmware reports them as keys.
-- USB keyboards and mice on the OTG port.
-- The eMMC's EFI partition and microSD cards, if they are FAT-formatted.
+- QRT goes native only if it can drive an input device itself: the native
+  touchscreen, or a serial console.
+- If the touchscreen does not answer after the handover, QRT records the
+  failure and reboots once into firmware mode.
+- **Holding any key or hardware button** at boot starts in firmware mode.
+- **Settings → Kernel mode** switches between native and firmware for the
+  next boot.
 
-**Does not work, by design of this approach:**
-- Wi-Fi and Bluetooth: the firmware has no drivers for them.
-- Audio, camera, sensors and the battery gauge.
-- Sleep and backlight control.
+On 32-bit UEFI (Venue 8 Pro 5830) QRT always runs in firmware mode.
 
-A future step would be native Tessera drivers for the Intel DesignWare I2C
-controller and HID-over-I2C. That would take over touch from the firmware and
-allow `ExitBootServices()`.
+## Linux programs
 
-## Hardware report (step one toward native drivers)
+Open **Terminal**. It runs static x86-64 Linux ELF programs, unmodified,
+through Tessera's Linux system-call layer (`src/arch/x64/linux.c`). The
+image includes a static **busybox**, so `ls -l /`, `cat /proc/cpuinfo`,
+`free`, `date`, `sha256sum`, `wc`, `uname -a`, and anything else busybox
+provides work. `/bin` also holds two test programs, one linked against glibc
+(`hello`) and one against musl (`hello-musl`). They check stdio, `malloc`,
+files, directory listing, `/proc` and thread-local storage.
+
+To add your own program, compile it with `gcc -static` (or `musl-gcc
+-static`) and copy it into `\bin` on the stick.
+
+Not supported yet:
+- `fork`/`exec`/threads (so there are no pipelines or shells)
+- signals
+- sockets
+- dynamic linking
+- keyboard input to programs
+
+`clear` and `help` are handled by the Terminal itself.
+
+## Drivers
+
+`src/kernel/dev.h` is the driver model. Buses enumerate devices from PCI
+(ECAM), ACPI (the `_HID`s in the DSDT/SSDTs) and fixed platform devices.
+Drivers declare id tables and a `probe()`. **System → Devices** lists every
+device, first those with a QRT driver and then those still waiting for one.
+On the tablet, that second part is the to-do list.
+
+Built in:
+- **framebuffer**
+- **16550 UART**: interrupt-driven through the I/O APIC
+- **DesignWare I2C**
+- **HID over I2C**: the Venue's Wacom touchscreen
+- **chipset**: devices the kernel handles itself
+
+[docs/drivers.md](docs/drivers.md) covers the primitives a driver gets
+(MMIO, DMA memory, IRQ/MSI, threads). It also lays out the plan for using
+Linux drivers: port them by hand now, then a LinuxKPI-style shim like
+FreeBSD's.
+
+## Hardware status on the Venue 8 Pro 5855
+
+| | |
+|---|---|
+| Display | works (framebuffer, 1200×1920, rotation) |
+| Touch | works: QRT's own Wacom driver; tested on the tablet in firmware mode. Native mode needs the same driver after the handover, which is **new in 0.5 and untested on hardware**. |
+| Storage | the boot stick is read into RAM at boot; writes go to RAM only |
+| Wi-Fi, Bluetooth, audio, camera, sensors, battery, backlight | no drivers yet (they need ACPI/PMIC support first; see docs/drivers.md) |
+| USB keyboard | firmware mode only |
+
+## Hardware report
 
 On every boot QRT writes the machine's hardware description to the stick,
 under `\qrt\hwdump\`:
+- every ACPI table
+- the SMBIOS table
+- `report.txt` (PCI devices, ACPI ids, boot log)
 
-- every ACPI table (`DSDT.aml`, `SSDT*.aml`, `APIC.aml`, and so on)
-- the raw SMBIOS table
-- `report.txt`, which lists the PCI devices, the ACPI device IDs (`_HID`)
-  found in the AML, and the boot log
+The dump is taken before the handover, while the stick is still writable.
+Reports saved later (Touch Lab's `touch.txt` in native mode) go to the RAM
+copy.
 
-Native drivers for the tablet's I2C touch, SDIO, audio and battery have to be
-written against this real data. Decompile the tables with
-`iasl -d DSDT.aml SSDT*.aml`.
+**Keep that folder private.** On Windows tablets, `MSDM.aml` contains the
+Windows product key.
 
 ## Rendering
 
-Everything is drawn in software on the CPU. Each change records a damage
-rectangle, and only that area is redrawn and sent to the panel. The
-wallpaper is copied just for the damaged rows. Apps can declare tighter
-regions with `shell_damage()`; for example, Sketch redraws only the segment
-of line just drawn.
+Everything is drawn in software. Each change records a damage rectangle,
+and only that area is redrawn and copied to the panel. Big redraws are cut
+into strips (4 per core), and every core claims strips from a shared
+counter. In native mode those cores were started by QRT. Under the firmware
+they come from UEFI's MP Services.
 
-Big redraws are split across every CPU core (`src/kernel/smp.c`). UEFI's MP
-Services protocol wakes the other cores, the damaged area is cut into strips
-(4 per core), and each core claims strips from a shared counter until none
-are left. Code that runs on those cores must not call firmware services or
-change app state, so the shell samples the clock once per frame
-(`shell_time()`). At boot a self-test checks that every core runs QRT code
-and does floating point correctly. Otherwise QRT stays single-core. Toggle
-it with "Multicore rendering on/off" in the Ask bar.
+In QEMU with 4 cores, a full 1280×800 redraw drops from 74 ms on one core to
+24 ms. Type `bench` in the Ask bar to measure; the result appears in
+**System → Graphics**.
 
-Type `bench` in the Ask bar to run the built-in benchmark. It times full
-and partial redraws, and the results appear under **System → Graphics**. In
-QEMU a full 1280×800 frame takes about 78 ms, while a Sketch-sized partial
-update takes about 2 ms. With 4 emulated cores, a full redraw drops from 80 ms to 43 ms.
+## Touch Lab
 
-## Touch Lab: QRT's first native driver
-
-The Touch Lab app contains QRT's own touchscreen stack. It doesn't use the
-firmware for touch:
-
-- `src/drivers/dwi2c.c`: a polled driver for the DesignWare I2C controller
-  (Intel LPSS), found through PCI.
-- `src/drivers/i2chid.c` and `hidparse.c`: HID over I2C, a HID
-  report-descriptor parser, and single-contact tracking. `make check` runs
-  the parser's host tests.
-- `src/drivers/touch.c`: the service for the Venue 8 Pro 5855. The
-  touchscreen is on `I2C6` (PCI 00:18.6) at `0x4A` (Atmel) or `0x2C`
-  (Synaptics). See `docs/hardware/venue-8-pro-5855.md`.
-
-It is opt-in and reversible:
-
-- **Probe** only reads the chip's descriptors, while firmware touch keeps
-  working.
-- **Go native** detaches the firmware driver from the I2C controller and
-  polls the chip directly.
-- If the chip stops answering, or no touch report arrives within 15 s, touch
-  goes back to the firmware automatically. Rebooting also restores it.
+**Touch Lab** runs the native touchscreen stack by hand:
+- **Probe** reads the chip's HID descriptors.
+- **Go native** takes touch over from the firmware.
 - **Save report** writes `\qrt\hwdump\touch.txt`.
 
-## Which Venue 8 Pro?
-
-- The **5830** (2013–14) has a Bay Trail Z3740D, 1–2 GB of RAM and an
-  800×1280 panel. Its firmware is **32-bit UEFI**.
-- The **4 GB / 64 GB** configuration is normally the **5855** (2016). It has a
-  Cherry Trail x5-Z8500 and a 1200×1920 panel, and its firmware is most
-  likely 64-bit UEFI.
-
-The image carries both `\EFI\BOOT\BOOTIA32.EFI` and `\EFI\BOOT\BOOTX64.EFI`,
-so the firmware picks the right one by itself. The UI scales to the panel's
-density: 1.18× at 800 px and about 1.76× at 1200 px.
+The stack is `src/drivers/dwi2c.c`, `i2chid.c`, `hidparse.c` and `touch.c`.
+`make check` runs the HID parser's host tests against the Venue's real Wacom
+descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 ## Put it on the tablet
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Get the image. Either use `dist/qrt-0.4.0.img.gz` (prebuilt) or build it
-   with `make`.
-2. Write it to a USB stick. Use Rufus, balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.4.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+1. Use `dist/qrt-0.5.0.img.gz`, or build the image with `make`.
+2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
+   `gunzip -c dist/qrt-0.5.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
-4. Open the firmware settings. From Windows: *Settings → Update & Security →
-   Recovery → Advanced startup → Troubleshoot → UEFI Firmware Settings*.
-5. Disable **Secure Boot**. The image is not signed.
-6. Pick the USB stick from the boot menu.
+4. In the firmware setup, disable **Secure Boot** (the image is not signed)
+   and boot from the stick.
 
-The first boot shows the Tessera splash with the live kernel log, then the home
-screen. **Settings → Firmware** reboots straight back into the BIOS setup.
+**Settings → Firmware** reboots into the BIOS setup.
 
 ## Build it yourself
 
-You need `clang`, `lld`, `mtools`, `dosfstools` and `gdisk`. For `make run` and
-`make test` you also need `qemu-system-x86` and `ovmf` + `ovmf-ia32`. Pillow is
-needed only to regenerate the fonts.
+You need:
+- `clang`, `lld`, `mtools`, `dosfstools` and `gdisk`
+- `qemu-system-x86`, `ovmf` and `ovmf-ia32`, for `make run` and `make test`
+- `gcc`, `musl-tools` and `busybox-static`, for the Linux programs in `/bin`
+- Pillow, only to regenerate the fonts
 
 ```sh
 make            # build/BOOTIA32.EFI, build/BOOTX64.EFI, build/qrt.img
+make run64      # boot in QEMU on 64-bit UEFI (native mode, 4 cores)
 make run        # boot in QEMU on 32-bit UEFI (like a 5830)
-make run64      # boot in QEMU on 64-bit UEFI
 make test       # headless boot on both, scripted walkthrough, screenshots in build/shots/
+make check      # host unit tests (HID parser)
 ```
 
-In QEMU, OVMF has no mouse or tablet driver, so use the keyboard. Start typing
-to open the Ask bar, use the arrow keys and Enter on the home grid, and press
-Esc to go back.
+OVMF has no touch driver, and native QRT has no USB keyboard driver yet. In
+native mode, QRT therefore reads keys from the serial port: in the QEMU
+window, choose *View → serial0* and type there. Arrow keys, Enter and Esc
+navigate the UI. `tools/qemu-test.py` injects touch the same way.
 
 ## Layout
 
 ```
-src/efi.h              UEFI ABI subset (written from the spec, no EDK2/gnu-efi)
-src/kernel/            Tessera: boot, clock, HAL (display/input/storage/power/NVRAM), sysinfo, runtime
-src/ui/                gfx (anti-aliased shapes, text), font atlas, shell (home, Ask, chrome, rotation)
-src/apps/              Clock, Sketch, Files, System, Settings, Life
-tools/                 mkfont.py (Inter -> AA glyph atlases), mkimage.sh, run-qemu.sh, qemu-test.py
-assets/                Inter typeface (SIL OFL 1.1, see Inter-LICENSE.txt)
+src/efi.h              UEFI ABI subset (written from the spec)
+src/kernel/            boot, HAL, VFS, driver model (dev.c), hardware report, runtime
+src/arch/x64/          native kernel: memory, CPU/IDT, APIC, I/O APIC + MSI, scheduler,
+                       SMP trampoline, processes, Linux system calls
+src/drivers/           PCI, UART, DesignWare I2C, HID over I2C, touch service, driver table
+src/ui/                gfx (anti-aliased shapes, text), font atlases, shell
+src/apps/              Clock, Sketch, Files, System, Settings, Life, Touch Lab, Terminal
+tests/                 HID parser tests, Linux test program
+tools/                 mkfont.py, mkimage.sh, run-qemu.sh, qemu-test.py, gen_isr.py
+assets/                Inter (SIL OFL 1.1), DejaVu Sans Mono (Bitstream Vera licence)
 ```
 
-Apps implement a five-function ABI (`open`, `draw`, `event`, `tick`, `icon`) in
-`src/ui/shell.h`. Adding one takes about 100 lines.
+Apps implement a five-function ABI (`open`, `draw`, `event`, `tick`, `icon`)
+in `src/ui/shell.h`.
+
+`/bin/busybox` on the image is an unmodified copy of Ubuntu's
+`busybox-static`, licensed under GPL-2.0. It runs as a separate program,
+and `\bin\BUSYBOX.txt` says where to get its source.

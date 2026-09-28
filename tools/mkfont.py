@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Rasterise Inter into anti-aliased glyph atlases for the QRT shell.
+"""Rasterise Inter (UI) and DejaVu Sans Mono (Terminal) into anti-aliased
+glyph atlases for the QRT shell.
 
 Output is a C file with 8-bit coverage bitmaps; the kernel has no font
 engine, so all hinting/AA happens here at build time.
@@ -19,6 +20,7 @@ FACES = [
     ("semibold", "Inter-SemiBold.ttf", [13, 15, 17, 20, 23, 27, 31, 36, 42, 48, 56], lambda s: ASCII + EXTRA),
     ("light", "InterDisplay-Light.ttf", [40, 56, 72, 96, 120, 144, 176],
      lambda s: ASCII + EXTRA if s <= 72 else DIGITS),
+    ("mono", "DejaVuSansMono.ttf", [12, 13, 15, 17, 20, 23], lambda s: ASCII + EXTRA),
 ]
 
 

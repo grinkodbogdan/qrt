@@ -2,13 +2,14 @@
 #include "../ui/shell.h"
 #include "../kernel/smp.h"
 #include "../kernel/vfs.h"
-#include "../drivers/pci.h"
+#include "../kernel/dev.h"
 #if defined(__x86_64__)
 #include "../arch/x64/sched.h"
+#include "../arch/x64/irq.h"
 #endif
 
 /* sampled on the boot core in tick(); draw() may run on any core */
-static struct { int busy_pct, threads; u64 mem_total, mem_free; char thread_list[160]; } ks;
+static struct { int busy_pct, threads; u64 mem_total, mem_free; char thread_list[160], irqs[128]; } ks;
 
 static struct { scroll_t sc; } st;
 
@@ -81,21 +82,26 @@ static void draw(canvas_t *c, rect_t a) {
         kv(&f, "Timer", "local APIC, 1000 Hz; the CPU halts when idle");
     }
 
-    heading(&f, "DRIVERS");
+    if (k.native) kv(&f, "Interrupts", ks.irqs);
+
+    fmt(b, sizeof b, "DEVICES (%d, %d WITH A QRT DRIVER)", n_devs, dev_bound());
+    heading(&f, b);
     if (!pci_ndevs) kv(&f, "PCI", "no ECAM (MCFG) table");
-    for (int i = 0; i < pci_ndevs; i++) {
-        pci_dev_t *d = &pci_devs[i];
-        char key[32];
-        fmt(key, sizeof key, "%02x:%02x.%x", d->bus, d->dev, d->fn);
-        fmt(b, sizeof b, "%04x:%04x class %02x.%02x  %s", d->vendor, d->device, d->class_code, d->subclass,
-            d->driver ? d->driver : "-");
-        kv(&f, key, b);
-    }
-    if (k.native) {
-        kv(&f, "Display", "linear framebuffer (write-combining), QRT compositor");
-        kv(&f, "Serial", "16550 COM1, polled (kernel log + test input)");
-        kv(&f, "Files", "RAM copy of the boot stick (vfs); native storage pending");
-    }
+    /* bound devices first, then the to-do list */
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < n_devs; i++) {
+            device_t *d = &devs[i];
+            int bound = d->drv && !d->failed;
+            if (bound != !pass) continue;
+            char key[32];
+            fmt(key, sizeof key, "%s %s", d->bus == BUS_PCI ? "pci" : d->bus == BUS_ACPI ? "acpi" : "isa", d->name);
+            if (bound) fmt(b, sizeof b, "%s: %s", d->drv->name, d->status);
+            else if (d->failed) fmt(b, sizeof b, "%s failed: %s", d->drv->name, d->status);
+            else if (d->pci) fmt(b, sizeof b, "%s %04x:%04x - no driver yet", d->what, d->pci->vendor, d->pci->device);
+            else fmt(b, sizeof b, "%s - no driver yet", d->what ? d->what : "unknown device");
+            kv(&f, key, b);
+        }
+    if (k.native) kv(&f, "Files", "RAM copy of the boot stick (vfs); native storage pending");
 
     heading(&f, "DEVICE");
     kv(&f, "Manufacturer", k.sys_vendor[0] ? k.sys_vendor : "unknown");
@@ -185,8 +191,14 @@ static int tick(u64 now) {
             o += fmt(ks.thread_list + o, sizeof ks.thread_list - o, "%s%s", i ? ", " : "", th[i]->name);
         ks.mem_total = pmm_total_bytes();
         ks.mem_free = pmm_free_bytes();
+        const irq_line_t *l;
+        int n = irq_lines(&l);
+        o = fmt(ks.irqs, sizeof ks.irqs, "%d I/O APIC%s", irq_ioapics(), irq_ioapics() == 1 ? "" : "s");
+        for (int i = 0; i < n; i++)
+            o += fmt(ks.irqs + o, sizeof ks.irqs - o, "; %s vector 0x%x: %llu", l[i].owner, l[i].vector, l[i].count);
     }
 #endif
+    dev_refresh();
     return 1;   /* uptime */
 }
 

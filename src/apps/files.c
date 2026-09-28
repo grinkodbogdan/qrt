@@ -168,7 +168,8 @@ static void breadcrumb(char *buf, usize cap) {
     if (st.vol < 0) { strlcpy(buf, "All volumes", cap); return; }
     char p[256];
     str16_to_utf8(p, sizeof p, st.path);
-    fmt(buf, cap, "%s  %s", k.vol[st.vol].label, p[0] ? p : "\\");
+    if (k.native) { for (char *c = p; *c; c++) if (*c == '\\') *c = '/'; }
+    fmt(buf, cap, "%s  %s", k.vol[st.vol].label, p[0] ? p : k.native ? "/" : "\\");
 }
 
 static void draw_row(canvas_t *c, rect_t r, const char *title, const char *sub, int dir, int pressed) {

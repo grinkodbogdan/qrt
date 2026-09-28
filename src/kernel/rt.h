@@ -18,6 +18,7 @@ void *memmove(void *d, const void *s, usize n);
 int   memcmp(const void *a, const void *b, usize n);
 usize strlen(const char *s);
 int   strcmp(const char *a, const char *b);
+char *strchr(const char *s, int c);
 void  strlcpy(char *d, const char *s, usize cap);
 int   str_icontains(const char *hay, const char *needle);
 usize str16len(const c16 *s);

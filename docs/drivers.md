@@ -1,0 +1,114 @@
+# Drivers in QRT
+
+This page covers how a driver attaches to hardware in QRT, what the kernel
+gives it, and how the Linux driver ecosystem could be used. It describes the
+current state and does not promise more than that.
+
+## The model
+
+`src/kernel/dev.h` defines two structures:
+
+- **`device_t`**: one entry per device that the buses enumerate.
+- **`driver_t`**: a name, match tables, `probe()`, and an optional `status()`.
+
+The buses:
+
+| Bus | Enumerated from | Device name |
+|---|---|---|
+| PCI | ECAM config space (ACPI `MCFG`), `src/drivers/pci.c` | `00:18.6` |
+| ACPI | the `_HID`/`_CID` ids in the DSDT/SSDTs (`hwreport.c`) | `PNP0C50`, `808622C1` |
+| platform | fixed legacy devices | `com1` |
+
+`dev_init()` walks every device and binds the first driver whose table
+matches and whose `probe()` does not answer `DEV_NOT_MINE`. Unbound devices
+stay in the list. Under **System → Devices** they show up after the bound
+ones with a plain description ("SD/eMMC host (SDHCI) – no driver yet"). On
+the tablet, that list is the to-do list for native drivers.
+
+The drivers built in today (`src/drivers/builtin.c`):
+
+| Driver | Matches | What it does |
+|---|---|---|
+| `framebuffer` | PCI class 03 | Takes over the linear framebuffer the firmware set up and marks it write-combining. |
+| `uart16550` | `com1`, `PNP0501` | Kernel log and test input. IRQ 4 goes through the I/O APIC, and received bytes are buffered by the interrupt handler. |
+| `dw-i2c` | Intel LPSS I2C, Bay Trail `8086:0f41–0f47`, Cherry Trail `8086:22c1–22c7` | The DesignWare I2C controller (`dwi2c.c`). |
+| `i2c-hid` | `PNP0C50` | HID over I2C and the touchscreen service (`i2chid.c`, `hidparse.c`, `touch.c`). |
+| `chipset` | PCI bridges, PCI roots, PIC/PIT/HPET, processors | Devices the kernel handles itself or leaves alone, each with its reason. |
+
+## What the native kernel gives a driver
+
+- **MMIO:** all physical memory up to 64 GB is identity-mapped, so a BAR
+  address is a pointer. `pci_bar()` decodes 32- and 64-bit BARs. Device
+  memory stays uncached because the firmware's MTRRs say so.
+- **DMA memory:** `pmm_alloc(1)` returns one zeroed 4 KiB frame from the
+  kernel pool, and `pmm_alloc_contig(n)` returns contiguous frames. Physical
+  addresses equal virtual addresses, so the pointer is also the bus address.
+  There is no IOMMU. The kernel pool starts at 1 GB and can reach above 4 GB
+  on a 4 GB tablet, so a DMA engine that only takes 32-bit addresses needs a
+  below-4-GB allocator. That allocator is not written yet.
+- **Interrupts** (`src/arch/x64/irq.h`):
+  - `irq_attach_isa(irq, …)` handles legacy lines. It applies the MADT's
+    source overrides.
+  - `irq_attach_gsi(gsi, level, active_low, …)` is for ACPI `_CRS`
+    interrupts.
+  - `irq_attach_msi(bus, dev, fn, …)` is for PCI devices. Prefer MSI, because
+    it needs no routing tables.
+  - Handlers run on the boot core with interrupts off, after the local APIC
+    has been acknowledged. **System → Kernel → Interrupts** shows a live
+    count for each line.
+  - `irq_attach_msi` is written to the PCI spec but is not yet exercised by
+    any device in QEMU. The I/O APIC path is tested: COM1 runs on it.
+- **Threads:** `thread_create()`, `thread_sleep_ms()`, `thread_block()` and
+  `thread_wake()` (`sched.h`). A driver that needs a bottom half wakes a
+  thread from its interrupt handler.
+- **Delays and time:** `k_delay_us()`, `k_now_us()` and `k_now_ms()`.
+
+Not there yet:
+
+- an ACPI interpreter (AML is scanned for ids only, never executed, so
+  `_CRS`, `_PS0`, GPIO and PMIC methods are unavailable)
+- GPIO interrupts
+- runtime power management
+- a block-device layer
+
+## Linux compatibility
+
+QRT has **Linux application** compatibility today. Static x86-64 ELF
+programs run unmodified. `src/arch/x64/linux.c` implements the part of the
+Linux system-call ABI that glibc, musl and busybox need:
+
+- files, directories, `mmap`/`brk`
+- TLS (`arch_prctl`)
+- time, `uname`, `sysinfo`
+- `getrandom`
+
+The Terminal app starts these programs, and the image includes a static
+busybox. Still missing: `fork`/`exec`/`clone` (so no shell pipelines or
+threads), signals, sockets, and dynamic linking.
+
+**Linux drivers** are a different job. Drivers use the kernel's internal
+API, not system calls. FreeBSD solved this with *LinuxKPI*, a layer that
+re-creates Linux's internal API on top of FreeBSD's own kernel. It lets
+FreeBSD run Linux's Intel/AMD GPU and Wi-Fi drivers mostly unchanged. The
+plan for QRT is the same, in steps:
+
+1. **Porting by hand (now possible).** A Linux platform/PCI driver's
+   `probe()`, id tables and register code map almost one-to-one onto a
+   `driver_t`. Only `devm_*`, `readl`/`writel`, `request_irq` and
+   `msleep` change. This is how the DesignWare I2C and HID-over-I2C drivers
+   were written. SDHCI (eMMC and microSD) and xHCI (USB) are the next
+   candidates.
+2. **A LinuxKPI-style shim.** This means headers that provide `struct
+   device`, `platform_driver`, `pci_driver`, `request_irq`, `ioremap`,
+   `dma_alloc_coherent`, `kmalloc`, spinlocks, mutexes, wait queues,
+   workqueues, `jiffies` and timers, all built on the primitives above. With
+   it, whole driver source files compile unmodified.
+3. **Subsystem cores.** Wi-Fi (`cfg80211`/`mac80211`), sound (ALSA SoC) and
+   DRM each need the Linux core layer they plug into. These are large, and
+   they must be ported with their GPL-2.0 licence.
+
+A general caution: much of the Venue 8 Pro's hardware is reached through
+ACPI methods and the Crystal Cove PMIC. That includes the Wi-Fi's power
+GPIO, the audio codec's clocks and the backlight PWM. An AML interpreter
+(ACPICA is BSD/GPL dual-licensed and designed to be embedded) is therefore a
+prerequisite for most of those drivers, whichever way they are written.

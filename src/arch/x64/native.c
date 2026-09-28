@@ -13,6 +13,8 @@
  */
 #include "arch.h"
 #include "../../drivers/uart.h"
+#include "../../kernel/dev.h"
+#include "irq.h"
 #include "../../drivers/pci.h"
 #include "../../drivers/touch.h"
 #include "../../ui/gfx.h"
@@ -21,6 +23,7 @@ extern void switch_stack(u64 top, void (*fn)(void *), void *arg);
 void native_smp_start(void);
 void sched_init(void);
 void vfs_relocate(void);
+void proc_init(void);
 
 static mm_boot_t boot;
 static u64 trampoline_page;
@@ -158,6 +161,7 @@ static void native_main(void *arg) {
     lapic_timer_start(1000);
     sti();
     vfs_relocate();                        /* file data out of firmware pool memory */
+    proc_init();                           /* SYSCALL entry, fault handlers for user processes */
     native_smp_start();
 
     if (nt.primary >= 0 && !ntouch_native_resume()) {
@@ -169,7 +173,7 @@ static void native_main(void *arg) {
         hal_reboot();
     }
     klog("native: %s", nt.status[0] ? nt.status : "touch not present");
-    for (int i = 0; i < pci_ndevs; i++)
-        if (pci_devs[i].class_code == 0x03) pci_devs[i].driver = "framebuffer (QRT, write-combining)";
+    irq_init();                            /* I/O APICs from the MADT, every line masked */
+    dev_init();                            /* enumerate PCI/ACPI/platform devices, bind drivers */
     shell_main();
 }

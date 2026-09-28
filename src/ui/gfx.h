@@ -17,7 +17,7 @@ typedef struct {
     rect_t limit;      /* outer bound for gfx_clip(): the region being redrawn */
 } canvas_t;
 
-typedef enum { F_REGULAR, F_SEMIBOLD, F_LIGHT } face_t;
+typedef enum { F_REGULAR, F_SEMIBOLD, F_LIGHT, F_MONO } face_t;
 
 canvas_t canvas_new(int w, int h);
 void     canvas_free(canvas_t *c);

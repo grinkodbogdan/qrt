@@ -47,11 +47,24 @@ static void add_range(u64 base, u64 end) {
 /* Zero a frame through the identity map.  Low frames are shadowed by user
  * space in process address spaces, so borrow the kernel's tables for them. */
 static void zero_frame(u64 f, usize bytes) {
+    u64 fl = irq_save();              /* a thread switch mid-way would reload the user's tables */
     u64 cr3 = read_cr3();
     int swap = f < USER_TOP && kpml4_phys && cr3 != kpml4_phys;
     if (swap) write_cr3(kpml4_phys);
     memset((void *)(usize)f, 0, bytes);
     if (swap) write_cr3(cr3);
+    irq_restore(fl);
+}
+
+/* Copy into a frame by physical address (same caveat as zero_frame). */
+void phys_write(u64 pa, const void *src, usize len) {
+    u64 fl = irq_save();
+    u64 cr3 = read_cr3();
+    int swap = pa < USER_TOP && kpml4_phys && cr3 != kpml4_phys;
+    if (swap) write_cr3(kpml4_phys);
+    memcpy((void *)(usize)pa, src, len);
+    if (swap) write_cr3(cr3);
+    irq_restore(fl);
 }
 
 static u64 bump(range_t *r, int n, usize pages) {

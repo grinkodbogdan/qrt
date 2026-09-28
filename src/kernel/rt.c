@@ -49,6 +49,11 @@ int strcmp(const char *a, const char *b) {
     return (u8)*a - (u8)*b;
 }
 
+char *strchr(const char *s, int c) {
+    for (; *s; s++) if (*s == (char)c) return (char *)s;
+    return c ? NULL : (char *)s;
+}
+
 void strlcpy(char *d, const char *s, usize cap) {
     usize i = 0;
     if (!cap) return;

@@ -21,3 +21,4 @@ typedef struct {
 extern const font_t font_regular[];
 extern const font_t font_semibold[];
 extern const font_t font_light[];
+extern const font_t font_mono[];

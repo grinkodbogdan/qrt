@@ -42,6 +42,7 @@ typedef void (*irq_handler_t)(frame_t *f);
 void irq_register(int vector, irq_handler_t h);
 void native_panic(const char *what, frame_t *f);    /* crash screen; never returns */
 extern int (*user_fault_hook)(frame_t *f);          /* 1 = handled (process killed) */
+extern int (*page_fault_hook)(frame_t *f);          /* 1 = page mapped, retry */
 
 /* local APIC */
 void lapic_init(void);

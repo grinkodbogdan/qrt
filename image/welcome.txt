@@ -1,11 +1,14 @@
 Welcome to QRT.
 
-This file lives on the EFI System Partition of the boot stick, and you are
-reading it through the Files app: the Tessera kernel asks the firmware's
-FAT driver (Simple File System protocol) for it.
+This file lives on the EFI System Partition of the boot stick. On a 64-bit
+tablet QRT copies the stick into memory at boot, exits the firmware and
+serves this file from its own file system; on 32-bit firmware the Tessera
+kernel reads it through the firmware's FAT driver.
 
 Things to try
   * Sketch   - draw with your finger to check the touchscreen
-  * Settings - change the accent colour or rotate the screen
-  * System   - see what the kernel found on this machine
-  * Ask bar  - type on a keyboard (USB OTG) to search apps and commands
+  * Terminal - run Linux programs: busybox, ls -l /, uname -a, hello
+  * System   - see what the kernel found, which devices have drivers
+  * Settings - accent colour, rotation, native or firmware kernel mode
+  * Ask bar  - type on a USB keyboard to search apps and commands
+               (firmware mode; native mode has no USB driver yet)

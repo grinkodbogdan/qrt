@@ -154,7 +154,8 @@ def default_script(q, shots):
     # Files: open the volume, then the qrt folder, then welcome.txt
     q.tap(780, 290)
     q.tap(400, 200)                       # row 0: the QRT volume
-    q.tap(400, 350)                       # rows: "..", EFI, qrt -> open qrt
+    # firmware volume: "..", EFI, qrt; native RAM root: "..", bin, dev, EFI, etc, proc, qrt, tmp
+    q.tap(400, 626 if ARCH == "x64" else 350)
     shots.append(q.shot("03-files-dir"))
     q.tap(400, 350)                       # rows: "..", hwdump, welcome.txt
     shots.append(q.shot("03-files-text"))
@@ -178,6 +179,13 @@ def default_script(q, shots):
     q.tap(780, 600)
     q.tap(640, 141, settle=2)
     shots.append(q.shot("12-touchlab"))
+    q.keys("esc")
+    # Terminal: run the glibc test program and a busybox applet (native x64 only)
+    q.tap(1100, 600)
+    for cmd in ["hello", "uname -a"]:
+        q.keys(*[c if c != " " else "spc" for c in cmd], settle=0.2)
+        q.keys("ret", settle=6.0)
+    shots.append(q.shot("13-terminal"))
     q.keys("esc")
     # Settings: rotate to portrait, pick an accent
     q.tap(780, 445)

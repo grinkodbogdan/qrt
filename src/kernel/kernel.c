@@ -1,5 +1,6 @@
 /* kernel.c - Tessera entry point and boot sequence. */
 #include "kernel.h"
+#include "dev.h"
 #include "smp.h"
 #include "vfs.h"
 #include "../drivers/pci.h"
@@ -77,6 +78,15 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     klog("QRT %s (%s) - Tessera kernel", QRT_VERSION, QRT_ARCH);
     calibrate_clock();
     klog("clock: %llu kHz TSC", k.tsc_per_ms);
+    {   /* Unix epoch at boot, from the RTC (days-from-civil) */
+        EFI_TIME t;
+        k_walltime(&t);
+        i64 y = t.Year - (t.Month <= 2), era = (y >= 0 ? y : y - 399) / 400;
+        i64 yoe = y - era * 400, mp = (t.Month + 9) % 12;
+        i64 doy = (153 * mp + 2) / 5 + t.Day - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        i64 days = era * 146097 + doe - 719468;
+        k.epoch_at_boot = (u64)(days * 86400 + t.Hour * 3600 + t.Minute * 60 + t.Second) - k_now_ms() / 1000;
+    }
 
     connect_all_drivers();
     klog("firmware: %d handles, %d controllers connected", k.handles, k.drivers_connected);
@@ -96,6 +106,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     }
 #endif
     smp_init();
+    dev_init();                               /* firmware mode: drivers only describe what the firmware runs */
     shell_main();
     return EFI_SUCCESS;
 }

@@ -1,7 +1,7 @@
 /* Settings: theme, orientation and power - persisted in UEFI NVRAM. */
 #include "../ui/shell.h"
 
-static struct { tap_t tap; int confirm; } st;   /* confirm: pending power action */
+static struct { tap_t tap; int confirm; int fw_mode; } st;   /* confirm: pending power action; fw_mode: cached QrtBootMode == 1 */
 
 static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
     for (int i = 0; i < 8; i++) {
@@ -12,7 +12,7 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
     gfx_ring(c, cx, cy, r * 0.62f, r * 0.3f, fg);
 }
 
-typedef struct { rect_t accent[N_ACCENTS], rot[4], power[3], card; int y_accent, y_rot, y_power, y_about; } lay_t;
+typedef struct { rect_t accent[N_ACCENTS], rot[4], kern[2], power[3], card; int y_accent, y_rot, y_kern, y_power, y_about; } lay_t;
 
 static lay_t layout(rect_t a) {
     lay_t L;
@@ -32,6 +32,11 @@ static lay_t layout(rect_t a) {
     y += ui.small->line + dp(8);
     int rw = (w - 3 * dp(10)) / 4;
     for (int i = 0; i < 4; i++) L.rot[i] = (rect_t){ x + i * (rw + dp(10)), y, rw, dp(44) };
+    y += dp(60);
+    L.y_kern = y;
+    y += ui.small->line + dp(8);
+    int kw = (w - dp(10)) / 2;
+    for (int i = 0; i < 2; i++) L.kern[i] = (rect_t){ x + i * (kw + dp(10)), y, kw, dp(44) };
     y += dp(60);
     L.y_power = y;
     y += ui.small->line + dp(8);
@@ -58,6 +63,15 @@ static void draw(canvas_t *c, rect_t a) {
     ui_section(c, x, L.y_rot, "SCREEN ROTATION");
     static const char *rot[] = { "0\xc2\xb0", "90\xc2\xb0", "180\xc2\xb0", "270\xc2\xb0" };
     for (int i = 0; i < 4; i++) ui_chip(c, L.rot[i], rot[i], i == shell_rotation());
+    ui_section(c, x, L.y_kern, sizeof(void *) == 8 ? "KERNEL MODE (FROM NEXT BOOT)" : "KERNEL MODE");
+    if (sizeof(void *) == 8) {
+        int fw = st.fw_mode;                    /* draw() may run on any core: no firmware calls here */
+        ui_chip(c, L.kern[0], "Native: QRT drives the hardware", !fw);
+        ui_chip(c, L.kern[1], "Firmware: UEFI drivers underneath", fw);
+    } else {
+        gfx_text(c, ui.small, x, L.kern[0].y + (L.kern[0].h - ui.small->line) / 2,
+                 "32-bit firmware: QRT always runs on top of UEFI", ui.text2);
+    }
     ui_section(c, x, L.y_power, "POWER");
     for (int i = 0; i < 3; i++) {
         int armed = st.confirm == i + 1;
@@ -69,12 +83,19 @@ static void draw(canvas_t *c, rect_t a) {
     y += ui.small->line + dp(6);
     gfx_text(c, ui.label, x, y, "QRT " QRT_VERSION, ui.text);
     y += ui.label->line;
-    static const char *about[] = {
-        "Tessera is a firmware-hosted exokernel: it never exits UEFI boot",
-        "services, so the tablet's own firmware drivers run display, touch,",
-        "buttons, eMMC/SD/USB storage, clock and power underneath the shell.",
+    static const char *about_native[] = {
+        "Running natively: QRT exited the firmware and owns the machine -",
+        "its own memory manager, scheduler, interrupts, cores and drivers.",
+        "The firmware is kept only for the clock, NVRAM settings and reset.",
+        "Linux x86-64 programs run in the Terminal.",
+    };
+    static const char *about_fw[] = {
+        "Running on the firmware: Tessera keeps UEFI boot services alive and",
+        "the tablet's own firmware drivers run display, touch, buttons,",
+        "storage, clock and power underneath the shell.",
         "Settings live in UEFI NVRAM and survive reboots.",
     };
+    const char **about = k.native ? about_native : about_fw;
     for (int i = 0; i < 4; i++, y += ui.small->line)
         gfx_text_fit(c, ui.small, x, y, L.card.w - dp(48), about[i], ui.text2);
 }
@@ -84,6 +105,9 @@ static int event(const event_t *e, rect_t a) {
     lay_t L = layout(a);
     for (int i = 0; i < N_ACCENTS; i++) if (in_rect(L.accent[i], e->x, e->y)) { shell_set_accent(i); return 1; }
     for (int i = 0; i < 4; i++) if (in_rect(L.rot[i], e->x, e->y)) { shell_set_rotation(i); return 1; }
+    if (sizeof(void *) == 8)
+        for (int i = 0; i < 2; i++)
+            if (in_rect(L.kern[i], e->x, e->y)) { hal_setting_set(u"QrtBootMode", (u32)i); st.fw_mode = i; return 1; }
     for (int i = 0; i < 3; i++) {
         if (!in_rect(L.power[i], e->x, e->y)) continue;
         if (st.confirm != i + 1) { st.confirm = i + 1; return 1; }
@@ -97,6 +121,6 @@ static int event(const event_t *e, rect_t a) {
     return 0;
 }
 
-static void on_open(void) { st.confirm = 0; }
+static void on_open(void) { st.confirm = 0; st.fw_mode = hal_setting_get(u"QrtBootMode", 0) == 1; }
 
 const app_t app_settings = { "Settings", "Theme, rotation, power", RGB(0x4d, 0xa3, 0xff), icon, on_open, draw, event, NULL };

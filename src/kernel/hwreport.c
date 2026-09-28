@@ -154,6 +154,8 @@ static void dump_pci(void) {
 
 /* ---- entry ------------------------------------------------------------------ */
 /* Write one file into \qrt\hwdump on the boot volume (used by the Touch Lab). */
+const char *hwreport_hid(int i) { return i >= 0 && i < n_hids ? hids[i] : NULL; }
+
 int hwreport_write(const char *name, const void *data, usize len) {
     if (k.native) {                        /* no storage driver yet: keep it in the RAM file system */
         char path[96];

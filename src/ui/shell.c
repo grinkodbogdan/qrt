@@ -18,7 +18,7 @@ const u32 accent_palette[N_ACCENTS] = {
 };
 const char *accent_names[N_ACCENTS] = { "Fuchsia", "Iris", "Lagoon", "Ember", "Sky", "Lime" };
 
-static const app_t *apps[] = { &app_clock, &app_sketch, &app_files, &app_system, &app_settings, &app_life, &app_lab };
+static const app_t *apps[] = { &app_clock, &app_sketch, &app_files, &app_system, &app_settings, &app_life, &app_lab, &app_terminal };
 #define N_APPS ((int)ARRAY_LEN(apps))
 
 typedef enum { VIEW_HOME, VIEW_APP } view_t;
@@ -357,7 +357,7 @@ static void draw_home(canvas_t *c, const EFI_TIME *t) {
     gfx_text(c, ui.title, pad, y, buf, ui.text);
     y += ui.title->line + dp(6);
     const char *greet = t->Hour < 5 ? "Up late" : t->Hour < 12 ? "Good morning" : t->Hour < 18 ? "Good afternoon" : "Good evening";
-    fmt(buf, sizeof buf, "%s. Everything runs on your firmware.", greet);
+    fmt(buf, sizeof buf, k.native ? "%s. Running on the Tessera kernel." : "%s. Everything runs on your firmware.", greet);
     gfx_text_fit(c, ui.body, pad, y, (ui.landscape ? ui.W / 2 - dp(40) : ui.W - 2 * pad), buf, ui.text2);
 
     {

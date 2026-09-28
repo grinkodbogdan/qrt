@@ -1,0 +1,94 @@
+/*
+ * builtin.c - the drivers linked into QRT, in match order.
+ *
+ * Each driver is a driver_t (see src/kernel/dev.h).  The ones here are small:
+ * most of the work of the touchscreen stack lives in dwi2c.c / i2chid.c /
+ * touch.c, and these entries connect it to the device list.
+ */
+#include "../kernel/dev.h"
+#include "uart.h"
+#include "touch.h"
+#if defined(__x86_64__)
+#include "../arch/x64/irq.h"
+#endif
+
+/* ---- chipset: devices the kernel itself takes care of ---------------------- */
+static const pci_match_t chipset_pci[] = { { PCI_ANY_ID, PCI_ANY_ID, 0x06, PCI_ANY_CLS }, { 0 } };
+static const char *const chipset_acpi[] = { "PNP0A08", "PNP0A03", "PNP0C02", "PNP0C01", "PNP0A06",
+                                            "PNP0000", "PNP0100", "PNP0103", "ACPI0007", "PNP0C0F", "PNP0A05", "ACPI0010", "ACPI0006", NULL };
+static int chipset_probe(device_t *d) {
+    const char *s = "no driver needed";
+    if (d->bus == BUS_ACPI) {
+        if (!strcmp(d->name, "PNP0000")) s = k.native ? "masked; QRT uses the local and I/O APICs" : "left to the firmware";
+        else if (!strcmp(d->name, "PNP0100") || !strcmp(d->name, "PNP0103"))
+            s = k.native ? "unused; QRT times with the local APIC and TSC" : "left to the firmware";
+        else if (!strcmp(d->name, "ACPI0007")) s = k.native ? "cores started by QRT (INIT/SIPI)" : "cores started through UEFI MP services";
+        else if (!strcmp(d->name, "PNP0C0F")) s = "PCI interrupt link (not routed yet: drivers use MSI or poll)";
+        else if (!strcmp(d->name, "PNP0A08") || !strcmp(d->name, "PNP0A03")) s = "PCI root; config space through ECAM";
+        else if (!strcmp(d->name, "ACPI0006")) s = "GPE block (ACPI events not handled yet)";
+    }
+    strlcpy(d->status, s, sizeof d->status);
+    return 0;
+}
+static const driver_t drv_chipset = { "chipset", chipset_pci, chipset_acpi, NULL, chipset_probe, NULL };
+
+/* ---- framebuffer --------------------------------------------------------- */
+static const pci_match_t fb_pci[] = { { PCI_ANY_ID, PCI_ANY_ID, 0x03, PCI_ANY_CLS }, { 0 } };
+static int fb_probe(device_t *d) {
+    if (k.native) fmt(d->status, sizeof d->status, "linear framebuffer %ux%u, write-combining, QRT compositor", k.fb_w, k.fb_h);
+    else strlcpy(d->status, "firmware GOP framebuffer, QRT compositor", sizeof d->status);
+    return 0;
+}
+static const driver_t drv_fb = { "framebuffer", fb_pci, NULL, NULL, fb_probe, NULL };
+
+/* ---- 16550 UART ------------------------------------------------------------ */
+static const char *const uart_platform[] = { "com1", NULL };
+static const char *const uart_acpi[] = { "PNP0501", NULL };
+static int uart_vector = -1;
+static void uart_status(device_t *d) {
+    if (d->bus == BUS_ACPI) { strlcpy(d->status, "the same port as com1", sizeof d->status); return; }
+    if (uart_vector >= 0)
+        fmt(d->status, sizeof d->status, "COM1, IRQ 4 -> vector 0x%x, %llu bytes received", uart_vector, uart_rx_count());
+    else fmt(d->status, sizeof d->status, "COM1, polled, %llu bytes received", uart_rx_count());
+}
+static int uart_probe(device_t *d) {
+    if (!uart_present()) return DEV_NOT_MINE;
+#if defined(__x86_64__)
+    if (d->bus == BUS_PLATFORM && k.native && irq_ioapics()) {
+        uart_vector = irq_attach_isa(4, "uart16550", uart_irq, NULL);
+        if (uart_vector >= 0) uart_irq_enable();
+    }
+#endif
+    uart_status(d);
+    return 0;
+}
+static const driver_t drv_uart = { "uart16550", NULL, uart_acpi, uart_platform, uart_probe, uart_status };
+
+/* ---- DesignWare I2C (Intel LPSS) ------------------------------------------ */
+static const pci_match_t dw_pci[] = {
+    { 0x8086, 0x0f41, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x0f42, PCI_ANY_CLS, PCI_ANY_CLS },
+    { 0x8086, 0x0f43, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x0f44, PCI_ANY_CLS, PCI_ANY_CLS },
+    { 0x8086, 0x0f45, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x0f46, PCI_ANY_CLS, PCI_ANY_CLS },
+    { 0x8086, 0x0f47, PCI_ANY_CLS, PCI_ANY_CLS },
+    { 0x8086, 0x22c1, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x22c2, PCI_ANY_CLS, PCI_ANY_CLS },
+    { 0x8086, 0x22c3, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x22c4, PCI_ANY_CLS, PCI_ANY_CLS },
+    { 0x8086, 0x22c5, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x22c6, PCI_ANY_CLS, PCI_ANY_CLS },
+    { 0x8086, 0x22c7, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
+static void dw_status(device_t *d) {
+    int touch_bus = d->pci->bus == 0 && d->pci->dev == 0x18 && d->pci->fn == 6;
+    strlcpy(d->status, touch_bus ? (ntouch_active() ? "I2C6: carries the touchscreen (native, polled)"
+                                                    : "I2C6: touchscreen bus (Touch Lab)")
+                                 : "controller known; no I2C client drivers on this bus yet", sizeof d->status);
+}
+static int dw_probe(device_t *d) { dw_status(d); return 0; }
+static const driver_t drv_dwi2c = { "dw-i2c", dw_pci, NULL, NULL, dw_probe, dw_status };
+
+/* ---- HID over I2C ------------------------------------------------------- */
+static const char *const hid_acpi[] = { "PNP0C50", NULL };
+static void hid_status(device_t *d) {
+    strlcpy(d->status, ntouch_active() ? nt.status : "probed on demand by Touch Lab", sizeof d->status);
+}
+static int hid_probe(device_t *d) { hid_status(d); return 0; }
+static const driver_t drv_i2chid = { "i2c-hid", NULL, hid_acpi, NULL, hid_probe, hid_status };
+
+const driver_t *const builtin_drivers[] = { &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_chipset, NULL };
