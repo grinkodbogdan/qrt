@@ -2,6 +2,7 @@
  * hal.c - device discovery and the firmware-backed driver layer.
  */
 #include "kernel.h"
+#include "../drivers/touch.h"
 
 static EFI_GUID gop_guid = GOP_GUID;
 static EFI_GUID abs_guid = ABS_POINTER_GUID;
@@ -132,11 +133,21 @@ static int inject_key(c16 ch, event_t *out) {
     return 1;
 }
 
+void hal_reprobe_input(void) {
+    k.n_abs = k.n_rel = k.splitter_abs = k.splitter_rel = 0;
+    memset(abs_down, 0, sizeof abs_down);
+    probe_input();
+}
+
 int hal_poll(event_t *out, int max) {
     int n = 0;
     if (cur_x < 0) { cur_x = (int)k.fb_w / 2; cur_y = (int)k.fb_h / 2; }
 
     int n_abs = k.n_abs ? k.n_abs : k.splitter_abs, n_rel = k.n_rel ? k.n_rel : k.splitter_rel;
+    if (ntouch_active()) {
+        n_abs = 0;                        /* the firmware driver is gone; ours reports */
+        n += ntouch_poll(out + n, max - n - 2);
+    }
     for (int i = 0; i < n_abs && n < max - 1; i++) {
         EFI_ABSOLUTE_POINTER_PROTOCOL *p = k.abs[i];
         EFI_ABSOLUTE_POINTER_STATE s;

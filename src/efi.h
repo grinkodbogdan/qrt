@@ -254,6 +254,7 @@ typedef struct {
 enum { EfiConventionalMemory = 7, EfiBootServicesCode = 3, EfiBootServicesData = 4,
        EfiLoaderCode = 1, EfiLoaderData = 2 };
 
+#define TPL_HIGH_LEVEL 31
 #define EVT_TIMER 0x80000000u
 #define TimerCancel   0
 #define TimerPeriodic 1
@@ -264,7 +265,8 @@ typedef enum { EfiResetCold, EfiResetWarm, EfiResetShutdown } EFI_RESET_TYPE;
 
 typedef struct {
     EFI_TABLE_HEADER Hdr;
-    void *RaiseTPL, *RestoreTPL;
+    UINTN (*RaiseTPL)(UINTN NewTpl);
+    void (*RestoreTPL)(UINTN OldTpl);
     void *AllocatePages, *FreePages;
     EFI_STATUS (*GetMemoryMap)(UINTN *, EFI_MEMORY_DESCRIPTOR *, UINTN *, UINTN *, u32 *);
     EFI_STATUS (*AllocatePool)(u32 PoolType, UINTN, void **);
@@ -287,7 +289,7 @@ typedef struct {
     EFI_STATUS (*Stall)(UINTN Microseconds);
     EFI_STATUS (*SetWatchdogTimer)(UINTN Timeout, u64 Code, UINTN DataSize, c16 *Data);
     EFI_STATUS (*ConnectController)(EFI_HANDLE, EFI_HANDLE *, void *, BOOLEAN Recursive);
-    void *DisconnectController;
+    EFI_STATUS (*DisconnectController)(EFI_HANDLE, EFI_HANDLE Driver, EFI_HANDLE Child);
     void *OpenProtocol, *CloseProtocol, *OpenProtocolInformation;
     void *ProtocolsPerHandle;
     EFI_STATUS (*LocateHandleBuffer)(EFI_LOCATE_SEARCH_TYPE, EFI_GUID *, void *,

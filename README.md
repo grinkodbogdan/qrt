@@ -84,6 +84,30 @@ Native drivers for the tablet's I2C touch, SDIO, audio and battery have to be
 written against this real data. Decompile the tables with
 `iasl -d DSDT.aml SSDT*.aml`.
 
+## Touch Lab: QRT's first native driver
+
+The Touch Lab app contains QRT's own touchscreen stack. It doesn't use the
+firmware for touch:
+
+- `src/drivers/dwi2c.c`: a polled driver for the DesignWare I2C controller
+  (Intel LPSS), found through PCI.
+- `src/drivers/i2chid.c` and `hidparse.c`: HID over I2C, a HID
+  report-descriptor parser, and single-contact tracking. `make check` runs
+  the parser's host tests.
+- `src/drivers/touch.c`: the service for the Venue 8 Pro 5855. The
+  touchscreen is on `I2C6` (PCI 00:18.6) at `0x4A` (Atmel) or `0x2C`
+  (Synaptics). See `docs/hardware/venue-8-pro-5855.md`.
+
+It is opt-in and reversible:
+
+- **Probe** only reads the chip's descriptors, while firmware touch keeps
+  working.
+- **Go native** detaches the firmware driver from the I2C controller and
+  polls the chip directly.
+- If the chip stops answering, or no touch report arrives within 15 s, touch
+  goes back to the firmware automatically. Rebooting also restores it.
+- **Save report** writes `\qrt\hwdump\touch.txt`.
+
 ## Which Venue 8 Pro?
 
 - The **5830** (2013–14) has a Bay Trail Z3740D, 1–2 GB of RAM and an
@@ -100,10 +124,10 @@ density: 1.18× at 800 px and about 1.76× at 1200 px.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Get the image. Either use `dist/qrt-0.1.0.img.gz` (prebuilt) or build it
+1. Get the image. Either use `dist/qrt-0.2.0.img.gz` (prebuilt) or build it
    with `make`.
 2. Write it to a USB stick. Use Rufus, balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.1.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.2.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. Open the firmware settings. From Windows: *Settings → Update & Security →
    Recovery → Advanced startup → Troubleshoot → UEFI Firmware Settings*.

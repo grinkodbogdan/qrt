@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.1.0"
+#define QRT_VERSION "0.2.0"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8
@@ -64,6 +64,8 @@ typedef struct {
     char fw_vendor[64];
     u32 fw_revision, uefi_revision;
     char acpi_oem[8];
+    const u8 *dsdt;                   /* AML of the DSDT (NULL if unreachable) */
+    u32 dsdt_len;
     u64 ram_bytes;
     int is_venue;
     int handles, drivers_connected;
@@ -112,6 +114,8 @@ void hal_setting_set(const c16 *name, u32 value);
 void hal_probe(void);
 void sysinfo_probe(void);
 int  hwreport_save(void);            /* ACPI/SMBIOS/PCI dump to \qrt\hwdump */
+int  hwreport_write(const char *name, const void *data, usize len);
+void hal_reprobe_input(void);        /* forget and rediscover firmware pointers */
 
 /* ---- the shell (user interface) takes over after boot ---- */
 void shell_main(void);

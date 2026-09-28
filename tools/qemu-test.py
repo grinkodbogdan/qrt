@@ -140,27 +140,27 @@ def default_script(q, shots):
     1280x800 landscape layout the QEMU VGA device reports."""
     back = (38, 64)
     # Sketch: open, draw a stroke, change ink, draw another
-    q.tap(1100, 150)
+    q.tap(1100, 135)
     q.drag([(200 + i * 40, 400 + (i % 5) * 30) for i in range(20)])
     q.tap(90, 124)                       # second ink swatch
     q.drag([(300 + i * 30, 600 - i * 12) for i in range(25)])
     shots.append(q.shot("02-sketch"))
     q.tap(*back)
     # Files: open the volume, then the qrt folder, then welcome.txt
-    q.tap(780, 345)
+    q.tap(780, 290)
     q.tap(400, 200)                       # row 0: the QRT volume
     q.tap(400, 350)                       # rows: "..", EFI, qrt -> open qrt
     shots.append(q.shot("03-files-dir"))
-    q.tap(400, 280)                       # rows: "..", welcome.txt
+    q.tap(400, 350)                       # rows: "..", hwdump, welcome.txt
     shots.append(q.shot("03-files-text"))
     q.keys("backspace")
     # System info
     q.tap(*back)
-    q.tap(1100, 345)
+    q.tap(1100, 290)
     shots.append(q.shot("04-system"))
     q.tap(*back)
     # Clock
-    q.tap(780, 150)
+    q.tap(780, 135)
     shots.append(q.shot("05-clock"))
     q.keys("esc")
     # Ask bar with the keyboard: type "li", Enter -> Life
@@ -169,8 +169,13 @@ def default_script(q, shots):
     q.keys("ret", settle=3.0)
     shots.append(q.shot("07-life"))
     q.keys("esc")
+    # Touch Lab: probe + "Go native" (no LPSS I2C in QEMU, so it must refuse cleanly)
+    q.tap(780, 600)
+    q.tap(640, 141, settle=2)
+    shots.append(q.shot("12-touchlab"))
+    q.keys("esc")
     # Settings: rotate to portrait, pick an accent
-    q.tap(780, 540)
+    q.tap(780, 445)
     shots.append(q.shot("08-settings"))
     q.tap(488, 305)                       # rotation 90 deg -> 800x1280 portrait canvas
     time.sleep(2)

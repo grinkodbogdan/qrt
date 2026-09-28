@@ -11,11 +11,13 @@ CC := clang
 endif
 LINK    := lld-link
 PYTHON  ?= python3
+HOSTCC  ?= gcc
 
 SRC := src/kernel/kernel.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c \
        src/ui/gfx.c src/ui/shell.c src/ui/fontdata.c \
        src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c \
-       src/apps/settings.c src/apps/life.c
+       src/apps/settings.c src/apps/life.c src/apps/lab.c \
+       src/drivers/dwi2c.c src/drivers/i2chid.c src/drivers/hidparse.c src/drivers/touch.c
 
 CFLAGS := -std=c11 -O2 -ffreestanding -fno-stack-protector -fno-stack-check \
           -fshort-wchar -fno-math-errno -fno-asynchronous-unwind-tables \
@@ -36,7 +38,7 @@ OVMF32VAR := $(OVMF_DIR)/OVMF32_VARS_4M.fd
 OVMF64    := $(OVMF_DIR)/OVMF_CODE_4M.fd
 OVMF64VAR := $(OVMF_DIR)/OVMF_VARS_4M.fd
 
-.PHONY: all efi run run64 test clean fonts
+.PHONY: all efi run run64 test check clean fonts
 
 all: build/qrt.img
 
@@ -71,6 +73,10 @@ run64: build/qrt.img
 test: build/qrt.img
 	$(PYTHON) tools/qemu-test.py ia32
 	$(PYTHON) tools/qemu-test.py x64
+
+check:
+	@mkdir -p build
+	$(HOSTCC) -Wall -Wextra -O1 -o build/test_hid tests/test_hid.c && build/test_hid
 
 clean:
 	rm -rf build

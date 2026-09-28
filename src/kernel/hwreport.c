@@ -152,6 +152,33 @@ static void dump_pci(void) {
 }
 
 /* ---- entry ------------------------------------------------------------------ */
+/* Write one file into \qrt\hwdump on the boot volume (used by the Touch Lab). */
+int hwreport_write(const char *name, const void *data, usize len) {
+    EFI_LOADED_IMAGE_PROTOCOL *li;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
+    EFI_FILE_PROTOCOL *root, *qrt;
+    const u64 mode = EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE;
+    if (EFI_ERROR(k.bs->HandleProtocol(k.image, &li_guid, (void **)&li)) ||
+        EFI_ERROR(k.bs->HandleProtocol(li->DeviceHandle, &sfs_guid, (void **)&fs)) ||
+        EFI_ERROR(fs->OpenVolume(fs, &root)))
+        return 0;
+    int ok = 0;
+    if (!EFI_ERROR(root->Open(root, &qrt, u"qrt", mode, EFI_FILE_DIRECTORY))) {
+        if (!EFI_ERROR(qrt->Open(qrt, &dir, u"hwdump", mode, EFI_FILE_DIRECTORY))) {
+            c16 wname[64];
+            EFI_FILE_PROTOCOL *f;
+            utf8_to_str16(wname, 64, name);
+            /* truncate: delete any old copy first */
+            if (!EFI_ERROR(dir->Open(dir, &f, wname, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0))) f->Delete(f);
+            ok = save(name, data, len);
+            dir->Close(dir);
+        }
+        qrt->Close(qrt);
+    }
+    root->Close(root);
+    return ok;
+}
+
 int hwreport_save(void) {
     EFI_LOADED_IMAGE_PROTOCOL *li;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;

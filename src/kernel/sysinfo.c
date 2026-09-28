@@ -52,6 +52,30 @@ static void parse_smbios(const u8 *t, usize len) {
     }
 }
 
+static const u8 *phys_ptr(u64 a) {
+    if (sizeof(void *) == 4 && a >> 32) return NULL;
+    return (const u8 *)(usize)a;
+}
+
+/* RSDP -> XSDT/RSDT -> FADT -> DSDT */
+static void find_dsdt(const u8 *rsdp) {
+    const u8 *root = NULL;
+    int wide = 0;
+    if (rsdp[15] >= 2 && *(const u64 *)(rsdp + 24)) { root = phys_ptr(*(const u64 *)(rsdp + 24)); wide = 1; }
+    if (!root) root = phys_ptr(*(const u32 *)(rsdp + 16));
+    if (!root) return;
+    u32 n = (*(const u32 *)(root + 4) - 36) / (wide ? 8 : 4);
+    for (u32 i = 0; i < n; i++) {
+        const u8 *t = phys_ptr(wide ? *(const u64 *)(root + 36 + i * 8) : *(const u32 *)(root + 36 + i * 4));
+        if (!t || memcmp(t, "FACP", 4)) continue;
+        u32 flen = *(const u32 *)(t + 4);
+        u64 d = flen >= 148 ? *(const u64 *)(t + 140) : 0;
+        if (!d) d = *(const u32 *)(t + 40);
+        const u8 *dsdt = phys_ptr(d);
+        if (dsdt && !memcmp(dsdt, "DSDT", 4)) { k.dsdt = dsdt; k.dsdt_len = *(const u32 *)(dsdt + 4); }
+    }
+}
+
 static void probe_tables(void) {
     EFI_GUID smb = SMBIOS_TABLE_GUID, smb3 = SMBIOS3_TABLE_GUID, acpi = ACPI20_TABLE_GUID;
     for (UINTN i = 0; i < k.st->NumberOfTableEntries; i++) {
@@ -69,6 +93,7 @@ static void probe_tables(void) {
         } else if (guid_eq(&c->VendorGuid, &acpi) && !memcmp(p, "RSD PTR ", 8)) {
             memcpy(k.acpi_oem, p + 9, 6);
             k.acpi_oem[6] = 0;
+            find_dsdt(p);
         }
     }
 }

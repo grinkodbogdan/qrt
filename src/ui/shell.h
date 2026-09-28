@@ -26,7 +26,7 @@ typedef struct app {
     int  (*tick)(u64 now_ms);                      /* called ~60 Hz while open; 1 = redraw */
 } app_t;
 
-extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life;
+extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life, app_lab;
 
 /* shell services for apps */
 void shell_redraw(void);
