@@ -1,5 +1,6 @@
 /* kernel.c - Tessera entry point and boot sequence. */
 #include "kernel.h"
+#include "smp.h"
 
 kernel_t k;
 
@@ -74,6 +75,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     hal_probe();
     if (!k.gop) panic("no Graphics Output Protocol - cannot start the shell");
     if (!hwreport_save()) klog("hwreport: boot volume not writable, skipped");
+    smp_init();
 
     shell_main();
     return EFI_SUCCESS;

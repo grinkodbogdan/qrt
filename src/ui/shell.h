@@ -31,10 +31,15 @@ extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, a
 /* shell services for apps */
 void shell_redraw(void);                /* redraw the whole screen */
 void shell_damage(rect_t r);            /* redraw only r (logical coords); call from event/tick */
+rect_t shell_app_area(void);            /* where the open app draws */
+/* Wall-clock time of the frame being drawn.  draw() callbacks may run on any
+ * CPU core, so they must use this instead of k_walltime() and must not
+ * allocate memory, call firmware services or change app state. */
+void shell_time(EFI_TIME *t);
 
 typedef struct {
     u32 compose_us, present_us, area_permille, frames;
-    char bench[3][96];
+    char bench[4][96];
 } shell_stats_t;
 extern shell_stats_t shell_stats;
 void shell_go_home(void);

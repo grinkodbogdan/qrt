@@ -13,7 +13,7 @@ LINK    := lld-link
 PYTHON  ?= python3
 HOSTCC  ?= gcc
 
-SRC := src/kernel/kernel.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c \
+SRC := src/kernel/kernel.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
        src/ui/gfx.c src/ui/shell.c src/ui/fontdata.c \
        src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c \
        src/apps/settings.c src/apps/life.c src/apps/lab.c \

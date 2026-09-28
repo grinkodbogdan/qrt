@@ -44,24 +44,35 @@ static rect_t board(rect_t a) { return (rect_t){ a.x + dp(16), a.y + dp(64), a.w
 static rect_t btn(rect_t a, int i) { return (rect_t){ a.x + dp(16) + i * dp(118), a.y + dp(4), dp(108), dp(46) }; }
 static int cell_px(void) { return dp(14); }
 
-static void geometry(rect_t a) {
+static void dims(rect_t a, int *cols, int *rows) {
     rect_t b = board(a);
-    int cols = MIN(GW, (b.w - dp(16)) / cell_px()), rows = MIN(GH, (b.h - dp(16)) / cell_px());
+    *cols = MIN(GW, (b.w - dp(16)) / cell_px());
+    *rows = MIN(GH, (b.h - dp(16)) / cell_px());
+}
+
+/* boot core only (open/event/tick): may reseed */
+static void geometry(rect_t a) {
+    int cols, rows;
+    dims(a, &cols, &rows);
     if (st.cols && (cols != st.cols || rows != st.rows)) seed();   /* rotated: new board */
     st.cols = cols;
     st.rows = rows;
 }
 
-static void on_open(void) { if (!st.gen) seed(); }
+static void on_open(void) {
+    if (!st.gen) seed();
+    geometry(shell_app_area());
+}
 
 static void draw(canvas_t *c, rect_t a) {
-    geometry(a);
+    int cols, rows;              /* draw() may run on any core: no reseeding here */
+    dims(a, &cols, &rows);
     rect_t b = board(a);
     ui_card(c, b, dp(20), 0);
     int cp = cell_px();
-    int ox = b.x + (b.w - st.cols * cp) / 2, oy = b.y + (b.h - st.rows * cp) / 2;
-    for (int y = 0; y < st.rows; y++)
-        for (int x = 0; x < st.cols; x++)
+    int ox = b.x + (b.w - cols * cp) / 2, oy = b.y + (b.h - rows * cp) / 2;
+    for (int y = 0; y < rows; y++)
+        for (int x = 0; x < cols; x++)
             if (st.cell[y][x])
                 gfx_rrect(c, (rect_t){ ox + x * cp + 1, oy + y * cp + 1, cp - 2, cp - 2 }, dp(3), ui.accent);
     ui_button(c, btn(a, 0), st.running ? "Pause" : "Play", ui.accent, RGB(255, 255, 255));
@@ -105,7 +116,8 @@ static int event(const event_t *e, rect_t a) {
 }
 
 static int tick(u64 now) {
-    if (!st.running || st.painting || now - st.last < 120 || !st.cols) return 0;
+    if (!st.running || st.painting || now - st.last < 120) return 0;
+    geometry(shell_app_area());
     st.last = now;
     step();
     return 1;

@@ -26,7 +26,7 @@ static void layout(rect_t a, float *cx, float *cy, float *rad, rect_t *digital, 
 
 static void draw(canvas_t *c, rect_t a) {
     EFI_TIME t;
-    k_walltime(&t);
+    shell_time(&t);
     float cx, cy, R;
     rect_t dig, b1, b2;
     layout(a, &cx, &cy, &R, &dig, &b1, &b2);

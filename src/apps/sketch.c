@@ -8,7 +8,7 @@ static const u32 inks[] = {
 static const float sizes[] = { 3, 7, 14 };
 
 static struct {
-    canvas_t paper;
+    canvas_t store;          /* max(W,H)^2, allocated on open: draw() may run on any core */
     int ink, size, drawing, blank;
     float lx, ly;
     tap_t tap;
@@ -29,17 +29,28 @@ static rect_t size_rect(rect_t a, int i) {
 }
 static rect_t clear_rect(rect_t a) { rect_t t = toolbar(a); return (rect_t){ t.x + t.w - dp(96), t.y + dp(8), dp(96), dp(40) }; }
 
-static void ensure_paper(rect_t p) {
-    if (st.paper.px && st.paper.w == p.w && st.paper.h == p.h) return;
-    canvas_free(&st.paper);
-    st.paper = canvas_new(p.w, p.h);
-    gfx_fill(&st.paper, (rect_t){ 0, 0, p.w, p.h }, RGB(0x12, 0x10, 0x1c));
+#define PAPER RGB(0x12, 0x10, 0x1c)
+
+static void on_open(void) {
+    int side = MAX(ui.W, ui.H);
+    if (st.store.px && st.store.w >= side) return;
+    canvas_free(&st.store);
+    st.store = canvas_new(side, side);
+    gfx_fill(&st.store, (rect_t){ 0, 0, side, side }, PAPER);
     st.blank = 1;
+}
+
+/* the paper is the top-left p.w x p.h window of the store */
+static canvas_t paper(rect_t p) {
+    canvas_t v = st.store;
+    v.w = MIN(p.w, st.store.w);
+    v.h = MIN(p.h, st.store.h);
+    v.clip = v.limit = (rect_t){ 0, 0, v.w, v.h };
+    return v;
 }
 
 static void draw(canvas_t *c, rect_t a) {
     rect_t p = paper_rect(a);
-    ensure_paper(p);
     for (int i = 0; i < (int)ARRAY_LEN(inks); i++) {
         rect_t r = ink_rect(a, i);
         float cx = r.x + r.w / 2.0f, cy = r.y + r.h / 2.0f;
@@ -56,7 +67,10 @@ static void draw(canvas_t *c, rect_t a) {
     if (cr.x > size_rect(a, 2).x + dp(46)) ui_button(c, cr, "Clear", RGBA(255, 255, 255, 30), ui.text);
 
     gfx_shadow(c, p, dp(18), dp(12), RGBA(0, 0, 0, 80));
-    gfx_blit_rounded(c, p.x, p.y, &st.paper, dp(16));
+    if (st.store.px) {
+        canvas_t pv = paper(p);
+        gfx_blit_rounded(c, p.x, p.y, &pv, dp(16));
+    }
     gfx_rrect_outline(c, p, dp(16), 1, ui.stroke);
     if (st.blank)
         gfx_text_center(c, ui.body, p, "Draw with your finger", ui.text3);
@@ -64,7 +78,8 @@ static void draw(canvas_t *c, rect_t a) {
 
 static int event(const event_t *e, rect_t a) {
     rect_t p = paper_rect(a);
-    ensure_paper(p);
+    on_open();
+    canvas_t pv = paper(p);
     if (e->type == EV_KEY && (e->ch == 'c' || e->ch == 'C')) goto clear;
     int pad = dp(sizes[st.size]) / 2 + 2;
     if (e->type == EV_DOWN && in_rect(p, e->x, e->y)) {
@@ -72,14 +87,14 @@ static int event(const event_t *e, rect_t a) {
         st.drawing = 1;
         st.blank = 0;
         st.lx = (float)(e->x - p.x); st.ly = (float)(e->y - p.y);
-        gfx_circle(&st.paper, st.lx, st.ly, dp(sizes[st.size]) / 2.0f, inks[st.ink]);
+        gfx_circle(&pv, st.lx, st.ly, dp(sizes[st.size]) / 2.0f, inks[st.ink]);
         /* only the dot changed, unless the "draw with your finger" hint must go */
         if (!was_blank) shell_damage((rect_t){ e->x - pad, e->y - pad, 2 * pad, 2 * pad });
         return 1;
     }
     if (e->type == EV_MOVE && st.drawing) {
         float x = (float)(e->x - p.x), y = (float)(e->y - p.y);
-        gfx_line(&st.paper, st.lx, st.ly, x, y, (float)dp(sizes[st.size]), inks[st.ink]);
+        gfx_line(&pv, st.lx, st.ly, x, y, (float)dp(sizes[st.size]), inks[st.ink]);
         int x0 = (int)MIN(st.lx, x), y0 = (int)MIN(st.ly, y), x1 = (int)MAX(st.lx, x), y1 = (int)MAX(st.ly, y);
         shell_damage((rect_t){ p.x + x0 - pad, p.y + y0 - pad, x1 - x0 + 2 * pad + 1, y1 - y0 + 2 * pad + 1 });
         st.lx = x; st.ly = y;
@@ -92,9 +107,9 @@ static int event(const event_t *e, rect_t a) {
     if (in_rect(clear_rect(a), e->x, e->y)) goto clear;
     return 0;
 clear:
-    gfx_fill(&st.paper, (rect_t){ 0, 0, st.paper.w, st.paper.h }, RGB(0x12, 0x10, 0x1c));
+    gfx_fill(&st.store, (rect_t){ 0, 0, st.store.w, st.store.h }, PAPER);
     st.blank = 1;
     return 1;
 }
 
-const app_t app_sketch = { "Sketch", "Draw with a finger", RGB(0xff, 0x4f, 0xa3), icon, NULL, draw, event, NULL };
+const app_t app_sketch = { "Sketch", "Draw with a finger", RGB(0xff, 0x4f, 0xa3), icon, on_open, draw, event, NULL };

@@ -92,10 +92,19 @@ wallpaper is copied just for the damaged rows. Apps can declare tighter
 regions with `shell_damage()`; for example, Sketch redraws only the segment
 of line just drawn.
 
+Big redraws are split across every CPU core (`src/kernel/smp.c`). UEFI's MP
+Services protocol wakes the other cores, the damaged area is cut into strips
+(4 per core), and each core claims strips from a shared counter until none
+are left. Code that runs on those cores must not call firmware services or
+change app state, so the shell samples the clock once per frame
+(`shell_time()`). At boot a self-test checks that every core runs QRT code
+and does floating point correctly. Otherwise QRT stays single-core. Toggle
+it with "Multicore rendering on/off" in the Ask bar.
+
 Type `bench` in the Ask bar to run the built-in benchmark. It times full
 and partial redraws, and the results appear under **System → Graphics**. In
 QEMU a full 1280×800 frame takes about 78 ms, while a Sketch-sized partial
-update takes about 2 ms.
+update takes about 2 ms. With 4 emulated cores, a full redraw drops from 80 ms to 43 ms.
 
 ## Touch Lab: QRT's first native driver
 
@@ -137,10 +146,10 @@ density: 1.18× at 800 px and about 1.76× at 1200 px.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Get the image. Either use `dist/qrt-0.3.0.img.gz` (prebuilt) or build it
+1. Get the image. Either use `dist/qrt-0.4.0.img.gz` (prebuilt) or build it
    with `make`.
 2. Write it to a USB stick. Use Rufus, balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.3.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.4.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. Open the firmware settings. From Windows: *Settings → Update & Security →
    Recovery → Advanced startup → Troubleshoot → UEFI Firmware Settings*.

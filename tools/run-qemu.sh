@@ -13,7 +13,7 @@ myvars=$here/build/vars-$arch.fd
 [ -f "$myvars" ] || cp "$vars" "$myvars"
 
 exec qemu-system-x86_64 \
-    -machine q35,i8042=off -m 2048 -cpu max \
+    -machine q35,i8042=off -m 2048 -cpu max -smp 4 \
     -drive if=pflash,format=raw,readonly=on,file="$code" \
     -drive if=pflash,format=raw,file="$myvars" \
     -drive format=raw,file="$here/build/qrt.img" \

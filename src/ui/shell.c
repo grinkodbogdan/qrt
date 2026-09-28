@@ -8,6 +8,7 @@
  * either orientation) and pushed to the panel through GOP.
  */
 #include "shell.h"
+#include "../kernel/smp.h"
 
 ui_t ui;
 
@@ -137,8 +138,9 @@ static void ui_metrics(void) {
 
 /* Soft radial light, the signature of the wallpaper. */
 static void glow(canvas_t *c, float cx, float cy, float rad, u32 color) {
-    int x0 = MAX(0, (int)(cx - rad)), x1 = MIN(c->w, (int)(cx + rad));
-    int y0 = MAX(0, (int)(cy - rad)), y1 = MIN(c->h, (int)(cy + rad));
+    rect_t cl = c->clip;
+    int x0 = MAX(cl.x, (int)(cx - rad)), x1 = MIN(cl.x + cl.w, (int)(cx + rad));
+    int y0 = MAX(cl.y, (int)(cy - rad)), y1 = MIN(cl.y + cl.h, (int)(cy + rad));
     u32 a = color >> 24;
     /* coarse 4x4 evaluation keeps boot fast on an Atom; the falloff is smooth
      * enough that bilinear-free block shading plus dithering is invisible */
@@ -159,16 +161,28 @@ static void glow(canvas_t *c, float cx, float cy, float rad, u32 color) {
     }
 }
 
-static void build_wallpaper(void) {
-    canvas_t *w = &sh.wall;
-    float W = (float)ui.W, H = (float)ui.H, m = (float)MAX(ui.W, ui.H);
-    gfx_vgradient(w, (rect_t){ 0, 0, ui.W, ui.H }, ui.bg_top, ui.bg_bottom);
-    glow(w, W * 0.85f, H * 0.10f, m * 0.55f, ALPHA(ui.accent, 120));
-    glow(w, W * 0.05f, H * 0.55f, m * 0.50f, RGBA(0x5b, 0x3c, 0xff, 90));
-    glow(w, W * 0.70f, H * 1.00f, m * 0.45f, RGBA(0x00, 0xb3, 0xc6, 70));
-    memcpy(sh.wall_dim.px, w->px, (usize)ui.W * ui.H * 4);
-    gfx_fill(&sh.wall_dim, (rect_t){ 0, 0, ui.W, ui.H }, RGBA(4, 3, 10, 120));
+/* Horizontal band i of n within rectangle r. */
+static rect_t band(rect_t r, int i, int n) {
+    int y0 = r.y + r.h * i / n, y1 = r.y + r.h * (i + 1) / n;
+    return (rect_t){ r.x, y0, r.w, y1 - y0 };
 }
+
+/* One band of the wallpaper; runs on any core (pure pixel work). */
+static void wallpaper_job(void *arg, int i, int n) {
+    rect_t b = band(full_rect(), i, n);
+    canvas_t w = sh.wall, dim = sh.wall_dim;       /* private clip state per core */
+    gfx_limit(&w, b);
+    gfx_limit(&dim, b);
+    float W = (float)ui.W, H = (float)ui.H, m = (float)MAX(ui.W, ui.H);
+    gfx_vgradient(&w, full_rect(), ui.bg_top, ui.bg_bottom);
+    glow(&w, W * 0.85f, H * 0.10f, m * 0.55f, ALPHA(ui.accent, 120));
+    glow(&w, W * 0.05f, H * 0.55f, m * 0.50f, RGBA(0x5b, 0x3c, 0xff, 90));
+    glow(&w, W * 0.70f, H * 1.00f, m * 0.45f, RGBA(0x00, 0xb3, 0xc6, 70));
+    memcpy(dim.px + (usize)b.y * ui.W, w.px + (usize)b.y * ui.W, (usize)b.h * ui.W * 4);
+    gfx_fill(&dim, b, RGBA(4, 3, 10, 120));
+}
+
+static void build_wallpaper(void) { smp_run(wallpaper_job, NULL, MAX(4, smp_workers())); }
 
 static void alloc_canvases(void) {
     canvas_free(&sh.scene); canvas_free(&sh.frame); canvas_free(&sh.wall); canvas_free(&sh.wall_dim);
@@ -384,7 +398,7 @@ static void draw_home(canvas_t *c, const EFI_TIME *t) {
 /* ---- ask (launcher + command line) ---------------------------------------- */
 typedef struct { const char *title, *sub; int app; int action; } suggestion_t;
 enum { ACT_NONE, ACT_SHUTDOWN, ACT_REBOOT, ACT_FIRMWARE, ACT_ROTATE, ACT_ACCENT,
-       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET, ACT_BENCH };
+       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET, ACT_BENCH, ACT_SMP };
 
 static int suggestions(suggestion_t *out, int max) {
     static const suggestion_t actions[] = {
@@ -394,6 +408,7 @@ static int suggestions(suggestion_t *out, int max) {
         { "Shut down", "Power off through UEFI", -1, ACT_SHUTDOWN },
         { "Firmware setup", "Reboot into the BIOS/UEFI menu", -1, ACT_FIRMWARE },
         { "Graphics benchmark", "Time full and partial redraws", -1, ACT_BENCH },
+        { "Multicore rendering on/off", "Draw with the other CPU cores", -1, ACT_SMP },
         { "Touch: swap axes", "Fix a touchscreen mounted sideways", -1, ACT_TOUCH_SWAP },
         { "Touch: flip X", "Mirror touch left-right", -1, ACT_TOUCH_FLIPX },
         { "Touch: flip Y", "Mirror touch top-bottom", -1, ACT_TOUCH_FLIPY },
@@ -455,6 +470,7 @@ static void draw_ask(canvas_t *c) {
 
 /* ---- app chrome ------------------------------------------------------------- */
 static rect_t app_area(void) { return (rect_t){ 0, dp(96), ui.W, ui.H - dp(96) - dp(28) }; }
+rect_t shell_app_area(void) { return app_area(); }
 static rect_t back_rect(void) { return (rect_t){ dp(14), dp(40), dp(48), dp(48) }; }
 static rect_t home_zone(void) { return (rect_t){ 0, ui.H - dp(28), ui.W, dp(28) }; }
 
@@ -484,21 +500,43 @@ static void draw_app(canvas_t *c) {
  * with d as the canvas limit, so primitives outside it are rejected by their
  * clip test and the cost scales with the damaged area, not the screen.
  */
-static void compose(rect_t d) {
-    EFI_TIME t;
-    k_walltime(&t);
-    if (d.w >= ui.W && d.h >= ui.H) sh.last_minute = t.Minute;
-    canvas_t *c = &sh.scene;
-    gfx_limit(c, d);
-    d = c->limit;
+static EFI_TIME frame_time;           /* wall clock sampled once per frame on the boot core */
+void shell_time(EFI_TIME *t) { *t = frame_time; }
+
+/* Draw rectangle d into the scene.  Runs on any core: it touches only pixels
+ * inside d and uses a private copy of the canvas's clip state. */
+static void compose_rect(rect_t d) {
+    canvas_t c = sh.scene;
+    gfx_limit(&c, d);
+    d = c.limit;
     const canvas_t *wall = sh.view == VIEW_APP ? &sh.wall_dim : &sh.wall;
     for (int y = d.y; y < d.y + d.h; y++)
-        memcpy(c->px + (usize)y * c->stride + d.x, wall->px + (usize)y * wall->stride + d.x, (usize)d.w * 4);
-    draw_status(c, &t);
-    if (sh.view == VIEW_HOME) draw_home(c, &t);
-    else draw_app(c);
-    if (sh.ask_open) draw_ask(c);
-    gfx_limit(c, full_rect());
+        memcpy(c.px + (usize)y * c.stride + d.x, wall->px + (usize)y * wall->stride + d.x, (usize)d.w * 4);
+    draw_status(&c, &frame_time);
+    if (sh.view == VIEW_HOME) draw_home(&c, &frame_time);
+    else draw_app(&c);
+    if (sh.ask_open) draw_ask(&c);
+}
+
+static rect_t compose_area;
+static void compose_job(void *arg, int i, int n) { compose_rect(band(compose_area, i, n)); }
+
+static int force_single_core;
+
+static void compose(rect_t d) {
+    k_walltime(&frame_time);
+    if (d.w >= ui.W && d.h >= ui.H) sh.last_minute = frame_time.Minute;
+    d = rect_intersect(d, full_rect());
+    /* waking the other cores costs tens of microseconds: only for big areas */
+    int n = force_single_core ? 0 : smp_workers();
+    if (n && (u64)d.w * d.h >= 160000 && d.h >= 16 * n) {
+        /* 4 strips per core: strips are claimed dynamically, so cores that
+         * land on cheap areas (plain wallpaper) simply take more of them */
+        compose_area = d;
+        smp_run(compose_job, NULL, MIN(4 * n, 64));
+    } else {
+        compose_rect(d);
+    }
 }
 
 /* ---- navigation ---------------------------------------------------------------- */
@@ -529,6 +567,7 @@ static void run_action(int act) {
     case ACT_TOUCH_FLIPY: hal_set_touch_map(k.touch_map ^ TOUCH_FLIP_Y); break;
     case ACT_TOUCH_RESET: hal_set_touch_map(0); break;
     case ACT_BENCH: sh.bench_pending = 1; break;
+    case ACT_SMP: smp_set_enabled(!smp_enabled()); break;
     }
 }
 
@@ -677,6 +716,14 @@ static void run_benchmark(void) {
     rect_t full = full_rect();
     int side = dp(96);
     rect_t small = { (ui.W - side) / 2, (ui.H - side) / 2, side, side };
+    force_single_core = 1;
+    u64 s0 = k_now_us();
+    for (int i = 0; i < 8; i++) compose(full);
+    u64 single_us = (k_now_us() - s0) / 8;
+    force_single_core = 0;
+    s0 = k_now_us();
+    for (int i = 0; i < 8; i++) compose(full);
+    u64 multi_us = (k_now_us() - s0) / 8;
     u64 t0 = k_now_us();
     for (int i = 0; i < 8; i++) { compose(full); present(&sh.scene, full); }
     u64 t1 = k_now_us();
@@ -694,7 +741,10 @@ static void run_benchmark(void) {
         small_us / 1000, small_us / 100 % 10, small_us ? 1000000 / small_us : 0);
     fmt(shell_stats.bench[2], sizeof shell_stats.bench[2], "frame copy %llu.%llu ms (%llu MB/s)",
         copy_us / 1000, copy_us / 100 % 10, mbps);
-    for (int i = 0; i < 3; i++) klog("bench: %s", shell_stats.bench[i]);
+    fmt(shell_stats.bench[3], sizeof shell_stats.bench[3], "full draw: 1 core %llu.%llu ms, %d cores %llu.%llu ms (%llu.%llux)",
+        single_us / 1000, single_us / 100 % 10, smp_workers() ? smp_workers() : 1, multi_us / 1000, multi_us / 100 % 10,
+        multi_us ? single_us / multi_us : 0, multi_us ? single_us * 10 / multi_us % 10 : 0);
+    for (int i = 0; i < 4; i++) klog("bench: %s", shell_stats.bench[i]);
     for (int i = 0; i < N_APPS; i++) if (apps[i] == &app_system) open_app(i);
     sh.dirty = 1;
 }

@@ -242,6 +242,17 @@ typedef struct EFI_PCI_IO_PROTOCOL {
     void *RomImage;
 } EFI_PCI_IO_PROTOCOL;
 
+/* ---- MP services (run code on the other cores) ------------------------- */
+typedef void (*EFI_AP_PROCEDURE)(void *Buffer);
+typedef struct EFI_MP_SERVICES_PROTOCOL {
+    EFI_STATUS (*GetNumberOfProcessors)(struct EFI_MP_SERVICES_PROTOCOL *, UINTN *Count, UINTN *Enabled);
+    void *GetProcessorInfo;
+    EFI_STATUS (*StartupAllAPs)(struct EFI_MP_SERVICES_PROTOCOL *, EFI_AP_PROCEDURE, BOOLEAN SingleThread,
+                                EFI_EVENT WaitEvent, UINTN TimeoutUs, void *Arg, UINTN **FailedCpuList);
+    void *StartupThisAP, *SwitchBSP, *EnableDisableAP;
+    EFI_STATUS (*WhoAmI)(struct EFI_MP_SERVICES_PROTOCOL *, UINTN *ProcessorNumber);
+} EFI_MP_SERVICES_PROTOCOL;
+
 /* ---- Boot / runtime services ------------------------------------------ */
 typedef struct {
     u32 Type;
@@ -343,6 +354,7 @@ typedef struct {
 #define FILE_INFO_GUID      {0x09576e92,0x6d3f,0x11d2,{0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b}}
 #define FS_INFO_GUID        {0x09576e93,0x6d3f,0x11d2,{0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b}}
 #define LOADED_IMAGE_GUID   {0x5b1b31a1,0x9562,0x11d2,{0x8e,0x3f,0x00,0xa0,0xc9,0x69,0x72,0x3b}}
+#define MP_SERVICES_GUID    {0x3fdda605,0xa76e,0x4f46,{0xad,0x29,0x12,0xf4,0x53,0x1b,0x3d,0x08}}
 #define PCI_IO_GUID         {0x4cf5b200,0x68b8,0x4ca5,{0x9e,0xec,0xb2,0x3e,0x3f,0x50,0x02,0x9a}}
 #define ACPI10_TABLE_GUID   {0xeb9d2d30,0x2d88,0x11d3,{0x9a,0x16,0x00,0x90,0x27,0x3f,0xc1,0x4d}}
 #define ACPI20_TABLE_GUID   {0x8868e871,0xe4f1,0x11d3,{0xbc,0x22,0x00,0x80,0xc7,0x3c,0x88,0x81}}

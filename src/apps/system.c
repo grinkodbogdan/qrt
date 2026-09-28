@@ -1,5 +1,6 @@
 /* System: what Tessera found on this machine, plus the kernel log. */
 #include "../ui/shell.h"
+#include "../kernel/smp.h"
 
 static struct { scroll_t sc; } st;
 
@@ -53,6 +54,7 @@ static void draw(canvas_t *c, rect_t a) {
         kv(&f, "Benchmark", shell_stats.bench[0]);
         kv(&f, "", shell_stats.bench[1]);
         kv(&f, "", shell_stats.bench[2]);
+        kv(&f, "", shell_stats.bench[3]);
     } else kv(&f, "Benchmark", "type \"bench\" in the Ask bar");
 
     heading(&f, "DEVICE");
@@ -63,6 +65,8 @@ static void draw(canvas_t *c, rect_t a) {
 
     heading(&f, "PROCESSOR & MEMORY");
     kv(&f, "CPU", k.cpu);
+    fmt(b, sizeof b, "%d worker cores for drawing%s", smp_workers(), smp_enabled() ? "" : " (multicore off)");
+    kv(&f, "Cores", b);
     fmt_bytes(b2, sizeof b2, k.ram_bytes);
     kv(&f, "RAM", b2);
     fmt(b, sizeof b, "%llu MHz (TSC)", k.tsc_per_ms / 1000);
