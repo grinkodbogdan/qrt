@@ -5,10 +5,16 @@ tablet QRT copies the stick into memory at boot, exits the firmware and
 serves this file from its own file system; on 32-bit firmware the Tessera
 kernel reads it through the firmware's FAT driver.
 
+Getting around
+  * The dock on the right holds your pinned and open apps; the dots at
+    its foot open the launcher, which lists every app and has a search.
+  * Tap a text field to bring up the on-screen keyboard.
+  * Power button: power menu.  Volume up: launcher.  Volume down: back.
+
 Things to try
+  * Wi-Fi    - switch it on, pick a network, type the password
+  * Terminal - run Linux programs: busybox, ls -l /, uname -a, hello;
+               with Wi-Fi up: ping -c 3 1.1.1.1, nslookup example.com
   * Sketch   - draw with your finger to check the touchscreen
-  * Terminal - run Linux programs: busybox, ls -l /, uname -a, hello
   * System   - see what the kernel found, which devices have drivers
   * Settings - accent colour, rotation, native or firmware kernel mode
-  * Ask bar  - type on a USB keyboard to search apps and commands
-               (firmware mode; native mode has no USB driver yet)

@@ -14,7 +14,8 @@ PYTHON  ?= python3
 HOSTCC  ?= gcc
 
 SRC := src/kernel/kernel.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
-       src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c \
+       src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c src/drivers/e1000.c \
+       src/drivers/iwm/iwm.c src/net/wifilog.c src/net/crypto.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
        src/ui/gfx.c src/ui/shell.c src/ui/fontdata.c \
        src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c \
        src/apps/settings.c src/apps/life.c src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/ui/osk.c \
@@ -32,7 +33,7 @@ LDFLAGS := -subsystem:efi_application -entry:efi_main -nodefaultlib
 
 # the native kernel (ExitBootServices, own MM/interrupts/SMP) is 64-bit only
 X64_SRC := src/arch/x64/mm.c src/arch/x64/cpu.c src/arch/x64/apic.c src/arch/x64/native.c \
-           src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c
+           src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c src/arch/x64/lsock.c
 X64_ASM := src/arch/x64/isr.S src/arch/x64/entry.S src/arch/x64/trampoline.S
 
 IA32_OBJ := $(SRC:src/%.c=build/ia32/%.o)
@@ -89,7 +90,7 @@ build/rootfs/bin/busybox:
 	    cp $(BUSYBOX) $@; cp tools/BUSYBOX.txt build/rootfs/bin/BUSYBOX.txt; \
 	else echo "no static busybox on this host (apt install busybox-static) - skipping"; touch $@; fi
 
-build/qrt.img: build/BOOTIA32.EFI build/BOOTX64.EFI tools/mkimage.sh $(wildcard image/*) $(ROOTFS)
+build/qrt.img: build/BOOTIA32.EFI build/BOOTX64.EFI tools/mkimage.sh $(wildcard image/*) $(wildcard firmware/*) $(ROOTFS)
 	tools/mkimage.sh $@ build/BOOTIA32.EFI build/BOOTX64.EFI build/rootfs
 
 run: build/qrt.img
@@ -105,6 +106,8 @@ test: build/qrt.img
 check:
 	@mkdir -p build
 	$(HOSTCC) -Wall -Wextra -O1 -o build/test_hid tests/test_hid.c && build/test_hid
+	$(HOSTCC) -Wall -Wextra -O1 -o build/test_crypto tests/test_crypto.c && build/test_crypto
+	$(HOSTCC) -Wall -Wextra -Wno-unused-parameter -O1 -fshort-wchar -o build/test_wlan tests/test_wlan.c && build/test_wlan
 
 clean:
 	rm -rf build

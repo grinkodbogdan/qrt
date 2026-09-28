@@ -8,9 +8,11 @@
  * FreeBSD's Linuxulator, this is the ABI, not the Linux kernel.
  */
 #include "proc.h"
+#include "lsock.h"
+#include "../../net/crypto.h"
 #include "mm.h"
 
-enum { EPERM = 1, ENOENT = 2, EBADF = 9, ECHILD = 10, ENOMEM = 12, EFAULT = 14, EEXIST = 17,
+enum { EPERM = 1, ENOENT = 2, EINTR = 4, EBADF = 9, ECHILD = 10, ENOMEM = 12, EFAULT = 14, EEXIST = 17,
        ENOTDIR = 20, EISDIR = 21, EINVAL = 22, EMFILE = 24, ENOTTY = 25, ESPIPE = 29, ERANGE = 34,
        ENOSYS = 38, ENOTEMPTY = 39 };
 
@@ -111,6 +113,7 @@ static i64 do_write(proc_t *p, int fd, u64 buf, u64 len) {
         return r;
     }
     case F_DIR: return -EISDIR;
+    case F_SOCK: return lsock_sendto(p, fd, buf, len, 0, 0, 0);
     default: return -EBADF;
     }
 }
@@ -127,7 +130,75 @@ static i64 do_read(proc_t *p, int fd, u64 buf, u64 len) {
         return r;
     }
     case F_DIR: return -EISDIR;
+    case F_SOCK: return lsock_recvfrom(p, fd, buf, len, 0, 0, 0);
     default: return -EBADF;
+    }
+}
+
+/* ---- poll / select ---------------------------------------------------------------------- */
+enum { POLLIN = 1, POLLPRI = 2, POLLOUT = 4, POLLERR = 8, POLLHUP = 0x10, POLLNVAL = 0x20 };
+
+static int fd_ready(proc_t *p, int fd, int events) {
+    if (fd < 0 || fd >= MAX_FDS || !p->fd[fd].type) return POLLNVAL;
+    int rev = 0;
+    switch (p->fd[fd].type) {
+    case F_SOCK: {
+        int hup = 0;
+        if ((events & POLLIN) && lsock_readable(p, fd, &hup)) rev |= POLLIN;
+        if (hup) rev |= POLLHUP;
+        if ((events & POLLOUT) && lsock_writable(p, fd)) rev |= POLLOUT;
+        break;
+    }
+    case F_TTY: rev = events & POLLOUT; break;            /* no keyboard input for programs */
+    default: rev = events & (POLLIN | POLLOUT); break;
+    }
+    return rev;
+}
+
+static i64 do_poll(proc_t *p, u64 ufds, u64 n, i64 timeout_ms) {
+    if (n > MAX_FDS * 4 || (n && !UOK(ufds, n * 8))) return -EINVAL;
+    u64 end = timeout_ms < 0 ? ~0ull : k_now_ms() + (u64)timeout_ms;
+    for (;;) {
+        int count = 0;
+        for (u64 i = 0; i < n; i++) {
+            u8 *e = (u8 *)(usize)(ufds + i * 8);
+            int fd = *(i32 *)e;
+            i16 ev = *(i16 *)(e + 4);
+            i16 rev = fd < 0 ? 0 : (i16)fd_ready(p, fd, ev);
+            *(i16 *)(e + 6) = rev;
+            if (rev) count++;
+        }
+        if (count || k_now_ms() >= end) return count;
+        if (p->killed) return -EINTR;
+        thread_sleep_ms(5);
+    }
+}
+
+static i64 do_select(proc_t *p, int nfds, u64 rfds, u64 wfds, u64 efds, i64 timeout_ms) {
+    if (nfds < 0 || nfds > MAX_FDS) nfds = MAX_FDS;
+    u64 rin = 0, win = 0;
+    if (rfds) { if (!UOK(rfds, 8)) return -EFAULT; rin = *(u64 *)(usize)rfds; }
+    if (wfds) { if (!UOK(wfds, 8)) return -EFAULT; win = *(u64 *)(usize)wfds; }
+    if (efds && UOK(efds, 8)) *(u64 *)(usize)efds = 0;
+    u64 end = timeout_ms < 0 ? ~0ull : k_now_ms() + (u64)timeout_ms;
+    for (;;) {
+        u64 rout = 0, wout = 0;
+        int count = 0;
+        for (int fd = 0; fd < nfds; fd++) {
+            int want = ((rin >> fd) & 1 ? POLLIN : 0) | ((win >> fd) & 1 ? POLLOUT : 0);
+            if (!want) continue;
+            int rev = fd_ready(p, fd, want);
+            if (rev & POLLNVAL) return -EBADF;
+            if (rev & (POLLIN | POLLHUP)) { rout |= 1ull << fd; count++; }
+            if (rev & POLLOUT) { wout |= 1ull << fd; count++; }
+        }
+        if (count || k_now_ms() >= end) {
+            if (rfds) *(u64 *)(usize)rfds = rout;
+            if (wfds) *(u64 *)(usize)wfds = wout;
+            return count;
+        }
+        if (p->killed) return -EINTR;
+        thread_sleep_ms(5);
     }
 }
 
@@ -230,12 +301,57 @@ void syscall_dispatch(frame_t *f) {
     u64 nr = f->rax, a0 = f->rdi, a1 = f->rsi, a2 = f->rdx, a3 = f->r10, a4 = f->r8, a5 = f->r9;
     i64 r = -ENOSYS;
     p->syscalls++;
+    p->in_syscall = 1;
     switch (nr) {
     case 0:  r = do_read(p, (int)a0, a1, a2); break;
     case 1:  r = do_write(p, (int)a0, a1, a2); break;
     case 2:  r = do_open(p, AT_FDCWD, a0, (int)a1); break;
     case 257: r = do_open(p, (int)a0, a1, (int)a2); break;
-    case 3:  if ((int)a0 >= 0 && (int)a0 < MAX_FDS && p->fd[a0].type) { p->fd[a0].type = F_NONE; r = 0; } else r = -EBADF; break;
+    case 3:
+        if ((int)a0 >= 0 && (int)a0 < MAX_FDS && p->fd[a0].type) {
+            if (p->fd[a0].type == F_SOCK) lsock_close(p, (int)a0); else p->fd[a0].type = F_NONE;
+            r = 0;
+        } else r = -EBADF;
+        break;
+    /* sockets (lsock.c) */
+    case 41: r = lsock_socket(p, (int)a0, (int)a1, (int)a2); break;
+    case 42: r = lsock_connect(p, (int)a0, a1, a2); break;
+    case 43: case 288: case 50: case 53: r = -95; break;          /* accept, accept4, listen, socketpair: EOPNOTSUPP */
+    case 44: r = lsock_sendto(p, (int)a0, a1, a2, (int)a3, a4, a5); break;
+    case 45: r = lsock_recvfrom(p, (int)a0, a1, a2, (int)a3, a4, a5); break;
+    case 46: r = lsock_sendmsg(p, (int)a0, a1, (int)a2); break;
+    case 47: r = lsock_recvmsg(p, (int)a0, a1, (int)a2); break;
+    case 48: r = lsock_shutdown(p, (int)a0, (int)a1); break;
+    case 49: r = lsock_bind(p, (int)a0, a1, a2); break;
+    case 51: r = lsock_getname(p, (int)a0, a1, a2, 0); break;
+    case 52: r = lsock_getname(p, (int)a0, a1, a2, 1); break;
+    case 54: r = 0; break;                                        /* setsockopt: accepted */
+    case 55: r = lsock_getsockopt(p, (int)a0, (int)a1, (int)a2, a3, a4); break;
+    case 307: r = lsock_sendmmsg(p, (int)a0, a1, (u32)a2, (int)a3); break;
+    case 7: r = do_poll(p, a0, a1, (i64)(i32)a2); break;
+    case 37: r = 0; break;                                        /* alarm: no signals yet, so no timer */
+    case 77:                                                      /* ftruncate */
+        if ((int)a0 < 0 || (int)a0 >= MAX_FDS || p->fd[a0].type != F_FILE) { r = -EBADF; break; }
+        if (a1 <= p->fd[a0].vn->size) p->fd[a0].vn->size = a1;
+        else { static const u8 z[512]; u64 at = p->fd[a0].vn->size; while (at < a1) { u64 n = MIN(a1 - at, (u64)sizeof z); vfs_write(p->fd[a0].vn, at, z, n); at += n; } }
+        r = 0;
+        break;
+    case 271: {                                                   /* ppoll: timespec */
+        i64 ms = -1;
+        if (a2) { if (!UOK(a2, 16)) { r = -EFAULT; break; } u64 *ts = (u64 *)(usize)a2; ms = (i64)(ts[0] * 1000 + ts[1] / 1000000); }
+        r = do_poll(p, a0, a1, ms);
+        break;
+    }
+    case 23: case 270: {                                          /* select (timeval), pselect6 (timespec) */
+        i64 ms = -1;
+        if (a4) {
+            if (!UOK(a4, 16)) { r = -EFAULT; break; }
+            u64 *t = (u64 *)(usize)a4;
+            ms = nr == 23 ? (i64)(t[0] * 1000 + t[1] / 1000) : (i64)(t[0] * 1000 + t[1] / 1000000);
+        }
+        r = do_select(p, (int)a0, a1, a2, a3, ms);
+        break;
+    }
     case 4:  r = do_stat_path(p, AT_FDCWD, a0, a1, 0); break;
     case 6:  r = do_stat_path(p, AT_FDCWD, a0, a1, AT_SYMLINK_NOFOLLOW); break;
     case 262: r = do_stat_path(p, (int)a0, a1, a2, (int)a3); break;
@@ -284,17 +400,38 @@ void syscall_dispatch(frame_t *f) {
     case 218: r = p->pid; break;                        /* set_tid_address */
     case 273: case 13: case 14: case 131: r = 0; break; /* robust list, signals, sigaltstack: accepted */
     case 334: r = -ENOSYS; break;                       /* rseq: glibc copes */
-    case 16: r = -ENOTTY; break;                        /* ioctl: no terminal control */
+    case 16:                                            /* ioctl */
+        if ((int)a0 >= 0 && (int)a0 < MAX_FDS && p->fd[a0].type == F_SOCK) {
+            if (a1 == 0x541b && UOK(a2, 4)) { *(i32 *)(usize)a2 = (i32)lsock_available(p, (int)a0); r = 0; }      /* FIONREAD */
+            else if (a1 == 0x5421 && UOK(a2, 4)) { lsock_set_nonblock(p, (int)a0, *(i32 *)(usize)a2 != 0); r = 0; } /* FIONBIO */
+            else r = -ENOTTY;
+        } else r = -ENOTTY;                             /* no terminal control */
+        break;
     case 72:                                            /* fcntl */
         if ((int)a0 < 0 || (int)a0 >= MAX_FDS || !p->fd[a0].type) { r = -EBADF; break; }
-        if (a1 == 0 || a1 == 1030) { int fd = alloc_fd(p, (int)a2); if (fd >= 0) p->fd[fd] = p->fd[a0]; r = fd; }
-        else if (a1 == 3) r = p->fd[a0].flags & O_ACCMODE ? p->fd[a0].flags : 2;
+        if (a1 == 0 || a1 == 1030) { int fd = alloc_fd(p, (int)a2); if (fd >= 0) { p->fd[fd] = p->fd[a0]; if (p->fd[fd].type == F_SOCK) lsock_dup(p, fd); } r = fd; }
+        else if (a1 == 3) r = p->fd[a0].type == F_SOCK ? 2 | (p->fd[a0].flags & 04000) : (p->fd[a0].flags & O_ACCMODE ? p->fd[a0].flags : 2);
+        else if (a1 == 4) {                             /* F_SETFL: O_NONBLOCK on sockets */
+            p->fd[a0].flags = (p->fd[a0].flags & ~04000) | ((int)a2 & 04000);
+            if (p->fd[a0].type == F_SOCK) lsock_set_nonblock(p, (int)a0, (a2 & 04000) != 0);
+            r = 0;
+        }
         else r = 0;
         break;
-    case 32: { int fd = alloc_fd(p, 0); if (fd >= 0 && (int)a0 >= 0 && (int)a0 < MAX_FDS) p->fd[fd] = p->fd[a0]; r = fd; break; }
+    case 32: {
+        int fd = alloc_fd(p, 0);
+        if (fd >= 0 && (int)a0 >= 0 && (int)a0 < MAX_FDS) { p->fd[fd] = p->fd[a0]; if (p->fd[fd].type == F_SOCK) lsock_dup(p, fd); }
+        r = fd;
+        break;
+    }
     case 33: case 292:
         if ((int)a0 < 0 || (int)a0 >= MAX_FDS || (int)a1 < 0 || (int)a1 >= MAX_FDS) { r = -EBADF; break; }
-        p->fd[a1] = p->fd[a0]; r = (i64)a1; break;
+        if (a0 != a1) {
+            if (p->fd[a1].type == F_SOCK) lsock_close(p, (int)a1);
+            p->fd[a1] = p->fd[a0];
+            if (p->fd[a1].type == F_SOCK) lsock_dup(p, (int)a1);
+        }
+        r = (i64)a1; break;
     case 21: case 269: case 439: {                      /* access, faccessat, faccessat2 */
         char path[160], full[256];
         int dirfd = nr == 21 ? AT_FDCWD : (int)a0;
@@ -376,8 +513,13 @@ void syscall_dispatch(frame_t *f) {
         u64 ts = nr == 35 ? a0 : a2;
         if (!UOK(ts, 16)) { r = -EFAULT; break; }
         u64 *t = (u64 *)(usize)ts;
-        thread_sleep_ms(t[0] * 1000 + t[1] / 1000000);
-        r = 0; break;
+        u64 end = k_now_ms() + t[0] * 1000 + t[1] / 1000000;
+        r = 0;
+        while (k_now_ms() < end) {                              /* in steps, so Stop works */
+            if (p->killed) { r = -EINTR; break; }
+            thread_sleep_ms(MIN(end - k_now_ms(), (u64)20));
+        }
+        break;
     }
     case 228: case 229: {                                       /* clock_gettime, clock_getres */
         if (!a1) { r = 0; break; }
@@ -396,7 +538,7 @@ void syscall_dispatch(frame_t *f) {
         r = (i64)epoch_now(); break;
     case 318:                                                   /* getrandom */
         if (!UOK(a0, a1)) { r = -EFAULT; break; }
-        for (u64 i = 0; i < a1; i++) ((u8 *)(usize)a0)[i] = (u8)(rand32() ^ rdtsc64());
+        random_bytes((u8 *)(usize)a0, (usize)a1);
         r = (i64)a1; break;
     case 202: r = 0; break;                                     /* futex: single-threaded programs */
     case 56: case 57: case 58: case 59: case 61: r = -ENOSYS; break;   /* clone/fork/vfork/execve/wait4 */
@@ -404,4 +546,6 @@ void syscall_dispatch(frame_t *f) {
     default: log_unknown(nr); break;
     }
     f->rax = (u64)r;
+    p->in_syscall = 0;
+    if (p->killed) proc_exit(137);                              /* Stop pressed while we were in the kernel */
 }

@@ -63,11 +63,18 @@ The drivers built in today (`src/drivers/builtin.c`):
   thread from its interrupt handler.
 - **Delays and time:** `k_delay_us()`, `k_now_us()` and `k_now_ms()`.
 
+- **Polled drivers:** `hal_poll()` runs in the shell's main loop in both
+  kernel modes. Drivers that do not need interrupt latency hook in there.
+  The GPIO buttons, e1000 and the Wi-Fi driver all work this way, so they
+  behave the same in firmware mode, where QRT owns no interrupts.
+  `hal_dma_alloc()` gives page-aligned memory whose address is its bus
+  address in both modes.
+
 Not there yet:
 
 - an ACPI interpreter (AML is scanned for ids only, never executed, so
   `_CRS`, `_PS0`, GPIO and PMIC methods are unavailable)
-- GPIO interrupts
+- GPIO interrupts (pads are polled: see `src/drivers/buttons.c`)
 - runtime power management
 - a block-device layer
 
@@ -81,10 +88,55 @@ Linux system-call ABI that glibc, musl and busybox need:
 - TLS (`arch_prctl`)
 - time, `uname`, `sysinfo`
 - `getrandom`
+- `AF_INET` sockets (TCP, UDP, ICMP), `poll`, `select` (`lsock.c`)
 
 The Terminal app starts these programs, and the image includes a static
 busybox. Still missing: `fork`/`exec`/`clone` (so no shell pipelines or
-threads), signals, sockets, and dynamic linking.
+threads), signals, listening sockets, and dynamic linking.
+
+## Networking
+
+`src/net/` is QRT's own stack, written for the job:
+
+| File | What |
+|---|---|
+| `net.c` | interfaces (`netif_t`), ARP, IPv4, ICMP, UDP, DHCP client, DNS resolver |
+| `tcp.c` | TCP client: connect, go-back-N retransmission, FIN/RST |
+| `wlan.c` | 802.11 station: scan, auth, association, WPA2-PSK handshakes, group CCMP |
+| `crypto.c` | SHA-1, HMAC, PBKDF2, the 802.11 PRF, AES-128, key wrap, CCM |
+| `netstack.c` | polling and the lock shared by the shell and Linux programs |
+
+A NIC driver fills a `netif_t` (MAC and a `send` hook), calls
+`net_register()`, and passes received Ethernet frames to `net_input()`.
+The Wi-Fi code converts between 802.11 data frames and Ethernet frames, so
+the IP layer sees the same interface either way.
+
+**Intel Wireless 8260 (`src/drivers/iwm/`).** This is a port of OpenBSD's
+`iwm(4)`, which is ISC-licensed. Its register and command definitions
+(`if_iwmreg.h`) are copied verbatim. `iwm_compat.h` provides the few BSD
+types they need. The driver body keeps OpenBSD's structure and names for
+these parts:
+- firmware TLV parsing, section loading, firmware paging
+- NVM
+- PHY DB, calibration
+- the MAC/PHY/binding/STA/TIME_EVENT commands
+- UMAC scan
+- the TX/RX rings
+
+What changed from OpenBSD:
+- **net80211 → `wlan.c`.** The net80211 state machine is replaced by the
+  small client in `wlan.c`.
+- **Polled.** The driver reads `CSR_INT` and the RX ring's `closed_rb_num`
+  instead of taking MSI interrupts.
+- **Rates.** Only legacy rates are used. HT/VHT and aggregation are left
+  out.
+
+The firmware is `iwlwifi-8000C-36.ucode` from linux-firmware. The image
+loads it from `/lib/firmware`.
+
+The client is tested on the host against a simulated access point
+(`tests/test_wlan.c`). The IP stack is tested in QEMU on the e1000 driver.
+The 8260 itself still has to be tested on the tablet.
 
 **Linux drivers** are a different job. Drivers use the kernel's internal
 API, not system calls. FreeBSD solved this with *LinuxKPI*, a layer that

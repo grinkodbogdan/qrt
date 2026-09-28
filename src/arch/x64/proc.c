@@ -12,6 +12,7 @@
  * enter the kernel through SYSCALL (linux.c).
  */
 #include "proc.h"
+#include "lsock.h"
 
 extern void enter_user(u64 rip, u64 rsp);
 extern void syscall_entry(void);
@@ -254,6 +255,8 @@ proc_t *proc_spawn(const char *path, int argc, const char *const *argv, term_t *
 
 void proc_exit(int code) {
     proc_t *p = proc_current();
+    sti();                                     /* socket cleanup takes the network lock */
+    lsock_exit(p);
     cli();
     thread_t *t = thread_current();
     write_cr3(kernel_cr3());                   /* leave the address space before freeing it */
@@ -267,6 +270,15 @@ void proc_exit(int code) {
 
 void proc_kill(proc_t *p) {
     if (!p || p->exited) return;
+    if (p->in_syscall) {
+        /* It may hold the network lock or be mid-way through a file
+         * operation: let it finish the call and exit by itself
+         * (blocking waits notice 'killed' within milliseconds). */
+        if (!p->killed) term_append(p->term, "\n[stopping]\n", 13);
+        p->killed = 1;
+        return;
+    }
+    lsock_exit(p);                             /* not in the kernel: its sockets are free to close */
     u64 fl = irq_save();
     /* The process is not running (we are the shell on the only user core),
      * so it can be torn down from here. */

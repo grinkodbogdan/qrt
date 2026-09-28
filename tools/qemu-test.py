@@ -177,6 +177,11 @@ def default_script(q, shots):
         q.keys(*[c if c != " " else "spc" for c in cmd], settle=0.2)
         q.keys("ret", settle=6.0)
     shots.append(q.shot("05-terminal"))
+    # networking (x64: QEMU's e1000e + user-mode network; DHCP ran at boot)
+    for cmd, wait in [("clear", 1), ("ifconfig", 2), ("ping -c 2 10.0.2.2", 5), ("nslookup localhost 10.0.2.3", 5)]:
+        q.keys(*[c if c != " " else "spc" for c in cmd], settle=0.2)
+        q.keys("ret", settle=wait)
+    shots.append(q.shot("05-terminal-net"))
     # Sketch from the dock: draw a stroke, change ink, draw another
     dock_tap("sketch")
     q.drag([(200 + i * 40, 400 + (i % 5) * 30) for i in range(20)])

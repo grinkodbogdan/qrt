@@ -1,5 +1,6 @@
 /* vfs.c - RAM file system seeded from the boot volume, plus /proc and /etc. */
 #include "vfs.h"
+#include "../net/net.h"
 #if defined(__x86_64__)
 #include "../arch/x64/mm.h"
 #endif
@@ -138,6 +139,16 @@ static int gen_meminfo(char *b, int cap) {
                total >> 10, avail >> 10, avail >> 10);
 }
 static int gen_text(char *b, int cap, const char *t) { strlcpy(b, t, (usize)cap); return (int)strlen(b); }
+/* name resolution for Linux programs: the DNS server DHCP handed out */
+static int gen_resolv(char *b, int cap) {
+    netif_t *n = net_primary();
+    if (!n || !n->dns) return gen_text(b, cap, "# not connected\n");
+    char ip[16];
+    ip_to_str(n->dns, ip, sizeof ip);
+    return fmt(b, (usize)cap, "nameserver %s\noptions timeout:2 attempts:2\n", ip);
+}
+static int gen_hosts(char *b, int cap) { return gen_text(b, cap, "127.0.0.1 localhost\n"); }
+static int gen_nsswitch(char *b, int cap) { return gen_text(b, cap, "hosts: files dns\nnetworks: files\n"); }
 static int gen_hostname(char *b, int cap) { return gen_text(b, cap, k.is_venue ? "venue\n" : "qrt\n"); }
 static int gen_passwd(char *b, int cap) { return gen_text(b, cap, "root:x:0:0:root:/:/bin/sh\n"); }
 static int gen_group(char *b, int cap) { return gen_text(b, cap, "root:x:0:\n"); }
@@ -153,6 +164,9 @@ static void add_synthetic(void) {
     synth("/etc/hostname", gen_hostname);
     synth("/etc/passwd", gen_passwd);
     synth("/etc/group", gen_group);
+    synth("/etc/resolv.conf", gen_resolv);
+    synth("/etc/hosts", gen_hosts);
+    synth("/etc/nsswitch.conf", gen_nsswitch);
     vfs_create("/tmp", 1);
     vfs_create("/dev", 1);
 }

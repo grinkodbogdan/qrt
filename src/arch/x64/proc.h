@@ -12,13 +12,14 @@ typedef struct {
 } term_t;
 void term_append(term_t *t, const char *s, usize n);
 
-enum { F_NONE, F_FILE, F_DIR, F_TTY, F_NULL };
+enum { F_NONE, F_FILE, F_DIR, F_TTY, F_NULL, F_SOCK };
 typedef struct {
     int type;
     vnode_t *vn;
     u64 off;
     int flags;
     int dir_index;
+    int sock;                     /* F_SOCK: index into lsock.c's table */
 } ufile_t;
 
 #define MAX_FDS  32
@@ -43,7 +44,8 @@ typedef struct proc {
     volatile int exited;
     int exit_code;
     u64 syscalls;
-    int killed;
+    volatile int killed;
+    volatile int in_syscall;      /* Stop is cooperative while the program is inside the kernel */
 } proc_t;
 
 #define USER_STACK_TOP   USER_TOP

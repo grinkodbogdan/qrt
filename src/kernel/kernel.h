@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.5.0"
+#define QRT_VERSION "0.5.5"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8
@@ -112,6 +112,7 @@ void hal_cursor(int *x, int *y, int *visible);
 void hal_present(const u32 *px, int stride, int x, int y, int w, int h);  /* rect -> panel */
 void hal_wait_frame(void);           /* sleep until the next ~10 ms frame tick */
 void hal_delay_us(u32 us);
+void *hal_dma_alloc(usize bytes);        /* zeroed, page-aligned, contiguous; pointer == bus address */
 void hal_settings_prepare(void);     /* cache + make settings reachable after ExitBootServices */
 const char *hal_mode(void);          /* "firmware-hosted" or "native" */
 
@@ -123,6 +124,8 @@ int  hal_reboot_to_firmware(void);   /* returns 0 if unsupported */
 /* ---- persistent settings (UEFI NVRAM) ---- */
 u32  hal_setting_get(const c16 *name, u32 def);
 void hal_setting_set(const c16 *name, u32 value);
+usize hal_setting_get_blob(const c16 *name, void *buf, usize cap);
+void hal_setting_set_blob(const c16 *name, const void *buf, usize len);
 
 /* ---- boot-time probing ---- */
 void hal_probe(void);

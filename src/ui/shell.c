@@ -2,14 +2,16 @@
  * shell.c - QRT's user interface.
  *
  * Visual language borrows from Fuchsia's Armadillo/Ermine shells: a
- * wallpaper of soft light, glassy "story" cards, a big quiet clock and an
- * Ask bar that doubles as launcher and command line.  Everything is drawn
+ * wallpaper of soft light, glassy "story" cards and a big quiet clock, with
+ * a dock down the right edge, a searchable app launcher and an on-screen
+ * keyboard.  Everything is drawn
  * in software into a logical canvas which is rotated (for tablets held in
  * either orientation) and pushed to the panel through GOP.
  */
 #include "shell.h"
 #include "../kernel/smp.h"
 #include "osk.h"
+#include "../net/netstack.h"
 
 ui_t ui;
 
@@ -878,6 +880,7 @@ void shell_main(void) {
         for (int i = 0; i < n; i++) dispatch(ev[i]);
 
         u64 now = k_now_ms();
+        netstack_poll();
         event_t rep[4];
         int nr = osk_tick(now, rep, 4);
         if (nr) shell_damage(osk_rect(content_rect()));
@@ -889,10 +892,14 @@ void shell_main(void) {
         if (!sh.dirty) {
             EFI_TIME t;
             static u64 last_check;
+            static char last_net[96];
             if (now - last_check > 1000) {
                 last_check = now;
                 k_walltime(&t);
                 if (t.Minute != sh.last_minute) sh.dirty = 1;
+                /* the home screen shows the network line */
+                const char *ns = shell_net_status();
+                if (strcmp(ns ? ns : "", last_net)) { strlcpy(last_net, ns ? ns : "", sizeof last_net); if (sh.view == VIEW_HOME) sh.dirty = 1; }
             }
         }
         if (sh.dirty) { sh.dmg = full_rect(); sh.dirty = 0; }

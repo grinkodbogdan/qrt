@@ -50,7 +50,18 @@ these byte offsets: `OSID` 38, `ITSA` 793, `BDID` 802, `MPNL` 842, `WLID` 871.
 
 ## Other devices of interest
 
-- `PNP0C40`/`INTCFD9`: button array (power, volume)
+- `PNP0C40`/`INTCFD9`: button array (power, volume). The buttons are plain
+  GPIO pads. QRT polls each pad's `PADCTRL0` RX bit (bit 0) and treats a
+  change from the level sampled at boot as a press.
+
+  | Button | GPIO | Community base |
+  |---|---|---|
+  | Power | `GPO2` pin 8 | E, `0xFED90000` |
+  | Volume up | `GPO0` pin 0x5D | SW, `0xFED80000` |
+  | Volume down | `GPO1` pin 8 | N, `0xFED88000` |
+  | Home (Windows logo) | `GPO0` pin 0x5F | SW, `0xFED80000` |
+
+  The pad register sits at base + 0x4400 + 0x400·(pin / 15) + 8·(pin % 15).
 - `PNP0C0A`: battery
 - `ACPI0003`: AC adapter
 - `PNP0C0D`: lid

@@ -7,6 +7,7 @@
 #include "../drivers/uart.h"
 #if defined(__x86_64__)
 #include "../arch/x64/sched.h"
+#include "../arch/x64/mm.h"
 void native_present(const u32 *src, int stride, int x, int y, int w, int h);
 #endif
 
@@ -367,6 +368,18 @@ void hal_setting_set(const c16 *name, u32 value) {
     k.rt->SetVariable(name, &qrt_guid, SETTING_ATTR, sizeof value, &value);
 }
 
+/* byte strings (Wi-Fi network name and key): 0 bytes returned when unset */
+usize hal_setting_get_blob(const c16 *name, void *buf, usize cap) {
+    u32 attr = 0;
+    UINTN sz = cap;
+    if (EFI_ERROR(k.rt->GetVariable(name, &qrt_guid, &attr, &sz, buf))) return 0;
+    return (usize)sz;
+}
+
+void hal_setting_set_blob(const c16 *name, const void *buf, usize len) {
+    k.rt->SetVariable(name, &qrt_guid, len ? SETTING_ATTR : 0, len, (void *)buf);   /* len 0 deletes */
+}
+
 void hal_settings_prepare(void) {
     for (usize i = 0; i < ARRAY_LEN(setting_names); i++) {
         u32 v, attr = 0;
@@ -403,6 +416,20 @@ void hal_delay_us(u32 us) {
     if (!k.native) { k.bs->Stall(us); return; }
     u64 end = k_now_us() + us;
     while (k_now_us() < end) __asm__ volatile("pause");
+}
+
+/* Device DMA memory: page-aligned, physically contiguous, zeroed, and
+ * identity-mapped in both modes (the pointer is the bus address).  In
+ * firmware mode it stays below 4 GB for devices with 32-bit fields. */
+void *hal_dma_alloc(usize bytes) {
+    usize pages = (bytes + 4095) / 4096;
+#if defined(__x86_64__)
+    if (k.native) return (void *)(usize)pmm_alloc_contig(pages);
+#endif
+    u64 addr = 0xffffffffull;
+    if (EFI_ERROR(k.bs->AllocatePages(AllocateMaxAddress, EfiBootServicesData, pages, &addr))) return NULL;
+    memset((void *)(usize)addr, 0, pages * 4096);
+    return (void *)(usize)addr;
 }
 
 const char *hal_mode(void) { return k.native ? "native kernel" : "firmware-hosted"; }

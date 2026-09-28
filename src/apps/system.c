@@ -64,7 +64,7 @@ static void draw(canvas_t *c, rect_t a) {
         kv(&f, "", shell_stats.bench[1]);
         kv(&f, "", shell_stats.bench[2]);
         kv(&f, "", shell_stats.bench[3]);
-    } else kv(&f, "Benchmark", "type \"bench\" in the Ask bar");
+    } else kv(&f, "Benchmark", "search \"bench\" in the launcher");
 
     heading(&f, "KERNEL");
     kv(&f, "Mode", k.native ? "native: firmware exited, QRT owns the machine" : "firmware-hosted (UEFI boot services running)");

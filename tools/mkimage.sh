@@ -41,5 +41,13 @@ if [ -n "$rootfs" ] && [ -d "$rootfs/bin" ]; then
     done
 fi
 
+# device firmware (Wi-Fi) under \lib\firmware, with its licence
+if [ -d "$here/firmware" ]; then
+    mmd -i "$esp" ::/lib ::/lib/firmware
+    for f in "$here"/firmware/*; do
+        [ -s "$f" ] && mcopy -i "$esp" "$f" ::/lib/firmware/
+    done
+fi
+
 dd if="$esp" of="$out" bs=512 seek=$part_start conv=notrunc status=none
 echo "wrote $out ($(du -h "$out" | cut -f1) on disk, ${size_mib} MiB image)"

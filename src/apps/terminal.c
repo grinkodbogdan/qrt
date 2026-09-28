@@ -1,6 +1,9 @@
 /* Terminal: run Linux programs (static x86-64 ELF) on the native kernel. */
 #include "../ui/shell.h"
 #include "../kernel/vfs.h"
+#include "../net/net.h"
+#include "../net/netstack.h"
+#include "../net/wlan.h"
 #if defined(__x86_64__)
 #include "../arch/x64/proc.h"
 #endif
@@ -8,8 +11,8 @@
 #define SNAP_MAX (48 * 1024)
 
 static const char *presets[] = {
-    "hello", "uname -a", "ls -l /", "cat /etc/os-release", "cat /proc/cpuinfo", "free",
-    "date", "ls /bin", "sha256sum /bin/hello", "wc -l /qrt/welcome.txt", "echo Hello from Linux", "busybox",
+    "hello", "uname -a", "ls -l /", "free", "date", "cat /proc/cpuinfo", "ls /bin", "busybox",
+    "ifconfig", "ping -c 3 1.1.1.1", "nslookup example.com", "wget -O - http://neverssl.com/",
 };
 #define N_PRESETS ((int)ARRAY_LEN(presets))
 
@@ -27,6 +30,8 @@ static struct {
     tap_t tap;
     int pressed_chip;
     char status[96];
+    /* built-in ping */
+    struct { int active, dns, sent, got, count; u32 ip; u16 id; u64 next_ms, sent_ms[64], end_ms; char host[64]; } ping;
 } st = { .pressed_chip = -1 };
 
 static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
@@ -47,6 +52,92 @@ static void out(const char *s) {
 #endif
 }
 
+#if defined(__x86_64__)
+static u32 parse_u32(const char *s) { u32 v = 0; while (*s >= '0' && *s <= '9') v = v * 10 + (u32)(*s++ - '0'); return v; }
+
+/* ---- built-in network commands (they run in the shell, no Linux process) ---- */
+static void ping_reply(u32 src, u16 id, u16 seq, const u8 *data, usize len) {
+    (void)data;
+    if (!st.ping.active || id != st.ping.id || src != st.ping.ip || seq >= 64) return;
+    u64 rtt = k_now_us() / 1000 - st.ping.sent_ms[seq];
+    char a[16], m[96];
+    ip_to_str(src, a, sizeof a);
+    fmt(m, sizeof m, "%u bytes from %s: seq=%u time=%llu ms\n", (u32)len + 8, a, seq, rtt);
+    out(m);
+    st.ping.got++;
+}
+
+static void ping_start(const char *host, int count) {
+    memset(&st.ping, 0, sizeof st.ping);
+    strlcpy(st.ping.host, host, sizeof st.ping.host);
+    st.ping.count = CLAMP(count, 1, 64);
+    st.ping.id = (u16)(0x7100 + (k_now_ms() & 0xff));
+    net_lock();
+    if (!net_primary()) { net_unlock(); out("ping: not connected (open Wi-Fi)\n"); return; }
+    net_on_echo_reply(ping_reply);
+    st.ping.dns = dns_start(host);
+    net_unlock();
+    if (st.ping.dns < 0) { out("ping: cannot resolve\n"); return; }
+    st.ping.active = 1;
+}
+
+static int ping_tick(u64 now) {
+    if (!st.ping.active) return 0;
+    net_lock();
+    if (st.ping.dns >= 0) {
+        u32 ip;
+        int r = dns_result(st.ping.dns, &ip);
+        if (r) {
+            st.ping.dns = -1;
+            if (r < 0 || !ip) { net_unlock(); out("ping: unknown host\n"); st.ping.active = 0; return 1; }
+            st.ping.ip = ip;
+            char a[16], m[128];
+            ip_to_str(ip, a, sizeof a);
+            fmt(m, sizeof m, "PING %s (%s): 56 data bytes\n", st.ping.host, a);
+            net_unlock();
+            out(m);
+            net_lock();
+            st.ping.next_ms = now;
+        }
+    }
+    if (st.ping.ip && st.ping.sent < st.ping.count && now >= st.ping.next_ms) {
+        u8 payload[56];
+        for (int i = 0; i < 56; i++) payload[i] = (u8)i;
+        st.ping.sent_ms[st.ping.sent] = now;
+        net_ping(st.ping.ip, st.ping.id, (u16)st.ping.sent, payload, sizeof payload);
+        st.ping.sent++;
+        st.ping.next_ms = now + 1000;
+        if (st.ping.sent == st.ping.count) st.ping.end_ms = now + 2000;
+    }
+    net_unlock();
+    if (st.ping.end_ms && now >= st.ping.end_ms) {
+        char m[128];
+        fmt(m, sizeof m, "--- %s: %d sent, %d received, %d%% loss\n", st.ping.host, st.ping.sent, st.ping.got,
+            st.ping.sent ? (st.ping.sent - st.ping.got) * 100 / st.ping.sent : 0);
+        out(m);
+        st.ping.active = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static void show_ifconfig(void) {
+    net_lock();
+    netif_t *n = net_primary();
+    char m[256];
+    if (!n) { const char *ns = net_status(); fmt(m, sizeof m, "%s\n", ns ? ns : "no network: turn on Wi-Fi (Wi-Fi app)"); }
+    else {
+        char a[16], k[16], g[16], d[16];
+        ip_to_str(n->ip, a, sizeof a); ip_to_str(n->mask, k, sizeof k); ip_to_str(n->gw, g, sizeof g); ip_to_str(n->dns, d, sizeof d);
+        fmt(m, sizeof m, "%s%s%s  HWaddr %02x:%02x:%02x:%02x:%02x:%02x\n  inet %s  mask %s  gateway %s  dns %s\n",
+            n->name, n->detail[0] ? " " : "", n->detail, n->mac[0], n->mac[1], n->mac[2], n->mac[3], n->mac[4], n->mac[5], a, k, g, d);
+    }
+    net_unlock();
+    out(m);
+}
+
+#endif
+
 static void run(const char *cmd) {
     char buf[128], shown[160];
     strlcpy(buf, cmd, sizeof buf);
@@ -54,7 +145,7 @@ static void run(const char *cmd) {
     out(shown);
     st.scroll = 0;
 #if defined(__x86_64__)
-    if (st.proc && !st.proc->exited) { out("[a program is still running - stop it first]\n"); return; }
+    if ((st.proc && !st.proc->exited) || st.ping.active) { out("[a program is still running - stop it first]\n"); return; }
     const char *argv[24];
     int argc = 0;
     for (char *p = buf; *p && argc < 23;) {
@@ -66,10 +157,20 @@ static void run(const char *cmd) {
     }
     if (!argc) return;
     if (!strcmp(argv[0], "clear")) { st.term.len = 0; st.term.serial++; return; }
+    if (!strcmp(argv[0], "ping") && argc >= 2) {
+        int count = 4;
+        const char *host = argv[argc - 1];
+        for (int i = 1; i < argc - 1; i++) if (!strcmp(argv[i], "-c") && i + 1 < argc - 1) count = (int)parse_u32(argv[i + 1]);
+        ping_start(host, count);
+        return;
+    }
+    if (!strcmp(argv[0], "ifconfig") || (!strcmp(argv[0], "ip") && argc == 2 && !strcmp(argv[1], "a"))) { show_ifconfig(); return; }
+    if (!strcmp(argv[0], "wifi")) { char m[128]; fmt(m, sizeof m, "Wi-Fi: %s\n", wlan_available() ? wlan_state_text() : "no supported card"); out(m); return; }
     if (!strcmp(argv[0], "help")) {
         out("Runs static Linux x86-64 programs through QRT's Linux system-call layer.\n"
             "Programs live in /bin; any other name is tried as a busybox applet.\n"
-            "No pipes, redirection or fork yet. 'clear' empties the screen.\n");
+            "No pipes, redirection or fork yet. 'clear' empties the screen.\n"
+            "Built in: ping [-c N] HOST, ifconfig, wifi. Network programs: wget, nslookup.\n");
         return;
     }
     char path[96];
@@ -111,7 +212,7 @@ static void draw(canvas_t *c, rect_t a) {
     tx = gfx_text(c, m, tx, in.y + (in.h - m->line) / 2, st.line, ui.text);
     gfx_fill(c, (rect_t){ tx + 1, in.y + dp(10), dp(2), in.h - dp(20) }, ui.accent);
 #if defined(__x86_64__)
-    int running = st.proc && !st.proc->exited;
+    int running = (st.proc && !st.proc->exited) || st.ping.active;
 #else
     int running = 0;
 #endif
@@ -183,7 +284,8 @@ static int event(const event_t *e, rect_t a) {
         if (tapped && hit >= 0 && hit == st.pressed_chip) run(presets[hit]);
         else if (tapped && in_rect(stop_rect(a), e->x, e->y)) {
 #if defined(__x86_64__)
-            if (st.proc && !st.proc->exited) proc_kill(st.proc);
+            if (st.ping.active) { st.ping.active = 0; out("[stopped]\n"); }
+            else if (st.proc && !st.proc->exited) proc_kill(st.proc);
             else
 #endif
             if (st.line[0]) { run(st.line); st.line[0] = 0; }
@@ -209,8 +311,12 @@ static void on_open(void) {
 }
 
 static int tick(u64 now) {
-    (void)now;
+#if defined(__x86_64__)
+    int redraw = ping_tick(now);
+#else
     int redraw = 0;
+    (void)now;
+#endif
 #if defined(__x86_64__)
     if (st.term.serial != st.seen_serial) {
         u64 fl;

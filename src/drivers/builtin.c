@@ -9,6 +9,8 @@
 #include "uart.h"
 #include "touch.h"
 #include "buttons.h"
+#include "e1000.h"
+#include "iwm/iwm.h"
 #if defined(__x86_64__)
 #include "../arch/x64/irq.h"
 #endif
@@ -110,4 +112,22 @@ static int btn_probe(device_t *d) {
 }
 static const driver_t drv_buttons = { "gpio-buttons", NULL, btn_acpi, NULL, btn_probe, btn_status };
 
-const driver_t *const builtin_drivers[] = { &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_chipset, NULL };
+/* ---- Intel Wireless 8260 (src/drivers/iwm, started from the Wi-Fi app) ------------ */
+static const pci_match_t iwm_pci[] = { { 0x8086, 0x24f3, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x24f4, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
+static void iwm_dev_status(device_t *d) { strlcpy(d->status, iwm_status(), sizeof d->status); }
+static int iwm_dev_probe(device_t *d) { if (!iwm_probe(d->pci)) return DEV_NOT_MINE; iwm_dev_status(d); return 0; }
+static const driver_t drv_iwm = { "iwm (Wi-Fi)", iwm_pci, NULL, NULL, iwm_dev_probe, iwm_dev_status };
+
+/* ---- Intel e1000/e1000e (QEMU's NIC; used to test the network stack) ------------- */
+static const pci_match_t e1000_pci[] = { { 0x8086, 0x100e, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x100f, PCI_ANY_CLS, PCI_ANY_CLS },
+                                         { 0x8086, 0x10d3, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x153a, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
+static void e1000_dev_status(device_t *d) { strlcpy(d->status, e1000_status(), sizeof d->status); }
+static int e1000_dev_probe(device_t *d) {
+    if (!e1000_probe(d->pci)) return DEV_NOT_MINE;
+    if (k.native) e1000_start();
+    e1000_dev_status(d);
+    return 0;
+}
+static const driver_t drv_e1000 = { "e1000", e1000_pci, NULL, NULL, e1000_dev_probe, e1000_dev_status };
+
+const driver_t *const builtin_drivers[] = { &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_iwm, &drv_e1000, &drv_chipset, NULL };
