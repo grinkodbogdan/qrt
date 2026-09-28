@@ -124,10 +124,10 @@ density: 1.18× at 800 px and about 1.76× at 1200 px.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Get the image. Either use `dist/qrt-0.2.0.img.gz` (prebuilt) or build it
+1. Get the image. Either use `dist/qrt-0.2.1.img.gz` (prebuilt) or build it
    with `make`.
 2. Write it to a USB stick. Use Rufus, balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.2.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.2.1.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. Open the firmware settings. From Windows: *Settings → Update & Security →
    Recovery → Advanced startup → Troubleshoot → UEFI Firmware Settings*.

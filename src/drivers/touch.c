@@ -6,7 +6,10 @@
  * is fitted depends on the board ID in the firmware's GNVS area:
  *   TCS0/TCS3  ATML1000  Atmel maXTouch      0x4A  HID descriptor at 0x0000
  *   SYN1       SYNP1000  Synaptics           0x2C  HID descriptor at 0x0020
- *   WCOM       WCOM48xx  Wacom pen digitizer 0x0A  HID descriptor at 0x0001
+ *   WCOM       WCOM48xx  Wacom touch + pen   0x0A  HID descriptor at 0x0001
+ * On the first tested tablet (BDID 3, WLID 4) only the Wacom answered: it is
+ * the touchscreen itself (056a:4808, 5 fingers, 0..4304 x 0..6888) as well
+ * as the pen digitizer.
  * Rather than trust decoded board variables, we probe each address and use
  * the one that answers with a valid HID descriptor containing fingers.
  */
@@ -17,7 +20,7 @@ ntouch_t nt;
 static const struct { u8 addr; u16 reg; const char *name; } candidates[TOUCH_CANDIDATES] = {
     { 0x4a, 0x0000, "Atmel maXTouch" },
     { 0x2c, 0x0020, "Synaptics" },
-    { 0x0a, 0x0001, "Wacom pen" },
+    { 0x0a, 0x0001, "Wacom touch + pen" },
 };
 
 /* GNVS offsets in this DSDT (OEM table id CBX3, region length 0x36C). */
@@ -117,13 +120,22 @@ int ntouch_poll(event_t *out, int max) {
         fmt(nt.status, sizeof nt.status, "no touch reports in 15 s - back to firmware touch");
         return 0;
     }
-    for (int i = 0; i < 6 && n < max; i++) {
+    /*
+     * Drain everything the chip has queued, not just a few reports: a frame
+     * can take tens of ms to draw on the Atom, and a digitizer reporting at
+     * 100+ Hz would otherwise build a backlog that replays late (the pointer
+     * "glides" after the finger has lifted).  Moves are coalesced to the
+     * newest position; touch-down and lift are never dropped.
+     */
+    int pending_move = 0, mx = 0, my = 0;
+    for (int i = 0; i < 64 && n < max - 2; i++) {    /* a report can emit two events */
         u8 rep[64];
         int len = i2chid_read(h, rep, sizeof rep);
         if (len < 0) {
             if (++nt.consecutive_errors > 25) {
                 fmt(nt.status, sizeof nt.status, "native touch lost the chip - back to firmware");
                 ntouch_revert();
+                return n;
             }
             break;
         }
@@ -140,10 +152,11 @@ int ntouch_poll(event_t *out, int max) {
         int x = (int)((i64)ax * (k.fb_w - 1) / 65535), y = (int)((i64)ay * (k.fb_h - 1) / 65535);
         if (k.touch_map & TOUCH_FLIP_X) x = (int)k.fb_w - 1 - x;
         if (k.touch_map & TOUCH_FLIP_Y) y = (int)k.fb_h - 1 - y;
-        event_t e = { .x = x, .y = y };
-        e.type = h->down ? (was_down ? EV_MOVE : EV_DOWN) : EV_UP;
-        out[n++] = e;
+        if (h->down && was_down) { pending_move = 1; mx = x; my = y; continue; }
+        if (pending_move) { out[n++] = (event_t){ .type = EV_MOVE, .x = mx, .y = my }; pending_move = 0; }
+        out[n++] = (event_t){ .type = h->down ? EV_DOWN : EV_UP, .x = x, .y = y };
     }
+    if (pending_move && n < max) out[n++] = (event_t){ .type = EV_MOVE, .x = mx, .y = my };
     return n;
 }
 

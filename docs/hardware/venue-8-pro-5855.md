@@ -33,7 +33,12 @@ hardware report, BIOS 1.11.0). The dump itself is **not** committed:
 - **I2C6 (00:18.6)**: the touchscreen. The board ID in GNVS picks the variant:
   - `TCS0`/`TCS3` `ATML1000`: Atmel maXTouch @ `0x4A`, HID descriptor register `0x0000`, 1.7 MHz
   - `SYN1` `SYNP1000`: Synaptics @ `0x2C`, HID descriptor register `0x0020`, 400 kHz
-  - `WCOM` `WCOM48xx`: Wacom pen digitizer @ `0x0A`, HID descriptor register `0x0001`
+  - `WCOM` `WCOM48xx`: Wacom touch + pen digitizer @ `0x0A`, HID descriptor register `0x0001`.
+    **This is the touchscreen on the tested unit** (BDID 3, MPNL 0, ITSA 0x4A, WLID 4 → `WCOM4808`).
+    It reports as HID `056a:4808` v1435 with a 928-byte report descriptor. Touch is report `0x0C`:
+    5 fingers (tip, confidence, 16-bit contact ID, 16-bit X 0..4304, 16-bit Y 0..6888),
+    then contact count and scan time. The pen uses reports `0x06`/`0x0B`
+    (X 0..10764, Y 0..17222, pressure 0..2047). Atmel and Synaptics do not answer on this board.
   - Interrupt: GpioInt on `\_SB.GPO3` pin 0x4D (TCS0) or `\_SB.GPO1` pin 0x11 (TCS3)
 - **I2C7**: PMIC variants (`PMIC`, `PMI1`, `PMI2`, `PMI5`) and the battery fuel gauge (`BATC`, `WIDR`)
 - **I2C3**: TI charger (`TIDR`) on some board IDs
