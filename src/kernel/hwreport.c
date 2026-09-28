@@ -8,6 +8,7 @@
  * device IDs (_HID) found in the AML.  Decompile with `iasl -d *.aml`.
  */
 #include "kernel.h"
+#include "vfs.h"
 
 static EFI_GUID li_guid = LOADED_IMAGE_GUID;
 static EFI_GUID sfs_guid = SIMPLE_FS_GUID;
@@ -154,6 +155,13 @@ static void dump_pci(void) {
 /* ---- entry ------------------------------------------------------------------ */
 /* Write one file into \qrt\hwdump on the boot volume (used by the Touch Lab). */
 int hwreport_write(const char *name, const void *data, usize len) {
+    if (k.native) {                        /* no storage driver yet: keep it in the RAM file system */
+        char path[96];
+        fmt(path, sizeof path, "/qrt/hwdump/%s", name);
+        vnode_t *n = vfs_create(path, 0);
+        vfs_truncate(n);
+        return vfs_write(n, 0, data, len) == (i64)len;
+    }
     EFI_LOADED_IMAGE_PROTOCOL *li;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
     EFI_FILE_PROTOCOL *root, *qrt;

@@ -92,11 +92,28 @@ int smp_init(void) {
     return workers;
 }
 
-int  smp_workers(void) { return mp && enabled ? workers : 0; }
+#if defined(__x86_64__)
+int  native_smp_workers(void);
+void native_smp_run(smp_job_t job, void *arg, int count);
+#endif
+
+int smp_workers(void) {
+#if defined(__x86_64__)
+    if (k.native) return enabled ? native_smp_workers() : 0;
+#endif
+    return mp && enabled ? workers : 0;
+}
 int  smp_enabled(void) { return enabled; }
 void smp_set_enabled(int on) { enabled = on ? 1 : 0; hal_setting_set(u"QrtSmp", (u32)enabled); }
 
 void smp_run(smp_job_t job, void *arg, int count) {
+#if defined(__x86_64__)
+    if (k.native) {
+        if (smp_workers()) native_smp_run(job, arg, count);
+        else for (int i = 0; i < count; i++) job(arg, i, count);
+        return;
+    }
+#endif
     dispatch_t d = { job, arg, MIN(count, 64), 0, { 0 } };
     if (smp_workers() && d.count > 1) run_on_aps(&d);
     for (int i = 0; i < d.count; i++)           /* leftovers, or everything when single core */

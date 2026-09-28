@@ -1,6 +1,14 @@
 /* System: what Tessera found on this machine, plus the kernel log. */
 #include "../ui/shell.h"
 #include "../kernel/smp.h"
+#include "../kernel/vfs.h"
+#include "../drivers/pci.h"
+#if defined(__x86_64__)
+#include "../arch/x64/sched.h"
+#endif
+
+/* sampled on the boot core in tick(); draw() may run on any core */
+static struct { int busy_pct, threads; u64 mem_total, mem_free; char thread_list[160]; } ks;
 
 static struct { scroll_t sc; } st;
 
@@ -57,6 +65,38 @@ static void draw(canvas_t *c, rect_t a) {
         kv(&f, "", shell_stats.bench[3]);
     } else kv(&f, "Benchmark", "type \"bench\" in the Ask bar");
 
+    heading(&f, "KERNEL");
+    kv(&f, "Mode", k.native ? "native: firmware exited, QRT owns the machine" : "firmware-hosted (UEFI boot services running)");
+    if (k.native) {
+        fmt(b, sizeof b, "%d threads, CPU %d%% busy", ks.threads, ks.busy_pct);
+        kv(&f, "Scheduler", b);
+        kv(&f, "Threads", ks.thread_list);
+        char t1[24], t2[24];
+        fmt_bytes(t1, sizeof t1, ks.mem_total);
+        fmt_bytes(t2, sizeof t2, ks.mem_free);
+        fmt(b, sizeof b, "%s managed, %s free (own page allocator + heap)", t1, t2);
+        kv(&f, "Memory", b);
+        fmt(b, sizeof b, "%d (boot core + %d started by QRT)", smp_workers() + 1, smp_workers());
+        kv(&f, "CPU cores", b);
+        kv(&f, "Timer", "local APIC, 1000 Hz; the CPU halts when idle");
+    }
+
+    heading(&f, "DRIVERS");
+    if (!pci_ndevs) kv(&f, "PCI", "no ECAM (MCFG) table");
+    for (int i = 0; i < pci_ndevs; i++) {
+        pci_dev_t *d = &pci_devs[i];
+        char key[32];
+        fmt(key, sizeof key, "%02x:%02x.%x", d->bus, d->dev, d->fn);
+        fmt(b, sizeof b, "%04x:%04x class %02x.%02x  %s", d->vendor, d->device, d->class_code, d->subclass,
+            d->driver ? d->driver : "-");
+        kv(&f, key, b);
+    }
+    if (k.native) {
+        kv(&f, "Display", "linear framebuffer (write-combining), QRT compositor");
+        kv(&f, "Serial", "16550 COM1, polled (kernel log + test input)");
+        kv(&f, "Files", "RAM copy of the boot stick (vfs); native storage pending");
+    }
+
     heading(&f, "DEVICE");
     kv(&f, "Manufacturer", k.sys_vendor[0] ? k.sys_vendor : "unknown");
     kv(&f, "Model", k.sys_product[0] ? k.sys_product : "unknown");
@@ -72,7 +112,7 @@ static void draw(canvas_t *c, rect_t a) {
     fmt(b, sizeof b, "%llu MHz (TSC)", k.tsc_per_ms / 1000);
     kv(&f, "Clock", b);
 
-    heading(&f, "FIRMWARE (THE DRIVER LAYER)");
+    heading(&f, k.native ? "FIRMWARE (BOOT ONLY; RUNTIME: CLOCK, SETTINGS, RESET)" : "FIRMWARE (THE DRIVER LAYER)");
     kv(&f, "Vendor", k.fw_vendor);
     fmt(b, sizeof b, "UEFI %u.%u%s, %s", k.uefi_revision >> 16, (k.uefi_revision & 0xffff) / 10,
         (k.uefi_revision & 0xffff) % 10 ? "x" : "", sizeof(void *) == 8 ? "64-bit" : "32-bit");
@@ -88,7 +128,7 @@ static void draw(canvas_t *c, rect_t a) {
     kv(&f, "UI scale", b);
     fmt(b, sizeof b, "%d touch, %d pointer", k.n_abs, k.n_rel);
     kv(&f, "Pointers", b);
-    kv(&f, "Keys", "Console input (keyboard, hardware buttons)");
+    kv(&f, "Keys", k.native ? "serial console (USB keyboard driver pending)" : "Console input (keyboard, hardware buttons)");
 
     heading(&f, "STORAGE");
     for (int i = 0; i < k.n_blk; i++) {
@@ -103,7 +143,7 @@ static void draw(canvas_t *c, rect_t a) {
         kv(&f, "Volume", b);
     }
 
-    heading(&f, "KERNEL");
+    heading(&f, "BUILD");
     kv(&f, "System", "QRT " QRT_VERSION " / Tessera");
     kv(&f, "Architecture", QRT_ARCH);
     u64 up = k_now_ms() / 1000;
@@ -126,10 +166,27 @@ static void draw(canvas_t *c, rect_t a) {
 
 static int event(const event_t *e, rect_t a) { return scroll_event(&st.sc, e, a, dp(48)); }
 
+
 static int tick(u64 now) {
     static u64 last;
     if (now - last < 1000) return 0;
     last = now;
+#if defined(__x86_64__)
+    if (k.native) {
+        static u64 last_idle, last_ticks;
+        u64 idle = sched_idle_ticks(), t = ticks;
+        if (t > last_ticks) ks.busy_pct = 100 - (int)((idle - last_idle) * 100 / (t - last_ticks));
+        last_idle = idle; last_ticks = t;
+        thread_t *th[16];
+        ks.threads = sched_threads(th, 16);
+        usize o = 0;
+        ks.thread_list[0] = 0;
+        for (int i = 0; i < ks.threads; i++)
+            o += fmt(ks.thread_list + o, sizeof ks.thread_list - o, "%s%s", i ? ", " : "", th[i]->name);
+        ks.mem_total = pmm_total_bytes();
+        ks.mem_free = pmm_free_bytes();
+    }
+#endif
     return 1;   /* uptime */
 }
 

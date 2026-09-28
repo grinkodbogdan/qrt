@@ -57,10 +57,15 @@ class QMP:
             self._pkt("m", *p); time.sleep(0.05)
         self._pkt("u", *pts[-1]); time.sleep(settle)
 
+    # Keys go over the serial console: the firmware's terminal driver and QRT's
+    # native UART driver both read it, while native mode has no USB keyboard yet.
+    KEYMAP = {"ret": "\r", "esc": "\x1b", "backspace": "\x08", "spc": " ", "tab": "\t",
+              "up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D"}
+
     def keys(self, *names, settle=0.6):
         for n in names:
-            self.cmd("send-key", keys=[{"type": "qcode", "data": n}])
-            time.sleep(0.12)
+            self.serial.sendall(self.KEYMAP.get(n, n).encode())
+            time.sleep(0.25 if n == "esc" else 0.12)
         time.sleep(settle)
 
     def shot(self, name):

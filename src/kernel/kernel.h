@@ -39,10 +39,15 @@ typedef struct {
     EFI_RUNTIME_SERVICES *rt;
     EFI_HANDLE image;
     int graphics_up;
+    int native;         /* 1 once the firmware's boot services are gone (x86-64) */
+    u64 image_base, image_size;
 
     /* display */
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
     u32 fb_w, fb_h;
+    u64 fb_base;        /* native mode: linear framebuffer */
+    u32 fb_stride;      /* pixels per scan line */
+    int fb_rgb;         /* 1 if the panel wants R,G,B byte order (else B,G,R) */
 
     /* input */
     EFI_ABSOLUTE_POINTER_PROTOCOL *abs[MAX_ABS];
@@ -102,6 +107,13 @@ void hal_set_touch_map(u32 map);
 int  hal_poll(event_t *out, int max);
 void hal_cursor(int *x, int *y, int *visible);
 
+/* ---- platform services with a firmware and a native implementation ---- */
+void hal_present(const u32 *px, int stride, int x, int y, int w, int h);  /* rect -> panel */
+void hal_wait_frame(void);           /* sleep until the next ~10 ms frame tick */
+void hal_delay_us(u32 us);
+void hal_settings_prepare(void);     /* cache + make settings reachable after ExitBootServices */
+const char *hal_mode(void);          /* "firmware-hosted" or "native" */
+
 /* ---- power / firmware ---- */
 void hal_shutdown(void);
 void hal_reboot(void);
@@ -117,6 +129,9 @@ void sysinfo_probe(void);
 int  hwreport_save(void);            /* ACPI/SMBIOS/PCI dump to \qrt\hwdump */
 int  hwreport_write(const char *name, const void *data, usize len);
 void hal_reprobe_input(void);        /* forget and rediscover firmware pointers */
+
+/* ---- ACPI ---- */
+const u8 *acpi_table(const char *sig, int index);   /* n-th table with this signature */
 
 /* ---- the shell (user interface) takes over after boot ---- */
 void shell_main(void);

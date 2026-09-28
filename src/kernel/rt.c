@@ -1,6 +1,11 @@
 /* rt.c - freestanding runtime support. */
 #include "rt.h"
 #include "kernel.h"
+#include "../drivers/uart.h"
+#if defined(__x86_64__)
+#include "../arch/x64/mm.h"
+void native_panic(const char *what, void *frame);
+#endif
 
 void *memset(void *d, int c, usize n) {
     void *p = d;
@@ -180,7 +185,11 @@ void fmt_bytes(char *buf, usize cap, u64 b) {
 }
 
 /* ---- memory: the firmware's pool allocator is our heap ---------------- */
+/* The firmware's pool while it runs; the kernel heap afterwards. */
 void *kalloc(usize n) {
+#if defined(__x86_64__)
+    if (k.native) return heap_alloc(n);
+#endif
     void *p = NULL;
     if (EFI_ERROR(k.bs->AllocatePool(EfiLoaderData, n ? n : 1, &p)) || !p)
         panic("out of memory");
@@ -188,7 +197,16 @@ void *kalloc(usize n) {
     return p;
 }
 
-void kfree(void *p) { if (p) k.bs->FreePool(p); }
+void kfree(void *p) {
+    if (!p) return;
+#if defined(__x86_64__)
+    if (k.native) {                 /* pool blocks from before the handover are simply kept */
+        if (heap_owns(p)) heap_free(p);
+        return;
+    }
+#endif
+    k.bs->FreePool(p);
+}
 
 /* ---- logging ------------------------------------------------------------ */
 #define LOG_LINES 64
@@ -204,7 +222,9 @@ void klog(const char *f, ...) {
     va_end(ap);
     strlcpy(log_ring[log_count % LOG_LINES], line, sizeof line);
     log_count++;
-    if (k.st && k.st->ConOut && !k.graphics_up) {
+    if (k.native || k.graphics_up) {
+        if (uart_present()) { uart_write(line); uart_write("\n"); }
+    } else if (k.st && k.st->ConOut) {
         utf8_to_str16(wide, 98, line);
         usize n = str16len(wide);
         wide[n] = '\r'; wide[n + 1] = '\n'; wide[n + 2] = 0;
@@ -219,6 +239,9 @@ const char *klog_line(int i) {
 }
 
 void panic(const char *msg) {
+#if defined(__x86_64__)
+    if (k.native) native_panic(msg, NULL);
+#endif
     k.graphics_up = 0;
     klog("*** QRT kernel panic: %s", msg);
     for (;;) k.bs->Stall(1000000);

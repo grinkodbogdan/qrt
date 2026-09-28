@@ -11,6 +11,8 @@ typedef struct dwi2c {
     u32 rx_depth, tx_depth;
     u32 last_abort;             /* IC_TX_ABRT_SOURCE of the last failed transfer */
     int found;
+    u32 saved[11], saved_priv[2];
+    int has_saved;
 } dwi2c_t;
 
 #define DW_OK        0
@@ -23,3 +25,5 @@ int  dwi2c_find(dwi2c_t *c, u32 bus, u32 dev, u32 fn);
 /* Write wlen bytes, then (repeated start) read rlen bytes. Either may be 0. */
 int  dwi2c_xfer(dwi2c_t *c, u8 addr, const u8 *w, int wlen, u8 *r, int rlen);
 const char *dwi2c_strerror(int err);
+void dwi2c_save(dwi2c_t *c);                /* snapshot the firmware's configuration */
+int  dwi2c_restore(dwi2c_t *c, u8 pci_fn);  /* re-apply it after ExitBootServices */

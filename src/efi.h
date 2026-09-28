@@ -262,8 +262,11 @@ typedef struct {
     u64 Attribute;
 } EFI_MEMORY_DESCRIPTOR;
 
-enum { EfiConventionalMemory = 7, EfiBootServicesCode = 3, EfiBootServicesData = 4,
-       EfiLoaderCode = 1, EfiLoaderData = 2 };
+enum { EfiReservedMemoryType, EfiLoaderCode, EfiLoaderData, EfiBootServicesCode, EfiBootServicesData,
+       EfiRuntimeServicesCode, EfiRuntimeServicesData, EfiConventionalMemory, EfiUnusableMemory,
+       EfiACPIReclaimMemory, EfiACPIMemoryNVS, EfiMemoryMappedIO, EfiMemoryMappedIOPortSpace,
+       EfiPalCode, EfiPersistentMemory };
+enum { AllocateAnyPages, AllocateMaxAddress, AllocateAddress };
 
 #define TPL_HIGH_LEVEL 31
 #define EVT_TIMER 0x80000000u
@@ -278,7 +281,8 @@ typedef struct {
     EFI_TABLE_HEADER Hdr;
     UINTN (*RaiseTPL)(UINTN NewTpl);
     void (*RestoreTPL)(UINTN OldTpl);
-    void *AllocatePages, *FreePages;
+    EFI_STATUS (*AllocatePages)(u32 Type, u32 MemoryType, UINTN Pages, u64 *Memory);
+    EFI_STATUS (*FreePages)(u64 Memory, UINTN Pages);
     EFI_STATUS (*GetMemoryMap)(UINTN *, EFI_MEMORY_DESCRIPTOR *, UINTN *, UINTN *, u32 *);
     EFI_STATUS (*AllocatePool)(u32 PoolType, UINTN, void **);
     EFI_STATUS (*FreePool)(void *);
@@ -295,7 +299,8 @@ typedef struct {
     void *LocateHandle;
     void *LocateDevicePath;
     void *InstallConfigurationTable;
-    void *LoadImage, *StartImage, *Exit, *UnloadImage, *ExitBootServices;
+    void *LoadImage, *StartImage, *Exit, *UnloadImage;
+    EFI_STATUS (*ExitBootServices)(EFI_HANDLE, UINTN MapKey);
     void *GetNextMonotonicCount;
     EFI_STATUS (*Stall)(UINTN Microseconds);
     EFI_STATUS (*SetWatchdogTimer)(UINTN Timeout, u64 Code, UINTN DataSize, c16 *Data);

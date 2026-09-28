@@ -228,7 +228,7 @@ static void present(const canvas_t *src, rect_t d) {
     d = rect_intersect(d, full_rect());
     if (d.w <= 0 || d.h <= 0) return;
     if (!sh.rot) {
-        k.gop->Blt(k.gop, src->px, EfiBltBufferToVideo, d.x, d.y, d.x, d.y, d.w, d.h, (UINTN)src->stride * 4);
+        hal_present(src->px, src->stride, d.x, d.y, d.w, d.h);
         return;
     }
     int fw = (int)k.fb_w, fh = (int)k.fb_h;
@@ -247,7 +247,7 @@ static void present(const canvas_t *src, rect_t d) {
     case 2:  r = (rect_t){ fw - (d.x + d.w), fh - (d.y + d.h), d.w, d.h }; break;
     default: r = (rect_t){ d.y, fh - (d.x + d.w), d.h, d.w }; break;
     }
-    k.gop->Blt(k.gop, p, EfiBltBufferToVideo, r.x, r.y, r.x, r.y, r.w, r.h, (UINTN)fw * 4);
+    hal_present(p, fw, r.x, r.y, r.w, r.h);
 }
 
 static void draw_cursor(canvas_t *c, int x, int y) {
@@ -742,7 +742,7 @@ static void run_benchmark(void) {
     fmt(shell_stats.bench[2], sizeof shell_stats.bench[2], "frame copy %llu.%llu ms (%llu MB/s)",
         copy_us / 1000, copy_us / 100 % 10, mbps);
     fmt(shell_stats.bench[3], sizeof shell_stats.bench[3], "full draw: 1 core %llu.%llu ms, %d cores %llu.%llu ms (%llu.%llux)",
-        single_us / 1000, single_us / 100 % 10, smp_workers() ? smp_workers() : 1, multi_us / 1000, multi_us / 100 % 10,
+        single_us / 1000, single_us / 100 % 10, smp_workers() + (k.native ? 1 : 0) ? smp_workers() + (k.native ? 1 : 0) : 1, multi_us / 1000, multi_us / 100 % 10,
         multi_us ? single_us / multi_us : 0, multi_us ? single_us * 10 / multi_us % 10 : 0);
     for (int i = 0; i < 4; i++) klog("bench: %s", shell_stats.bench[i]);
     for (int i = 0; i < N_APPS; i++) if (apps[i] == &app_system) open_app(i);
@@ -755,25 +755,21 @@ void shell_main(void) {
     sh.accent_idx = (int)hal_setting_get(u"QrtAccent", 0) % N_ACCENTS;
     sh.focus = -1; sh.pressed = -1; sh.ask_pressed = -1;
     k.graphics_up = 1;
-    k.st->ConOut->EnableCursor(k.st->ConOut, 0);
+    if (!k.native) k.st->ConOut->EnableCursor(k.st->ConOut, 0);
     relayout();
 
     for (int i = 1; i <= 12; i++) {
         float t = i / 12.0f;
         splash(1 - (1 - t) * (1 - t));
-        k.bs->Stall(25000);
+        hal_delay_us(25000);
     }
     k.boot_ms = k_now_ms();
     klog("shell: first frame after %llu ms", k.boot_ms);
 
-    EFI_EVENT tick;
-    k.bs->CreateEvent(EVT_TIMER, 0, NULL, NULL, &tick);
-    k.bs->SetTimer(tick, TimerPeriodic, 100000);   /* 10 ms */
 
     sh.dirty = 1;
     for (;;) {
-        UINTN idx;
-        k.bs->WaitForEvent(1, &tick, &idx);
+        hal_wait_frame();
 
         event_t ev[32];
         int n = hal_poll(ev, 32);

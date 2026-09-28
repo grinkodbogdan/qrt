@@ -8,6 +8,7 @@
  * TPL_HIGH_LEVEL so a firmware timer callback can never interleave with it.
  */
 #include "dwi2c.h"
+#include "pci.h"
 
 enum {
     IC_CON = 0x00, IC_TAR = 0x04, IC_DATA_CMD = 0x10, IC_INTR_MASK = 0x30,
@@ -32,26 +33,37 @@ static inline u32 rd(dwi2c_t *c, u32 off) { return *(volatile u32 *)(c->base + o
 static inline void wr(dwi2c_t *c, u32 off, u32 v) { *(volatile u32 *)(c->base + off) = v; }
 
 int dwi2c_find(dwi2c_t *c, u32 bus, u32 dev, u32 fn) {
-    UINTN n = 0;
-    EFI_HANDLE *h = NULL;
     memset(c, 0, sizeof *c);
-    if (EFI_ERROR(k.bs->LocateHandleBuffer(ByProtocol, &pci_guid, NULL, &n, &h))) return DW_ENODEV;
-    for (UINTN i = 0; i < n; i++) {
-        EFI_PCI_IO_PROTOCOL *p;
-        UINTN s, b, d, f;
-        u32 cfg[6];
-        if (EFI_ERROR(k.bs->HandleProtocol(h[i], &pci_guid, (void **)&p))) continue;
-        if (EFI_ERROR(p->GetLocation(p, &s, &b, &d, &f)) || b != bus || d != dev || f != fn) continue;
-        if (EFI_ERROR(p->Pci.Read(p, 2, 0, 6, cfg))) continue;
-        u64 bar = cfg[4] & ~0xfu;
-        if ((cfg[4] & 6) == 4) bar |= (u64)cfg[5] << 32;     /* 64-bit BAR */
-        if (!bar || (sizeof(void *) == 4 && bar >> 32)) continue;
-        c->base = (volatile u8 *)(usize)bar;
-        c->pci_handle = h[i];
-        c->pci_id = cfg[0];
-        break;
+    /* registers: BAR0 read straight from PCI config space (ECAM) */
+    if (pci_available()) {
+        u64 bar = pci_bar((u8)bus, (u8)dev, (u8)fn, 0);
+        if (bar && !(sizeof(void *) == 4 && bar >> 32)) {
+            c->base = (volatile u8 *)(usize)bar;
+            c->pci_id = pci_read32((u8)bus, (u8)dev, (u8)fn, 0);
+        }
     }
-    k.bs->FreePool(h);
+    /* while the firmware runs, also find its handle so its driver can be detached */
+    if (!k.native) {
+        UINTN n = 0;
+        EFI_HANDLE *h = NULL;
+        if (!EFI_ERROR(k.bs->LocateHandleBuffer(ByProtocol, &pci_guid, NULL, &n, &h))) {
+            for (UINTN i = 0; i < n; i++) {
+                EFI_PCI_IO_PROTOCOL *p;
+                UINTN s, b, d, f;
+                u32 cfg[6];
+                if (EFI_ERROR(k.bs->HandleProtocol(h[i], &pci_guid, (void **)&p))) continue;
+                if (EFI_ERROR(p->GetLocation(p, &s, &b, &d, &f)) || b != bus || d != dev || f != fn) continue;
+                c->pci_handle = h[i];
+                if (!c->base && !EFI_ERROR(p->Pci.Read(p, 2, 0, 6, cfg))) {
+                    u64 bar = cfg[4] & ~0xfu;
+                    if ((cfg[4] & 6) == 4) bar |= (u64)cfg[5] << 32;
+                    if (bar && !(sizeof(void *) == 4 && bar >> 32)) { c->base = (volatile u8 *)(usize)bar; c->pci_id = cfg[0]; }
+                }
+                break;
+            }
+            k.bs->FreePool(h);
+        }
+    }
     if (!c->base) return DW_ENODEV;
     c->comp_type = rd(c, IC_COMP_TYPE);
     if (c->comp_type != DW_COMP_TYPE_VALUE) { c->base = NULL; return DW_ENODEV; }
@@ -74,7 +86,10 @@ static int wait_enable(dwi2c_t *c, int on, u64 deadline) {
 
 int dwi2c_xfer(dwi2c_t *c, u8 addr, const u8 *w, int wlen, u8 *r, int rlen) {
     if (!c->found) return DW_ENODEV;
-    UINTN old = k.bs->RaiseTPL(TPL_HIGH_LEVEL);
+    UINTN old = 0;
+    usize flags = 0;
+    if (k.native) __asm__ volatile("pushf; pop %0; cli" : "=r"(flags) :: "memory");
+    else old = k.bs->RaiseTPL(TPL_HIGH_LEVEL);
     u64 deadline = k_now_ms() + 50 + (u64)(wlen + rlen) / 8;   /* generous even at 100 kHz */
     int err = DW_OK;
 
@@ -121,7 +136,8 @@ disable:
     /* leave the controller enabled, as the firmware expects to find it */
     (void)rd(c, IC_CLR_INTR);
 out:
-    k.bs->RestoreTPL(old);
+    if (k.native) { if (flags & 0x200) __asm__ volatile("sti" ::: "memory"); }
+    else k.bs->RestoreTPL(old);
     return err;
 }
 
@@ -133,4 +149,38 @@ const char *dwi2c_strerror(int err) {
     case DW_ENODEV: return "no controller";
     default: return "error";
     }
+}
+
+/*
+ * The firmware configured the controller (clocks, SCL timing, speed).  Its
+ * drivers stop at ExitBootServices and may reset or power the block down, so
+ * the configuration is captured beforehand and written back afterwards.
+ */
+static const u16 saved_regs[] = { 0x00, 0x14, 0x18, 0x1c, 0x20, 0x24, 0x28, 0x7c, 0x94, 0xa0, 0xa4 };
+
+void dwi2c_save(dwi2c_t *c) {
+    if (!c->found) return;
+    for (usize i = 0; i < ARRAY_LEN(saved_regs); i++) c->saved[i] = rd(c, saved_regs[i]);
+    c->saved_priv[0] = rd(c, 0x800);
+    c->saved_priv[1] = rd(c, 0x804);
+    c->has_saved = 1;
+}
+
+int dwi2c_restore(dwi2c_t *c, u8 fn) {
+    if (!c->found || !c->has_saved) return DW_ENODEV;
+    if (pci_available()) {
+        /* power state D0 and memory decoding on */
+        int pm = pci_find_cap(0, 0x18, fn, 0x01);
+        if (pm) pci_write32(0, 0x18, fn, (u16)(pm + 4), pci_read32(0, 0x18, fn, (u16)(pm + 4)) & ~3u);
+        pci_write32(0, 0x18, fn, 0x04, pci_read32(0, 0x18, fn, 0x04) | 0x6);
+    }
+    if (rd(c, 0x804) != c->saved_priv[1]) wr(c, 0x804, c->saved_priv[1]);      /* LPSS resets */
+    if (rd(c, 0x800) != c->saved_priv[0]) wr(c, 0x800, c->saved_priv[0]);      /* LPSS clock */
+    if (rd(c, IC_COMP_TYPE) != DW_COMP_TYPE_VALUE) return DW_ENODEV;
+    wr(c, IC_ENABLE, 0);
+    for (int i = 0; i < 100000 && (rd(c, IC_ENABLE_STATUS) & 1); i++) {}
+    for (usize i = 1; i < ARRAY_LEN(saved_regs); i++) wr(c, saved_regs[i], c->saved[i]);
+    wr(c, IC_CON, c->saved[0]);
+    wr(c, IC_ENABLE, 1);
+    return DW_OK;
 }

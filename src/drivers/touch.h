@@ -43,3 +43,4 @@ void ntouch_revert(void);        /* give touch back to the firmware */
 int  ntouch_active(void);
 int  ntouch_poll(event_t *out, int max);
 int  ntouch_save(void);          /* \qrt\hwdump\touch.txt */
+int  ntouch_native_resume(void); /* after ExitBootServices */

@@ -14,6 +14,7 @@
  * the one that answers with a valid HID descriptor containing fingers.
  */
 #include "touch.h"
+#include "pci.h"
 
 ntouch_t nt;
 
@@ -60,6 +61,7 @@ void ntouch_probe(void) {
     if (nt.bus_err) fmt(nt.status, sizeof nt.status, "I2C6 controller: %s", dwi2c_strerror(nt.bus_err));
     else if (nt.primary < 0) fmt(nt.status, sizeof nt.status, "controller found, no finger-touch device answered");
     else fmt(nt.status, sizeof nt.status, "ready: %s at 0x%02x", nt.cand[nt.primary].name, nt.cand[nt.primary].addr);
+    if (nt.primary >= 0) dwi2c_save(&nt.bus);
     klog("touch: %s", nt.status);
 }
 
@@ -103,7 +105,48 @@ int ntouch_go_native(void) {
     return 1;
 }
 
+/*
+ * After ExitBootServices: the firmware's I2C and HID drivers are gone and may
+ * have reset the controller or put the chip to sleep on their way out.
+ * Restore the controller, wake the chip, confirm it answers.
+ */
+int ntouch_native_resume(void) {
+    if (nt.primary < 0) return 0;
+    i2chid_t *h = &nt.cand[nt.primary].hid;
+    if (dwi2c_restore(&nt.bus, 6)) { fmt(nt.status, sizeof nt.status, "I2C6 did not come back after the handover"); return 0; }
+    int err = DW_ENODEV;
+    for (int attempt = 0; attempt < 5 && err; attempt++) {
+        i2chid_set_power(h, 1);
+        hal_delay_us(20000);
+        u8 reg[2] = { (u8)h->desc_reg, (u8)(h->desc_reg >> 8) }, b[4];
+        err = dwi2c_xfer(&nt.bus, h->addr, reg, 2, b, 4);
+        if (!err && (b[0] | b[1] << 8) != 30) err = DW_ENODEV;
+        if (err && attempt == 2) {
+            /* HID RESET (opcode 1), then drain the chip's reset acknowledgement */
+            u8 cmd[4] = { (u8)h->d.cmd_reg, (u8)(h->d.cmd_reg >> 8), 0x00, 0x01 };
+            dwi2c_xfer(&nt.bus, h->addr, cmd, 4, NULL, 0);
+            hal_delay_us(100000);
+            u8 tmp[64];
+            i2chid_read(h, tmp, sizeof tmp);
+        }
+    }
+    if (err) { fmt(nt.status, sizeof nt.status, "touch chip silent after handover (%s)", dwi2c_strerror(err)); return 0; }
+    h->tracking = h->down = 0;
+    h->reports = h->empty_reads = h->errors = 0;
+    nt.consecutive_errors = 0;
+    nt.last_report_ms = nt.native_since = k_now_ms();
+    nt.active = 1;
+    pci_set_driver(0, 0x18, 6, "dw-i2c + i2c-hid (QRT)");
+    fmt(nt.status, sizeof nt.status, "NATIVE: %s at 0x%02x via I2C6", nt.cand[nt.primary].name, h->addr);
+    return 1;
+}
+
 void ntouch_revert(void) {
+    if (k.native) {                       /* no firmware to go back to: try to recover the chip */
+        nt.active = 0;
+        ntouch_native_resume();
+        return;
+    }
     nt.active = 0;
     if (nt.bus.pci_handle) k.bs->ConnectController(nt.bus.pci_handle, NULL, NULL, 1);
     hal_reprobe_input();
@@ -114,7 +157,7 @@ int ntouch_poll(event_t *out, int max) {
     if (!nt.active || max <= 0) return 0;
     i2chid_t *h = &nt.cand[nt.primary].hid;
     int n = 0;
-    if (!h->reports && k_now_ms() - nt.native_since > 15000) {
+    if (!k.native && !h->reports && k_now_ms() - nt.native_since > 15000) {
         /* never saw a single touch report: don't leave the user without input */
         ntouch_revert();
         fmt(nt.status, sizeof nt.status, "no touch reports in 15 s - back to firmware touch");

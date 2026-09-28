@@ -1,6 +1,16 @@
 /* kernel.c - Tessera entry point and boot sequence. */
 #include "kernel.h"
 #include "smp.h"
+#include "vfs.h"
+#include "../drivers/pci.h"
+#include "../drivers/uart.h"
+#include "../drivers/touch.h"
+
+#if defined(__x86_64__)
+int  native_prepare(void);
+void native_enter(void);
+static int native_wanted(void);
+#endif
 
 kernel_t k;
 
@@ -75,8 +85,38 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     hal_probe();
     if (!k.gop) panic("no Graphics Output Protocol - cannot start the shell");
     if (!hwreport_save()) klog("hwreport: boot volume not writable, skipped");
-    smp_init();
+    hal_settings_prepare();
+    pci_init();
+    vfs_load_boot_volume();
 
+#if defined(__x86_64__)
+    if (native_wanted()) {
+        klog("boot: handing over from the firmware to the native kernel");
+        native_enter();                       /* never returns */
+    }
+#endif
+    smp_init();
     shell_main();
     return EFI_SUCCESS;
 }
+
+#if defined(__x86_64__)
+/*
+ * Native mode is used when QRT can drive the machine's input itself (the
+ * native touchscreen driver found its chip, or a serial console exists),
+ * unless the user asked for firmware mode: setting QrtBootMode = 1, holding
+ * any key or hardware button at boot, or a failed native boot last time
+ * (QrtBootMode = 2, cleared once honoured).
+ */
+static int native_wanted(void) {
+    u32 mode = hal_setting_get(u"QrtBootMode", 0);
+    if (mode == 2) { hal_setting_set(u"QrtBootMode", 0); klog("boot: last native boot failed - firmware mode"); return 0; }
+    if (mode == 1) { klog("boot: firmware mode selected in settings"); return 0; }
+    EFI_INPUT_KEY key;
+    if (!EFI_ERROR(k.st->ConIn->ReadKeyStroke(k.st->ConIn, &key))) { klog("boot: key held - firmware mode"); return 0; }
+    ntouch_probe();
+    if (!native_prepare()) return 0;
+    if (nt.primary < 0 && !uart_present()) { klog("boot: no native input device - firmware mode"); return 0; }
+    return 1;
+}
+#endif

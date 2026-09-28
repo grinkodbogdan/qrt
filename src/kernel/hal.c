@@ -3,6 +3,11 @@
  */
 #include "kernel.h"
 #include "../drivers/touch.h"
+#include "../drivers/uart.h"
+#if defined(__x86_64__)
+#include "../arch/x64/sched.h"
+void native_present(const u32 *src, int stride, int x, int y, int w, int h);
+#endif
 
 static EFI_GUID gop_guid = GOP_GUID;
 static EFI_GUID abs_guid = ABS_POINTER_GUID;
@@ -133,6 +138,33 @@ static int inject_key(c16 ch, event_t *out) {
     return 1;
 }
 
+/*
+ * Native mode keyboard: the serial port.  Bytes become key events; the
+ * Ctrl-T touch packets used by the test harness work exactly as before;
+ * ANSI arrow sequences (ESC [ A..D) map to the UEFI scan codes the UI uses.
+ */
+static int serial_keys(event_t *out, int max) {
+    int n = 0, c;
+    static int esc;
+    while (n < max && (c = uart_getc()) >= 0) {
+        if (inject_key((c16)c, &out[n])) { if (out[n].type) n++; continue; }
+        if (esc == 1) { esc = c == '[' ? 2 : 0; if (!esc) goto plain; continue; }
+        if (esc == 2) {
+            esc = 0;
+            u16 sc = c == 'A' ? SCAN_UP : c == 'B' ? SCAN_DOWN : c == 'C' ? SCAN_RIGHT : c == 'D' ? SCAN_LEFT : 0;
+            if (sc) out[n++] = (event_t){ .type = EV_KEY, .scan = sc };
+            continue;
+        }
+        if (c == 0x1b) { esc = 1; continue; }
+    plain:
+        if (c == 0x7f) c = 8;
+        if (c == '\n') c = '\r';
+        out[n++] = (event_t){ .type = EV_KEY, .ch = (c16)c };
+    }
+    if (esc == 1 && n < max) { esc = 0; out[n++] = (event_t){ .type = EV_KEY, .scan = SCAN_ESC }; }
+    return n;
+}
+
 void hal_reprobe_input(void) {
     k.n_abs = k.n_rel = k.splitter_abs = k.splitter_rel = 0;
     memset(abs_down, 0, sizeof abs_down);
@@ -144,6 +176,7 @@ int hal_poll(event_t *out, int max) {
     if (cur_x < 0) { cur_x = (int)k.fb_w / 2; cur_y = (int)k.fb_h / 2; }
 
     int n_abs = k.n_abs ? k.n_abs : k.splitter_abs, n_rel = k.n_rel ? k.n_rel : k.splitter_rel;
+    if (k.native) n_abs = n_rel = 0;      /* firmware input drivers are gone */
     if (ntouch_active()) {
         n_abs = 0;                        /* the firmware driver is gone; ours reports */
         n += ntouch_poll(out + n, max - n - 2);
@@ -204,6 +237,7 @@ int hal_poll(event_t *out, int max) {
         }
     }
 
+    if (k.native) return n + serial_keys(out + n, max - n);
     EFI_INPUT_KEY key;
     while (n < max && !EFI_ERROR(k.st->ConIn->ReadKeyStroke(k.st->ConIn, &key))) {
         if (inject_key(key.UnicodeChar, &out[n])) {
@@ -300,15 +334,61 @@ int hal_reboot_to_firmware(void) {
 }
 
 /* ---- settings in NVRAM ------------------------------------------------ */
+/*
+ * Settings are UEFI variables.  Early QRT versions created them as
+ * boot-services-only, which makes them invisible once the firmware exits;
+ * hal_settings_prepare() re-creates them with runtime access.
+ */
+#define SETTING_ATTR (EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS)
+static const c16 *setting_names[] = { u"QrtRotation", u"QrtAccent", u"QrtTouchMap", u"QrtSmp", u"QrtBootMode" };
+
 u32 hal_setting_get(const c16 *name, u32 def) {
-    u32 v = def;
+    u32 v = def, attr = 0;
     UINTN sz = sizeof v;
-    if (EFI_ERROR(k.rt->GetVariable(name, &qrt_guid, NULL, &sz, &v)) || sz != sizeof v) return def;
+    if (EFI_ERROR(k.rt->GetVariable(name, &qrt_guid, &attr, &sz, &v)) || sz != sizeof v) return def;
     return v;
 }
 
 void hal_setting_set(const c16 *name, u32 value) {
-    k.rt->SetVariable(name, &qrt_guid,
-                      EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS,
-                      sizeof value, &value);
+    k.rt->SetVariable(name, &qrt_guid, SETTING_ATTR, sizeof value, &value);
 }
+
+void hal_settings_prepare(void) {
+    for (usize i = 0; i < ARRAY_LEN(setting_names); i++) {
+        u32 v, attr = 0;
+        UINTN sz = sizeof v;
+        if (EFI_ERROR(k.rt->GetVariable(setting_names[i], &qrt_guid, &attr, &sz, &v)) || sz != sizeof v) continue;
+        if (attr & EFI_VARIABLE_RUNTIME_ACCESS) continue;
+        k.rt->SetVariable(setting_names[i], &qrt_guid, attr, 0, NULL);          /* delete the old one */
+        k.rt->SetVariable(setting_names[i], &qrt_guid, SETTING_ATTR, sizeof v, &v);
+    }
+}
+
+/* ---- display, timing ---------------------------------------------------- */
+void hal_present(const u32 *px, int stride, int x, int y, int w, int h) {
+#if defined(__x86_64__)
+    if (k.native) { native_present(px, stride, x, y, w, h); return; }
+#endif
+    k.gop->Blt(k.gop, (u32 *)px, EfiBltBufferToVideo, x, y, x, y, w, h, (UINTN)stride * 4);
+}
+
+void hal_wait_frame(void) {
+#if defined(__x86_64__)
+    if (k.native) { thread_sleep_ms(10); return; }     /* the CPU halts until then */
+#endif
+    static EFI_EVENT tick;
+    if (!tick) {
+        k.bs->CreateEvent(EVT_TIMER, 0, NULL, NULL, &tick);
+        k.bs->SetTimer(tick, TimerPeriodic, 100000);   /* 10 ms */
+    }
+    UINTN idx;
+    k.bs->WaitForEvent(1, &tick, &idx);
+}
+
+void hal_delay_us(u32 us) {
+    if (!k.native) { k.bs->Stall(us); return; }
+    u64 end = k_now_us() + us;
+    while (k_now_us() < end) __asm__ volatile("pause");
+}
+
+const char *hal_mode(void) { return k.native ? "native kernel" : "firmware-hosted"; }

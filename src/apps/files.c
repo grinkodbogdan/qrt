@@ -1,5 +1,6 @@
 /* Files: browse every FAT volume the firmware can see (eMMC ESP, SD, USB). */
 #include "../ui/shell.h"
+#include "../kernel/vfs.h"
 
 #define MAX_ENTRIES 256
 #define PREVIEW_MAX 8192
@@ -45,11 +46,33 @@ static int cmp_entry(const entry_t *a, const entry_t *b) {
     return *x - *y;
 }
 
+/* native mode: the firmware's FAT driver is gone; browse the RAM copy (vfs) */
+static vnode_t *vfs_node(const c16 *path) {
+    char p[512];
+    str16_to_utf8(p, sizeof p, path);
+    for (char *c = p; *c; c++) if (*c == '\\') *c = '/';
+    return vfs_lookup(p[0] ? p : "/");
+}
+
+static void sort_entries(void);
+
 static void load_dir(void) {
     st.n = 0;
     st.error[0] = 0;
     st.sc.off = 0;
     if (!st.ent) st.ent = kalloc(sizeof(entry_t) * MAX_ENTRIES);
+    if (k.native) {
+        vnode_t *d = vfs_node(st.path);
+        if (!d || !d->dir) { fmt(st.error, sizeof st.error, "Could not open this folder"); return; }
+        for (vnode_t *c = d->child; c && st.n < MAX_ENTRIES; c = c->sibling) {
+            entry_t *e = &st.ent[st.n++];
+            strlcpy(e->name, c->name, sizeof e->name);
+            e->dir = c->dir;
+            e->size = vfs_size(c);
+        }
+        sort_entries();
+        return;
+    }
     EFI_FILE_PROTOCOL *d = open_path(st.path);
     if (!d) { fmt(st.error, sizeof st.error, "Could not open this folder"); return; }
     u8 *buf = kalloc(1024);
@@ -66,7 +89,11 @@ static void load_dir(void) {
     }
     kfree(buf);
     d->Close(d);
-    /* insertion sort: folders first, then case-insensitive name */
+    sort_entries();
+}
+
+/* insertion sort: folders first, then case-insensitive name */
+static void sort_entries(void) {
     for (int i = 1; i < st.n; i++) {
         entry_t tmp = st.ent[i];
         int j = i - 1;
@@ -93,13 +120,22 @@ static void path_pop(void) {
 
 static void open_file(const entry_t *e) {
     path_push(e->name);
-    EFI_FILE_PROTOCOL *f = open_path(st.path);
-    path_pop();
-    if (!f) { fmt(st.error, sizeof st.error, "Could not open %s", e->name); return; }
-    if (!st.preview) st.preview = kalloc(PREVIEW_MAX + 1);
     UINTN sz = PREVIEW_MAX;
-    if (EFI_ERROR(f->Read(f, &sz, st.preview))) sz = 0;
-    f->Close(f);
+    if (k.native) {
+        vnode_t *n = vfs_node(st.path);
+        path_pop();
+        if (!n) { fmt(st.error, sizeof st.error, "Could not open %s", e->name); return; }
+        if (!st.preview) st.preview = kalloc(PREVIEW_MAX + 1);
+        i64 r = vfs_read(n, 0, st.preview, PREVIEW_MAX);
+        sz = r > 0 ? (UINTN)r : 0;
+    } else {
+        EFI_FILE_PROTOCOL *f = open_path(st.path);
+        path_pop();
+        if (!f) { fmt(st.error, sizeof st.error, "Could not open %s", e->name); return; }
+        if (!st.preview) st.preview = kalloc(PREVIEW_MAX + 1);
+        if (EFI_ERROR(f->Read(f, &sz, st.preview))) sz = 0;
+        f->Close(f);
+    }
     st.preview[sz] = 0;
     /* binary files: show a hex dump of the first bytes instead */
     int binary = 0;
@@ -178,10 +214,12 @@ static void draw(canvas_t *c, rect_t a) {
             char size[24], free_[24];
             fmt_bytes(size, sizeof size, k.vol[i].size);
             fmt_bytes(free_, sizeof free_, k.vol[i].free);
-            fmt(sub, sizeof sub, "%s  \xc2\xb7  %s free%s", size, free_, k.vol[i].boot ? "  \xc2\xb7  QRT boot volume" : "");
+            if (k.native) fmt(sub, sizeof sub, "%s", k.vol[i].boot ? "RAM copy of the boot stick" : "needs a native storage driver");
+            else fmt(sub, sizeof sub, "%s  \xc2\xb7  %s free%s", size, free_, k.vol[i].boot ? "  \xc2\xb7  QRT boot volume" : "");
             draw_row(c, r, k.vol[i].label, sub, 1, st.pressed == i);
         }
         if (!k.n_vol) gfx_text_center(c, ui.body, inner, "The firmware exposes no FAT volumes", ui.text3);
+        if (st.error[0]) gfx_text_center(c, ui.body, (rect_t){ inner.x, inner.y + inner.h - dp(60), inner.w, dp(40) }, st.error, ui.text3);
         st.sc.max = k.n_vol * row_h() - inner.h;
     } else {
         rect_t up = { inner.x, inner.y - st.sc.off, inner.w, row_h() - dp(4) };
@@ -217,7 +255,12 @@ static void go_up(void) {
 
 static void activate_row(int row) {
     if (st.vol < 0) {
-        if (row >= 0 && row < k.n_vol) { st.vol = row; st.path[0] = 0; load_dir(); }
+        if (row < 0 || row >= k.n_vol) return;
+        if (k.native && !k.vol[row].boot) {
+            fmt(st.error, sizeof st.error, "Only the boot stick is available until QRT has its own storage driver");
+            return;
+        }
+        st.vol = row; st.path[0] = 0; load_dir();
         return;
     }
     if (row == 0) { go_up(); return; }
