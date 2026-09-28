@@ -3,10 +3,10 @@
  *
  * Visual language borrows from Fuchsia's Armadillo/Ermine shells: a
  * wallpaper of soft light, glassy "story" cards and a big quiet clock, with
- * a dock down the right edge, a searchable app launcher and an on-screen
- * keyboard.  Everything is drawn
- * in software into a logical canvas which is rotated (for tablets held in
- * either orientation) and pushed to the panel through GOP.
+ * a floating dock that can be dragged to any screen edge, a searchable app
+ * launcher and an on-screen keyboard.  Everything is drawn in software into
+ * a logical canvas which is rotated (for tablets held in either
+ * orientation) and pushed to the panel through GOP.
  */
 #include "shell.h"
 #include "../kernel/smp.h"
@@ -34,6 +34,8 @@ static struct {
     int dirty;
     tap_t tap;
     int launcher_open, launch_pressed, dock_pressed, power_open, owner, keyboard_pending;
+    int dock_edge;                /* DOCK_RIGHT/LEFT/BOTTOM/TOP, saved as QrtDockEdge */
+    int dock_drag, drag_x, drag_y, drag_x0, drag_y0;    /* the dock following a finger */
     u32 running;                  /* bit i: apps[i] was opened */
     char query[48];
     int cursor_x, cursor_y, cursor_on, cursor_dirty;
@@ -300,13 +302,70 @@ static void draw_status(canvas_t *c, const EFI_TIME *t) {
 }
 
 /* ---- geometry ----------------------------------------------------------------
- * A status bar across the top, the app dock down the right edge and the
- * content area (home, launcher, apps) in between.  The on-screen keyboard,
- * when shown, takes the bottom of the content area. */
+ * A status bar across the top, the dock floating along one edge and the
+ * content area (home, launcher, apps) filling the rest.  The dock is a
+ * rounded panel inset from its edge; it can be dragged anywhere and snaps
+ * to the nearest edge when released.  The on-screen keyboard, when shown,
+ * takes the bottom of the content area. */
 #define STATUS_H dp(32)
-static int dock_w(void) { return dp(76); }
-static rect_t dock_rect(void) { return (rect_t){ ui.W - dock_w(), STATUS_H, dock_w(), ui.H - STATUS_H }; }
-static rect_t content_rect(void) { return (rect_t){ 0, STATUS_H, ui.W - dock_w(), ui.H - STATUS_H }; }
+enum { DOCK_RIGHT, DOCK_LEFT, DOCK_BOTTOM, DOCK_TOP };
+static int dock_thick(void) { return dp(76); }
+static int dock_gap(void) { return dp(8); }
+static int dock_band(void) { return dock_thick() + 2 * dock_gap(); }     /* space the dock takes from the content */
+static int dock_vertical(int edge) { return edge == DOCK_RIGHT || edge == DOCK_LEFT; }
+static int dock_items(int *out);
+
+/* the panel's length along its edge: as long as its icons need, at most the edge */
+static int dock_length(int edge) {
+    int items[16], n = dock_items(items);
+    int full = dock_vertical(edge) ? ui.H - STATUS_H - 2 * dock_gap() : ui.W - 2 * dock_gap();
+    int want = dp(20) + n * dp(64) + dp(12) + dp(60);
+    return MIN(want, full);
+}
+
+static rect_t dock_rect_at(int edge) {
+    int t = dock_thick(), g = dock_gap(), len = dock_length(edge);
+    int top = STATUS_H + g;
+    /* side docks hang from the top so icons stay put as apps open; top and
+     * bottom docks are centred */
+    switch (edge) {
+    case DOCK_LEFT:   return (rect_t){ g, top, t, len };
+    case DOCK_BOTTOM: return (rect_t){ (ui.W - len) / 2, ui.H - g - t, len, t };
+    case DOCK_TOP:    return (rect_t){ (ui.W - len) / 2, top, len, t };
+    default:          return (rect_t){ ui.W - g - t, top, t, len };
+    }
+}
+
+/* the edge nearest to a point: where a dragged dock lands */
+static int nearest_edge(int x, int y) {
+    int d[4] = { ui.W - x, x, ui.H - y, y - STATUS_H };
+    int best = DOCK_RIGHT;
+    for (int i = 1; i < 4; i++) if (d[i] < d[best]) best = i;
+    return best;
+}
+
+/* While dragged, the panel takes the shape it would have on the nearest edge
+ * and is centred under the finger. */
+static int dock_shape(void) { return sh.dock_drag == 2 ? nearest_edge(sh.drag_x, sh.drag_y) : sh.dock_edge; }
+static rect_t dock_rect(void) {
+    if (sh.dock_drag != 2) return dock_rect_at(sh.dock_edge);
+    rect_t r = dock_rect_at(dock_shape());
+    r.x = CLAMP(sh.drag_x - r.w / 2, 0, ui.W - r.w);
+    r.y = CLAMP(sh.drag_y - r.h / 2, STATUS_H, ui.H - r.h);
+    return r;
+}
+
+static rect_t content_rect(void) {
+    rect_t c = { 0, STATUS_H, ui.W, ui.H - STATUS_H };
+    int b = dock_band();
+    switch (sh.dock_edge) {
+    case DOCK_LEFT:   c.x += b; c.w -= b; break;
+    case DOCK_BOTTOM: c.h -= b; break;
+    case DOCK_TOP:    c.y += b; c.h -= b; break;
+    default:          c.w -= b; break;
+    }
+    return c;
+}
 /* content minus the keyboard */
 static rect_t work_rect(void) { rect_t c = content_rect(); c.h -= osk_height(); return c; }
 
@@ -331,19 +390,30 @@ static int dock_items(int *out) {
 /* cells shrink when many apps are open, so every one keeps a place */
 static int dock_cell(void) {
     int items[16], n = dock_items(items);
-    int avail = dock_rect().h - dp(20) - dp(60) - dp(12);        /* minus the launcher button */
+    rect_t d = dock_rect();
+    int len = dock_vertical(dock_shape()) ? d.h : d.w;
+    int avail = len - dp(20) - dp(60) - dp(12);                  /* minus the launcher button */
     return CLAMP(avail / MAX(1, n) - dp(4), dp(40), dp(60));
 }
 static rect_t dock_slot(int i) {
     rect_t d = dock_rect();
-    int c = dock_cell();
-    return (rect_t){ d.x + (d.w - c) / 2, d.y + dp(10) + i * (c + dp(4)), c, c };
+    int c = dock_cell(), along = dp(10) + i * (c + dp(4));
+    if (dock_vertical(dock_shape())) return (rect_t){ d.x + (d.w - c) / 2, d.y + along, c, c };
+    return (rect_t){ d.x + along, d.y + (d.h - c) / 2, c, c };
 }
 static rect_t dock_launcher_rect(void) {
     rect_t d = dock_rect();
     int c = dp(60);
-    return (rect_t){ d.x + (d.w - c) / 2, d.y + d.h - dp(10) - c, c, c };
+    if (dock_vertical(dock_shape())) return (rect_t){ d.x + (d.w - c) / 2, d.y + d.h - dp(10) - c, c, c };
+    return (rect_t){ d.x + d.w - dp(10) - c, d.y + (d.h - c) / 2, c, c };
 }
+
+void shell_set_dock_edge(int edge) {
+    sh.dock_edge = edge & 3;
+    hal_setting_set(u"QrtDockEdge", (u32)sh.dock_edge);
+    sh.dirty = 1;
+}
+int shell_dock_edge(void) { return sh.dock_edge; }
 
 static void app_icon(canvas_t *c, const app_t *a, float cx, float cy, float r) {
     gfx_circle(c, cx, cy, r, a->color);
@@ -352,22 +422,38 @@ static void app_icon(canvas_t *c, const app_t *a, float cx, float cy, float r) {
 
 static void draw_dock(canvas_t *c) {
     rect_t d = dock_rect();
-    gfx_fill(c, d, RGBA(8, 6, 18, 170));
-    gfx_fill(c, (rect_t){ d.x, d.y, 1, d.h }, ui.stroke);
+    int edge = dock_shape(), vert = dock_vertical(edge), rad = dp(22);
+    if (sh.dock_drag == 2) {
+        /* where it will land */
+        rect_t land = dock_rect_at(edge);
+        gfx_rrect_outline(c, land, rad, dp(2), ALPHA(ui.accent, 200));
+        gfx_shadow(c, d, rad, dp(18), RGBA(0, 0, 0, 120));
+    }
+    gfx_rrect(c, d, rad, RGBA(8, 6, 18, sh.dock_drag == 2 ? 215 : 185));
+    gfx_rrect_outline(c, d, rad, 1, ui.stroke);
     int items[16], n = dock_items(items);
     rect_t lr = dock_launcher_rect();
     for (int i = 0; i < n; i++) {
         rect_t r = dock_slot(i);
-        if (r.y + r.h > lr.y - dp(4)) break;               /* no room left */
+        if (vert ? r.y + r.h > lr.y - dp(4) : r.x + r.w > lr.x - dp(4)) break;     /* no room left */
         const app_t *a = apps[items[i]];
         int active = sh.view == VIEW_APP && sh.app == a && !sh.launcher_open;
-        if (active || sh.dock_pressed == i) gfx_rrect(c, r, dp(14), RGBA(255, 255, 255, active ? 42 : 28));
+        if (active || (sh.dock_pressed == i && sh.dock_drag != 2)) gfx_rrect(c, r, dp(14), RGBA(255, 255, 255, active ? 42 : 28));
         app_icon(c, a, r.x + r.w / 2.0f, r.y + r.h / 2.0f, r.w * 0.35f);
-        if (sh.running & (1u << items[i]))
-            gfx_circle(c, d.x + d.w - dp(6), r.y + r.h / 2.0f, dp(2.5f), active ? ui.accent : ui.text);
+        if (sh.running & (1u << items[i])) {
+            /* the running dot sits on the side facing the screen's middle */
+            float dx, dy;
+            switch (edge) {
+            case DOCK_LEFT:   dx = d.x + d.w - dp(7); dy = r.y + r.h / 2.0f; break;
+            case DOCK_BOTTOM: dx = r.x + r.w / 2.0f; dy = d.y + dp(6); break;
+            case DOCK_TOP:    dx = r.x + r.w / 2.0f; dy = d.y + d.h - dp(6); break;
+            default:          dx = d.x + dp(7); dy = r.y + r.h / 2.0f; break;
+            }
+            gfx_circle(c, dx, dy, dp(2.5f), active ? ui.accent : ui.text);
+        }
     }
     /* "show applications": a 3x3 grid of dots */
-    if (sh.launcher_open || sh.dock_pressed == 99) gfx_rrect(c, lr, dp(14), RGBA(255, 255, 255, sh.launcher_open ? 42 : 28));
+    if (sh.launcher_open || (sh.dock_pressed == 99 && sh.dock_drag != 2)) gfx_rrect(c, lr, dp(14), RGBA(255, 255, 255, sh.launcher_open ? 42 : 28));
     float cx = lr.x + lr.w / 2.0f, cy = lr.y + lr.h / 2.0f, g = dp(8);
     for (int yy = -1; yy <= 1; yy++)
         for (int xx = -1; xx <= 1; xx++) gfx_circle(c, cx + xx * g, cy + yy * g, dp(2.6f), ui.text);
@@ -376,10 +462,10 @@ static void draw_dock(canvas_t *c) {
 /* ---- home ------------------------------------------------------------------- */
 static void draw_home(canvas_t *c, const EFI_TIME *t) {
     rect_t area = content_rect();
-    int pad = dp(28);
+    int pad = area.x + dp(28);
     char buf[64];
     int y = area.y + (ui.landscape ? dp(28) : dp(48));
-    int colw = area.w - 2 * pad;
+    int colw = area.w - 2 * dp(28);
 
     clock_text(buf, sizeof buf, t);
     gfx_text(c, ui.huge, pad - dp(4), y, buf, ui.text);
@@ -399,7 +485,7 @@ static void draw_home(canvas_t *c, const EFI_TIME *t) {
     const char *net = shell_net_status();
     if (net) gfx_text_fit(c, ui.small, pad, y + ui.small->line, colw, net, ui.text3);
 
-    const char *hint = "Your apps are in the dock on the right; the dots at its foot show them all.";
+    const char *hint = "The dots in the dock show every app. Drag the dock to move it to another edge.";
     gfx_text_fit(c, ui.small, pad, area.y + area.h - dp(24) - ui.small->line, colw, hint, ui.text3);
 }
 
@@ -510,9 +596,13 @@ static void draw_power(canvas_t *c) {
 }
 
 /* ---- app chrome ----------------------------------------------------------------- */
-static rect_t app_area(void) { rect_t w = work_rect(); return (rect_t){ w.x, dp(96), w.w, w.y + w.h - dp(96) - dp(10) }; }
+static rect_t app_area(void) {
+    rect_t w = work_rect();
+    int top = content_rect().y + dp(64);
+    return (rect_t){ w.x, top, w.w, w.y + w.h - top - dp(10) };
+}
 rect_t shell_app_area(void) { return app_area(); }
-static rect_t back_rect(void) { return (rect_t){ dp(14), dp(40), dp(48), dp(48) }; }
+static rect_t back_rect(void) { rect_t c = content_rect(); return (rect_t){ c.x + dp(14), c.y + dp(8), dp(48), dp(48) }; }
 
 static void draw_app(canvas_t *c) {
     rect_t b = back_rect();
@@ -662,12 +752,38 @@ static void launcher_pointer(const event_t *e) {
     if (e->type == EV_UP) { sh.launch_pressed = -1; sh.dirty = 1; }
 }
 
+/* A touch on the dock is a tap (open an app, or the launcher) or, once it
+ * moves past a threshold, a drag: the dock follows the finger and, on
+ * release, sticks to the nearest edge. */
 static void dock_pointer(const event_t *e) {
     int items[16], n = dock_items(items), hit = -1;
     for (int i = 0; i < n; i++) if (in_rect(dock_slot(i), e->x, e->y)) hit = i;
     if (in_rect(dock_launcher_rect(), e->x, e->y)) hit = 99;
-    if (e->type == EV_DOWN) { sh.dock_pressed = hit; shell_damage(dock_rect()); }
-    if (tap_track(&sh.tap, e, dp(12))) {
+    switch (e->type) {
+    case EV_DOWN:
+        sh.dock_pressed = hit;
+        sh.dock_drag = 1;
+        sh.drag_x0 = e->x; sh.drag_y0 = e->y;
+        shell_damage(dock_rect());
+        break;
+    case EV_MOVE:
+        if (sh.dock_drag == 1 && (ABS_I(e->x - sh.drag_x0) > dp(24) || ABS_I(e->y - sh.drag_y0) > dp(24))) sh.dock_drag = 2;
+        if (sh.dock_drag == 2) { sh.drag_x = e->x; sh.drag_y = e->y; sh.dirty = 1; }
+        break;
+    default: break;
+    }
+    int tap = tap_track(&sh.tap, e, dp(12));
+    if (e->type != EV_UP) return;
+    if (sh.dock_drag == 2) {
+        int edge = nearest_edge(e->x, e->y);
+        sh.dock_drag = 0;
+        sh.dock_pressed = -1;
+        if (edge != sh.dock_edge) { shell_set_dock_edge(edge); osk_hide(); }
+        sh.dirty = 1;
+        return;
+    }
+    sh.dock_drag = 0;
+    if (tap) {
         if (hit == 99 && sh.dock_pressed == 99) open_launcher(!sh.launcher_open);
         else if (hit >= 0 && hit == sh.dock_pressed) {
             const app_t *a = apps[items[hit]];
@@ -676,7 +792,8 @@ static void dock_pointer(const event_t *e) {
             else open_app(items[hit]);
         }
     }
-    if (e->type == EV_UP) { sh.dock_pressed = -1; shell_damage(dock_rect()); }
+    sh.dock_pressed = -1;
+    shell_damage(dock_rect());
 }
 
 static void power_pointer(const event_t *e) {
@@ -857,6 +974,7 @@ static void run_benchmark(void) {
 void shell_main(void) {
     sh.rot = (int)hal_setting_get(u"QrtRotation", 0) & 3;
     sh.accent_idx = (int)hal_setting_get(u"QrtAccent", 0) % N_ACCENTS;
+    sh.dock_edge = (int)hal_setting_get(u"QrtDockEdge", DOCK_RIGHT) & 3;
     sh.launch_pressed = sh.dock_pressed = -1;
     k.graphics_up = 1;
     if (!k.native) k.st->ConOut->EnableCursor(k.st->ConOut, 0);

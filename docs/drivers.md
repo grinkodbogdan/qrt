@@ -128,6 +128,11 @@ What changed from OpenBSD:
   small client in `wlan.c`.
 - **Polled.** The driver reads `CSR_INT` and the RX ring's `closed_rb_num`
   instead of taking MSI interrupts.
+- **Deferred delivery.** Received 802.11 frames are queued and handed to
+  the client only from `iwm_poll()`, never from the service routine.
+  Command waits also run the service routine, and the client sends
+  commands from its frame handlers, so direct delivery would nest. 0.5.5
+  delivered directly, and connecting hung.
 - **Rates.** Only legacy rates are used. HT/VHT and aggregation are left
   out.
 

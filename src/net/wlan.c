@@ -207,9 +207,16 @@ int wlan_networks(wlan_net_t *out, int max) {
 }
 
 /* ---- association ------------------------------------------------------------------------ */
+/* In firmware mode the stick is writable: the log goes to \qrt\hwdump\wifi.txt
+ * at every state change, so a hang still leaves a trace of how far it got.
+ * Saved from wlan_poll(), after the frame that caused the change has been
+ * answered, so the write never delays the answer. */
+static int log_dirty;
+
 static void set_state(int s) {
     if (w.state == s) return;
     w.state = s;
+    log_dirty = 1;
     static const char *names[] = { "off", "starting", "idle", "scanning", "authenticating", "associating", "handshake", "connected", "failed" };
     LOG("state: %s", names[s]);
 }
@@ -694,4 +701,5 @@ void wlan_poll(void) {
         break;
     }
     prev = w.state;
+    if (log_dirty && !k.native) { log_dirty = 0; wifilog_save(); }
 }

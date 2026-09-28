@@ -14,13 +14,18 @@ written from scratch. It is not Linux, but it can run Linux programs.
 | ![launcher](docs/screenshots/launcher.png) | ![keyboard](docs/screenshots/keyboard.png) |
 | ![terminal](docs/screenshots/terminal.png) | ![network](docs/screenshots/terminal-net.png) |
 | ![wifi](docs/screenshots/wifi.png) | ![system](docs/screenshots/system.png) |
+| ![dragging the dock](docs/screenshots/dock-dragging.png) | ![dock on the left](docs/screenshots/dock-left.png) |
 
 ## The shell
 
-- **Dock.** A strip down the right edge holds pinned apps (Files, Terminal,
-  Wi-Fi, Sketch, Settings) and any others you open. A dot marks running
-  apps. Tapping the app in front minimises it.
-- **Launcher.** The 3×3 dots at the foot of the dock open a grid of every
+- **Dock.** A rounded panel floating along one edge holds pinned apps
+  (Files, Terminal, Wi-Fi, Sketch, Settings) and any others you open. A dot
+  marks running apps. Tapping the app in front minimises it.
+  - Drag the dock to move it: it follows your finger, and an outline shows
+    where it will land. On release it sticks to the nearest edge (left,
+    right, top or bottom).
+  - The edge is saved in NVRAM, so the dock stays there after a reboot.
+- **Launcher.** The 3×3 dots at the end of the dock open a grid of every
   app. Its search field also finds actions, such as rotate, restart,
   benchmark and the touch fixes. Typing anywhere on the home screen opens
   it.
@@ -159,8 +164,16 @@ Not supported:
 - hidden networks
 - 802.11n/ac rates (QRT associates as an 802.11a/g station, up to 54 Mbit/s)
 
-**Status: new in 0.5.5 and not yet tested on the tablet.** QEMU has no 8260,
-so these parts are checked separately:
+**Status: scanning works on the tablet.** In 0.5.5, connecting froze the
+tablet. The association response re-entered the driver: it made the
+client send commands, and while each command waited for its answer, the
+driver re-read the same receive buffer and delivered the response again,
+recursing until the stack ran out. 0.5.5.2 fixes this. The driver now
+queues received frames and hands them to the client only from its poll
+loop, never from inside a command wait. Connecting has not yet been tested
+on the tablet.
+
+QEMU has no 8260, so these parts are checked separately:
 - The firmware file parses in QEMU.
 - The WPA2 client logic passes a host test with a simulated access point
   (`tests/test_wlan.c`).
@@ -172,6 +185,8 @@ step. To send it to me:
 1. Switch to **Settings → Kernel mode → Firmware** and reboot. In that mode
    the stick is writable.
 2. Tap **Wi-Fi → Save log**. It writes `\qrt\hwdump\wifi.txt` to the stick.
+   In firmware mode QRT also saves this file at every connection step, so
+   the file survives even if the tablet hangs.
 
 The firmware file (`\lib\firmware\iwlwifi-8000C-36.ucode`) comes unmodified
 from linux-firmware, under Intel's redistribution licence; see
@@ -209,7 +224,7 @@ FreeBSD's.
 | Touch | works: QRT's own Wacom driver; tested on the tablet in firmware mode. Native mode needs the same driver after the handover, which is **new in 0.5 and untested on hardware**. |
 | Storage | the boot stick is read into RAM at boot; writes go to RAM only |
 | Buttons | power and volume through GPIO, native mode (**new in 0.5.5, untested on hardware**) |
-| Wi-Fi | Intel 8260 driver, WPA2-Personal (**new in 0.5.5, untested on hardware**) |
+| Wi-Fi | Intel 8260 driver, WPA2-Personal: scanning works; connecting fixed in 0.5.5.2 (**not yet confirmed on hardware**) |
 | Bluetooth, audio, camera, sensors, battery, backlight | no drivers yet (they need ACPI/PMIC support first; see docs/drivers.md) |
 | USB keyboard | firmware mode only |
 
@@ -255,9 +270,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.5.5.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.5.5.2.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.5.5.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.5.5.2.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

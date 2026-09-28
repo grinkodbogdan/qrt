@@ -46,6 +46,8 @@ typedef struct {
 extern shell_stats_t shell_stats;
 void shell_go_home(void);
 void shell_set_rotation(int rot);
+void shell_set_dock_edge(int edge);      /* 0 right, 1 left, 2 bottom, 3 top */
+int  shell_dock_edge(void);
 int  shell_rotation(void);
 void shell_set_accent(int idx);
 int  shell_accent_index(void);

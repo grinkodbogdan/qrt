@@ -145,12 +145,14 @@ def main():
 def default_script(q, shots):
     """Walk the shell and every app with touch, the on-screen keyboard and the
     serial keyboard.  Coordinates are for the 1280x800 landscape layout the
-    QEMU VGA device reports (UI scale 1.18: the dock is the right-most 89 px)."""
-    back = (38, 64)
-    dock = {"files": 85, "terminal": 160, "wifi": 236, "sketch": 311, "settings": 386, "launcher": 753}
+    QEMU VGA device reports (UI scale 1.18: the dock floats at x 1181-1271,
+    hanging from y 47; the keyboard is centred in the 1172 px content area)."""
+    back = (45, 76)
+    # pinned apps; the launcher button follows them while only they are in the dock
+    dock = {"files": 94, "terminal": 170, "wifi": 246, "sketch": 322, "settings": 398, "launcher": 488}
 
     def dock_tap(name, settle=1.2):
-        q.tap(1235, dock[name], settle=settle)
+        q.tap(1226, dock[name], settle=settle)
 
     def launch(name, settle=1.5):
         """Type on the home screen (opens the launcher search), Enter opens the first hit."""
@@ -161,18 +163,18 @@ def default_script(q, shots):
     # Launcher from the dock, then search with the on-screen keyboard
     dock_tap("launcher")
     shots.append(q.shot("02-launcher"))
-    q.tap(640, 90)                         # search field -> keyboard
-    for x, y in [(550, 563), (373, 563), (462, 563)]:   # t, e, r
+    q.tap(631, 90)                         # search field -> keyboard
+    for x, y in [(541, 563), (364, 563), (453, 563)]:   # t, e, r
         q.tap(x, y, settle=0.3)
     shots.append(q.shot("03-launcher-search"))
-    q.tap(913, 752, settle=1.5)            # Enter -> Terminal
+    q.tap(904, 752, settle=1.5)            # Enter -> Terminal
     # Terminal: type "ls /bin" on the on-screen keyboard, then run programs over serial
     q.tap(500, 243)                        # input field -> keyboard
-    for x, y in [(948, 627), (329, 627), (594, 752), (384, 752), (683, 690), (815, 563), (770, 690)]:
+    for x, y in [(939, 627), (320, 627), (585, 752), (375, 752), (674, 690), (806, 563), (761, 690)]:
         q.tap(x, y, settle=0.3)            # l s space / b i n
-    q.tap(913, 752, settle=5)              # Enter
+    q.tap(904, 752, settle=5)              # Enter
     shots.append(q.shot("04-terminal-osk"))
-    q.tap(1020, 752, settle=1)             # hide the keyboard
+    q.tap(1011, 752, settle=1)             # hide the keyboard
     for cmd in ["hello", "uname -a"]:
         q.keys(*[c if c != " " else "spc" for c in cmd], settle=0.2)
         q.keys("ret", settle=6.0)
@@ -205,7 +207,7 @@ def default_script(q, shots):
     shots.append(q.shot("09-system"))
     launch("clock")
     shots.append(q.shot("10-clock"))
-    launch("li", settle=3.0)
+    launch("life", settle=3.0)
     shots.append(q.shot("11-life"))
     launch("touch")
     q.tap(640, 141, settle=2)              # probe (no LPSS I2C in QEMU: must refuse cleanly)
@@ -219,6 +221,18 @@ def default_script(q, shots):
     shots.append(q.shot("13-button-power"))
     q.keys("voldown", settle=1.0)
     shots.append(q.shot("13-home"))
+    # the dock: drag it to the bottom edge (screenshot mid-drag), then left, then back right
+    q._pkt("d", 1226, 300); time.sleep(0.1)
+    for i in range(1, 11):
+        q.move(1226 - i * 60, 300 + i * 45); time.sleep(0.05)
+    time.sleep(1.0)
+    shots.append(q.shot("18-dock-dragging"))
+    q._pkt("u", 626, 750); time.sleep(1.2)
+    shots.append(q.shot("18-dock-bottom"))
+    q.drag([(320, 746)] + [(320 - i * 30, 746 - i * 35) for i in range(1, 10)], settle=1.2)
+    shots.append(q.shot("18-dock-left"))
+    q.drag([(45, 300)] + [(45 + i * 125, 300 + i * 5) for i in range(1, 10)], settle=1.2)
+    shots.append(q.shot("18-dock-right"))
     # Settings: rotate to portrait
     dock_tap("settings")
     shots.append(q.shot("14-settings"))

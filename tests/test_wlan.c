@@ -29,6 +29,7 @@ void hal_setting_set_blob(const c16 *n, const void *b, usize len) { int i = blob
 void strlcpy(char *d, const char *s, usize cap) { if (!cap) return; usize n = strlen(s); if (n >= cap) n = cap - 1; memcpy(d, s, n); d[n] = 0; }
 int fmt(char *buf, usize cap, const char *f, ...) { va_list ap; va_start(ap, f); int n = vsnprintf(buf, cap, f, ap); va_end(ap); return n; }
 void wifilog(const char *f, ...) { va_list ap; va_start(ap, f); if (getenv("VERBOSE")) { vprintf(f, ap); printf("\n"); } va_end(ap); }
+int wifilog_save(void) { return 1; }            /* firmware-mode log autosave: nothing to write here */
 
 u16 be16(const u8 *p) { return (u16)(p[0] << 8 | p[1]); }
 u32 be32(const u8 *p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }

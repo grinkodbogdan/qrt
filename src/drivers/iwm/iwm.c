@@ -123,9 +123,21 @@ static struct {
     u8 ptk_tk[16];
     iwm_rx_fn rx;
     struct iwm_rx_phy_info last_phy;
-    u64 rx_frames, tx_frames, tx_fail;
+    u64 rx_frames, tx_frames, tx_fail, rx_dropped;
     u32 missed_beacons;
 } sc;
+
+/* Received 802.11 frames wait here until iwm_poll() hands them to the
+ * client.  They are never delivered from inside service(): service() also
+ * runs while a command waits for its answer, and the client sends commands
+ * from its frame handler (an association response leads to
+ * iwm_assoc_done()).  Delivering there would nest handlers inside command
+ * waits, and the nested service() would read the RX buffer being handled
+ * again.  0.5.5 did that, and the recursion hung the tablet on connect. */
+#define RXQ_N     64
+#define RXQ_FRAME 2560
+static struct { u16 len; iwm_rxinfo_t ri; u8 frame[RXQ_FRAME]; } rxq_buf[RXQ_N];
+static int rxq_head, rxq_count;
 
 /* ---- register access ------------------------------------------------------ */
 static inline u32 RD(u32 reg) { return *(volatile u32 *)(sc.regs + reg); }
@@ -321,6 +333,7 @@ static int alloc_rings(void) {
 
 static void reset_rings(void) {
     sc.rxq.cur = 0;
+    rxq_head = rxq_count = 0;
     memset(sc.rxq.stat.va, 0, sizeof(struct iwm_rb_status));
     for (int q = 0; q < N_TXQ; q++) {
         txring_t *r = &sc.txq[q];
@@ -709,7 +722,13 @@ static void rx_mpdu(const struct iwm_rx_packet *pkt, u32 maxlen) {
         ri.decrypted = 1;
     }
     sc.rx_frames++;
-    if (sc.rx) sc.rx(frame, len, &ri);
+    if (!sc.rx) return;
+    if (rxq_count == RXQ_N || len > RXQ_FRAME) { sc.rx_dropped++; return; }
+    int slot = (rxq_head + rxq_count) % RXQ_N;
+    rxq_buf[slot].len = (u16)len;
+    rxq_buf[slot].ri = ri;
+    memcpy(rxq_buf[slot].frame, frame, len);
+    rxq_count++;
 }
 
 static void rx_pkt(u8 *buf) {
@@ -795,14 +814,19 @@ static void rx_pkt(u8 *buf) {
 }
 
 static void rx_notif(void) {
+    static int busy;
+    if (busy) return;                           /* never re-enter the ring walk */
     struct iwm_rb_status *st = (void *)sc.rxq.stat.va;
     barrier();
     int hw = st->closed_rb_num & 0xfff & (IWM_RX_RING_COUNT - 1);
     if (hw == sc.rxq.cur) return;
+    busy = 1;
     while (sc.rxq.cur != hw) {
-        rx_pkt(sc.rxq.bufs.va + (usize)sc.rxq.cur * IWM_RBUF_SIZE);
-        sc.rxq.cur = (sc.rxq.cur + 1) % IWM_RX_RING_COUNT;
+        int cur = sc.rxq.cur;
+        sc.rxq.cur = (cur + 1) % IWM_RX_RING_COUNT;   /* consumed before it is handled */
+        rx_pkt(sc.rxq.bufs.va + (usize)cur * IWM_RBUF_SIZE);
     }
+    busy = 0;
     int w = hw == 0 ? IWM_RX_RING_COUNT - 1 : hw - 1;
     WR(IWM_FH_RSCSR_CHNL0_WPTR, (u32)(w & ~7));
 }
@@ -1818,8 +1842,8 @@ const char *iwm_status(void) {
     if (!sc.present) return "no supported Intel wireless card";
     if (sc.fatal) fmt(sc.status, sizeof sc.status, "stopped after an error (see the log)");
     else if (!sc.attached) fmt(sc.status, sizeof sc.status, "Intel Wireless 8260: not started");
-    else fmt(sc.status, sizeof sc.status, "Intel Wireless 8260, firmware %s, %s; %llu frames in, %llu out, %llu failed",
-             sc.fwver, sc.ready ? "running" : "idle", sc.rx_frames, sc.tx_frames, sc.tx_fail);
+    else fmt(sc.status, sizeof sc.status, "Intel Wireless 8260, firmware %s, %s; %llu frames in (%llu dropped), %llu out, %llu failed",
+             sc.fwver, sc.ready ? "running" : "idle", sc.rx_frames, sc.rx_dropped, sc.tx_frames, sc.tx_fail);
     return sc.status;
 }
 
@@ -1899,4 +1923,17 @@ void iwm_stop(void) {
 void iwm_poll(void) {
     if (!sc.attached || !sc.regs) return;
     service();
+    /* the client may call back into the driver (and so into iwm_poll)
+     * from its handler: frames go out one level deep only */
+    static int delivering;
+    if (delivering) return;
+    delivering = 1;
+    for (int budget = 0; rxq_count && budget < RXQ_N; budget++) {
+        int slot = rxq_head;
+        if (sc.rx) sc.rx(rxq_buf[slot].frame, rxq_buf[slot].len, &rxq_buf[slot].ri);
+        if (!rxq_count || rxq_head != slot) break;   /* the handler stopped the card: queue reset */
+        rxq_head = (rxq_head + 1) % RXQ_N;          /* freed only after the handler is done with it */
+        rxq_count--;
+    }
+    delivering = 0;
 }

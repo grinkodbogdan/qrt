@@ -6,8 +6,9 @@ serves this file from its own file system; on 32-bit firmware the Tessera
 kernel reads it through the firmware's FAT driver.
 
 Getting around
-  * The dock on the right holds your pinned and open apps; the dots at
-    its foot open the launcher, which lists every app and has a search.
+  * The dock holds your pinned and open apps; the dots at its end open
+    the launcher, which lists every app and has a search.  Drag the dock
+    to move it: it sticks to the nearest screen edge.
   * Tap a text field to bring up the on-screen keyboard.
   * Power button: power menu.  Volume up: launcher.  Volume down: back.
 
