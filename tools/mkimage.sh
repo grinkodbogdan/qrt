@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# mkimage.sh OUT.img BOOTIA32.EFI BOOTX64.EFI
+#
+# Builds a 64 MiB GPT disk with a single FAT32 EFI System Partition that
+# carries both loaders in the removable-media fallback path
+# (\EFI\BOOT\BOOTIA32.EFI and \EFI\BOOT\BOOTX64.EFI), so the same stick
+# boots on 32-bit UEFI (Venue 8 Pro 5830, Bay Trail) and 64-bit UEFI
+# (Venue 8 Pro 5855, Cherry Trail) firmware.
+set -euo pipefail
+out=$1 ia32=$2 x64=$3
+here=$(cd "$(dirname "$0")/.." && pwd)
+
+size_mib=64
+part_start=2048                      # sectors (1 MiB alignment)
+part_sectors=$(( (size_mib - 2) * 2048 ))
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+truncate -s 0 "$out"
+truncate -s ${size_mib}M "$out"
+sgdisk -o \
+       -n 1:${part_start}:+${part_sectors} -t 1:ef00 -c 1:"QRT ESP" "$out" >/dev/null
+
+esp=$tmp/esp.img
+truncate -s $(( part_sectors * 512 )) "$esp"
+mkfs.fat -F 32 -n QRT "$esp" >/dev/null
+mmd   -i "$esp" ::/EFI ::/EFI/BOOT ::/qrt
+mcopy -i "$esp" "$ia32" ::/EFI/BOOT/BOOTIA32.EFI
+mcopy -i "$esp" "$x64"  ::/EFI/BOOT/BOOTX64.EFI
+# a few files so the Files app has something to show on first boot
+for f in "$here"/image/*; do
+    [ -e "$f" ] && mcopy -i "$esp" "$f" ::/qrt/
+done
+
+dd if="$esp" of="$out" bs=512 seek=$part_start conv=notrunc status=none
+echo "wrote $out ($(du -h "$out" | cut -f1) on disk, ${size_mib} MiB image)"

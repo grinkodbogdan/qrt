@@ -1,0 +1,11 @@
+Welcome to QRT.
+
+This file lives on the EFI System Partition of the boot stick, and you are
+reading it through the Files app: the Tessera kernel asks the firmware's
+FAT driver (Simple File System protocol) for it.
+
+Things to try
+  * Sketch   - draw with your finger to check the touchscreen
+  * Settings - change the accent colour or rotate the screen
+  * System   - see what the kernel found on this machine
+  * Ask bar  - type on a keyboard (USB OTG) to search apps and commands
