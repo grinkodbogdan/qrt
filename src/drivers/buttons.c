@@ -21,6 +21,10 @@
  * on the (undocumented) polarity; a key held during boot starts QRT in
  * firmware mode anyway.  Polled from the input path at the frame rate, with
  * two-sample debouncing.
+ *
+ * Events: volume keys fire on press and repeat while held; the Windows
+ * button fires on press; power fires SCAN_POWER when released within a
+ * second, or SCAN_POWER_LONG once it has been held for a second.
  */
 #include "buttons.h"
 
@@ -31,6 +35,8 @@ static struct {
     int comm, pin;
     u16 scan;
     int idle, last, stable, presses;
+    u64 down_ms, next_ms;          /* press time; next repeat or long-press time */
+    int fired;                     /* power: the long press was already reported */
 } btn[] = {
     { "power",       2, 0x08, SCAN_POWER },
     { "volume up",   0, 0x5d, SCAN_VOLUP },
@@ -40,6 +46,8 @@ static struct {
 #define N_BTN ((int)ARRAY_LEN(btn))
 
 static int active;
+
+int buttons_active(void) { return active; }
 
 static volatile u32 *padctrl0(int comm, int pin) {
     return (volatile u32 *)(usize)(community[comm] + 0x4400 + 0x400 * (u64)(pin / 15) + 8 * (u64)(pin % 15));
@@ -64,15 +72,32 @@ int buttons_init(void) {
 int buttons_poll(event_t *out, int max) {
     if (!active) return 0;
     int n = 0;
+    u64 now = k_now_ms();
     for (int i = 0; i < N_BTN && n < max; i++) {
         int l = level(i);
+        u16 sc = btn[i].scan;
         if (l == btn[i].last && l != btn[i].stable) {      /* the same new level twice in a row */
             btn[i].stable = l;
-            if (l != btn[i].idle) {
+            if (l != btn[i].idle) {                          /* pressed */
                 btn[i].presses++;
+                btn[i].down_ms = now;
+                btn[i].fired = 0;
                 klog("buttons: %s pressed", btn[i].name);
-                event_t e = { .type = EV_KEY, .scan = btn[i].scan };
-                out[n++] = e;
+                if (sc == SCAN_POWER) btn[i].next_ms = now + 1000;
+                else {
+                    btn[i].next_ms = now + 450;               /* first repeat */
+                    out[n++] = (event_t){ .type = EV_KEY, .scan = sc };
+                }
+            } else if (sc == SCAN_POWER && !btn[i].fired) {   /* released before the long-press time */
+                out[n++] = (event_t){ .type = EV_KEY, .scan = SCAN_POWER };
+            }
+        } else if (btn[i].stable != btn[i].idle && now >= btn[i].next_ms) {   /* held */
+            if (sc == SCAN_POWER && !btn[i].fired) {
+                btn[i].fired = 1;
+                out[n++] = (event_t){ .type = EV_KEY, .scan = SCAN_POWER_LONG };
+            } else if (sc == SCAN_VOLUP || sc == SCAN_VOLDN) {
+                btn[i].next_ms = now + 120;
+                out[n++] = (event_t){ .type = EV_KEY, .scan = sc };
             }
         }
         btn[i].last = l;

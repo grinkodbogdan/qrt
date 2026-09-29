@@ -10,10 +10,15 @@ Getting around
     the launcher, which lists every app and has a search.  Drag the dock
     to move it: it sticks to the nearest screen edge.
   * Tap a text field to bring up the on-screen keyboard.
-  * Power button: power menu.  Volume up: launcher.  Volume down: back.
+  * Power button: lock (again: sleep; hold for a second: power menu).
+    Volume keys: volume.  Windows button: the launcher.
+  * The lock screen unlocks with a swipe up.  Settings -> Sleep after sets
+    how long QRT waits before it locks and turns the screen off.
 
 Things to try
   * Wi-Fi    - switch it on, pick a network, type the password
+  * Browser  - web pages as text over http:// and https:// (TLS 1.3;
+               certificates are not checked yet: no passwords)
   * Terminal - run Linux programs: busybox, ls -l /, uname -a, hello;
                with Wi-Fi up: ping -c 3 1.1.1.1, nslookup example.com
   * Sketch   - draw with your finger to check the touchscreen

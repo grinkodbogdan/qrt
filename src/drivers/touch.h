@@ -44,3 +44,5 @@ int  ntouch_active(void);
 int  ntouch_poll(event_t *out, int max);
 int  ntouch_save(void);          /* \qrt\hwdump\touch.txt */
 int  ntouch_native_resume(void); /* after ExitBootServices */
+
+u32 venue_gnvs(void);          /* firmware NVS base on the Venue 8 Pro 5855, else 0 */

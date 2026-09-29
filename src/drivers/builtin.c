@@ -9,6 +9,7 @@
 #include "uart.h"
 #include "touch.h"
 #include "buttons.h"
+#include "backlight.h"
 #include "e1000.h"
 #include "iwm/iwm.h"
 #if defined(__x86_64__)
@@ -112,6 +113,16 @@ static int btn_probe(device_t *d) {
 }
 static const driver_t drv_buttons = { "gpio-buttons", NULL, btn_acpi, NULL, btn_probe, btn_status };
 
+/* ---- backlight (Venue 8 Pro 5855: LPSS PWM #1, see backlight.c) ------------------- */
+static const char *const bl_acpi[] = { "80862288", NULL };
+static void bl_status(device_t *d) { backlight_status(d->status, sizeof d->status); }
+static int bl_probe(device_t *d) {
+    if (!backlight_init()) return DEV_NOT_MINE;
+    bl_status(d);
+    return 0;
+}
+static const driver_t drv_backlight = { "backlight", NULL, bl_acpi, NULL, bl_probe, bl_status };
+
 /* ---- Intel Wireless 8260 (src/drivers/iwm, started from the Wi-Fi app) ------------ */
 static const pci_match_t iwm_pci[] = { { 0x8086, 0x24f3, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x24f4, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
 static void iwm_dev_status(device_t *d) { strlcpy(d->status, iwm_status(), sizeof d->status); }
@@ -130,4 +141,4 @@ static int e1000_dev_probe(device_t *d) {
 }
 static const driver_t drv_e1000 = { "e1000", e1000_pci, NULL, NULL, e1000_dev_probe, e1000_dev_status };
 
-const driver_t *const builtin_drivers[] = { &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_iwm, &drv_e1000, &drv_chipset, NULL };
+const driver_t *const builtin_drivers[] = { &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_iwm, &drv_e1000, &drv_chipset, NULL };

@@ -29,3 +29,20 @@ void ccm_encrypt(const aes128_t *a, const u8 nonce[13], const u8 *aad, usize ale
 int  ccm_decrypt(const aes128_t *a, const u8 nonce[13], const u8 *aad, usize alen, const u8 *ct, usize len, u8 *pt, const u8 mic[8]);
 
 void random_bytes(u8 *out, usize n);
+
+/* ---- for TLS 1.3 (crypto_tls.c) ---- */
+typedef struct { u32 h[8]; u64 len; u8 buf[64]; u32 n; } sha256_t;
+void sha256_init(sha256_t *s);
+void sha256_update(sha256_t *s, const void *data, usize len);
+void sha256_final(sha256_t *s, u8 out[32]);      /* s stays usable only after sha256_init */
+void sha256(const void *data, usize len, u8 out[32]);
+void hmac_sha256(const u8 *key, usize klen, const void *data, usize len, u8 out[32]);
+void hkdf_extract(const u8 *salt, usize slen, const u8 *ikm, usize ilen, u8 prk[32]);
+void hkdf_expand(const u8 prk[32], const u8 *info, usize ilen, u8 *out, usize olen);
+/* TLS 1.3 HKDF-Expand-Label: label without the "tls13 " prefix */
+void hkdf_expand_label(const u8 secret[32], const char *label, const u8 *ctx, usize clen, u8 *out, usize olen);
+void x25519(u8 out[32], const u8 scalar[32], const u8 point[32]);
+void x25519_base(u8 out[32], const u8 scalar[32]);
+/* AES-128-GCM with a 12-byte IV and a 16-byte tag */
+void gcm_encrypt(const aes128_t *a, const u8 iv[12], const u8 *aad, usize alen, const u8 *pt, usize len, u8 *ct, u8 tag[16]);
+int  gcm_decrypt(const aes128_t *a, const u8 iv[12], const u8 *aad, usize alen, const u8 *ct, usize len, u8 *pt, const u8 tag[16]);  /* 0 = ok */

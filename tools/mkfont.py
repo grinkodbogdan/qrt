@@ -13,14 +13,17 @@ from PIL import Image, ImageDraw, ImageFont
 ASCII = [chr(c) for c in range(32, 127)]
 EXTRA = ["•", "×", "°", "·", "…", "←", "→", "↑", "↓"]
 DIGITS = list(" 0123456789:")
+# web text (the browser): Latin-1 letters and signs, and typographic punctuation
+WEB = [chr(c) for c in range(0xA1, 0x100) if chr(c) not in EXTRA] + list("–—‘’‚“”„†‡‰‹›€™−′″")
+def text(s): return ASCII + EXTRA + (WEB if s <= 36 else [])
 
 # (id, file, sizes, charset-for-size)
 FACES = [
-    ("regular", "Inter-Regular.ttf", [13, 15, 17, 20, 23, 27, 31, 36], lambda s: ASCII + EXTRA),
-    ("semibold", "Inter-SemiBold.ttf", [13, 15, 17, 20, 23, 27, 31, 36, 42, 48, 56], lambda s: ASCII + EXTRA),
+    ("regular", "Inter-Regular.ttf", [13, 15, 17, 20, 23, 27, 31, 36], text),
+    ("semibold", "Inter-SemiBold.ttf", [13, 15, 17, 20, 23, 27, 31, 36, 42, 48, 56], text),
     ("light", "InterDisplay-Light.ttf", [40, 56, 72, 96, 120, 144, 176],
      lambda s: ASCII + EXTRA if s <= 72 else DIGITS),
-    ("mono", "DejaVuSansMono.ttf", [12, 13, 15, 17, 20, 23], lambda s: ASCII + EXTRA),
+    ("mono", "DejaVuSansMono.ttf", [12, 13, 15, 17, 20, 23], text),
 ]
 
 

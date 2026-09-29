@@ -85,6 +85,7 @@ typedef struct EFI_SIMPLE_TEXT_OUTPUT {
 #define SCAN_VOLDN  0x81    /* UEFI: volume down */
 #define SCAN_POWER  0x102   /* UEFI "suspend"; QRT: the power button */
 #define SCAN_HOMEBTN 0x8001 /* QRT: the Windows/home button */
+#define SCAN_POWER_LONG 0x8002 /* QRT: the power button held for a second */
 
 /* ---- Graphics Output Protocol ---------------------------------------- */
 typedef enum {

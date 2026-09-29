@@ -153,11 +153,12 @@ static int serial_keys(event_t *out, int max) {
         if (esc == 1) { esc = c == '[' ? 2 : 0; if (!esc) goto plain; continue; }
         if (esc == 2 && c >= '0' && c <= '9') { esc = 3; num = c - '0'; continue; }
         if (esc == 3) {
-            /* ESC [ n ~ : F9/F10/F11 stand in for the tablet's volume up/down and power buttons */
+            /* ESC [ n ~ : F9/F10/F11 stand in for the tablet's volume up/down and power buttons,
+             * F12 for power held down, F8 for the Windows button */
             if (c >= '0' && c <= '9') { num = num * 10 + (c - '0'); continue; }
             esc = 0;
             u16 sc = c != '~' ? 0 : num == 20 ? SCAN_VOLUP : num == 21 ? SCAN_VOLDN : num == 23 ? SCAN_POWER
-                   : num == 5 ? SCAN_PGUP : num == 6 ? SCAN_PGDN : 0;
+                   : num == 24 ? SCAN_POWER_LONG : num == 19 ? SCAN_HOMEBTN : num == 5 ? SCAN_PGUP : num == 6 ? SCAN_PGDN : 0;
             if (sc) out[n++] = (event_t){ .type = EV_KEY, .scan = sc };
             continue;
         }

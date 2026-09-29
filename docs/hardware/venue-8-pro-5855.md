@@ -65,7 +65,14 @@ these byte offsets: `OSID` 38, `ITSA` 793, `BDID` 802, `MPNL` 842, `WLID` 871.
 - `PNP0C0A`: battery
 - `ACPI0003`: AC adapter
 - `PNP0C0D`: lid
-- `_BCM`/`_BQC`: backlight control on `\_SB.PCI0.GFX0.DD01`
+- `_BCM`/`_BQC`: backlight control on `\_SB.PCI0.GFX0.DD01`. `_BCM` only passes the
+  level to the graphics driver (`AINT`, the IGD OpRegion). The PWM underneath is
+  LPSS PWM #1 (`80862288`): `GFX0._PS3`/`_PS0` save and restore its control
+  register (`PWMC`, at the controller's BAR), and GNVS `P10A` (offset 376)
+  holds its MMIO base, `P11A` (offset 384) its private config space. The
+  register is Linux's pwm-lpss layout (bit 31 enable, bit 30 update, bits 8-23
+  base unit, bits 0-7 on-time divisor); QRT's backlight driver sets the
+  on-time and keeps the firmware's frequency
 - `10EC5640/5670/5672`: Realtek codec candidates
 - OmniVision camera sensors
 - `INT340x`: DPTF thermal participants

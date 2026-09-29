@@ -54,6 +54,32 @@ char *strchr(const char *s, int c) {
     return c ? NULL : (char *)s;
 }
 
+int strncmp(const char *a, const char *b, usize n) {
+    for (; n; n--, a++, b++) {
+        if (*a != *b) return (u8)*a - (u8)*b;
+        if (!*a) return 0;
+    }
+    return 0;
+}
+
+char *strrchr(const char *s, int c) {
+    const char *last = NULL;
+    for (;; s++) { if (*s == (char)c) last = s; if (!*s) break; }
+    return (char *)last;
+}
+
+char *strstr(const char *h, const char *n) {
+    usize nl = strlen(n);
+    if (!nl) return (char *)h;
+    for (; *h; h++) if (*h == *n && !memcmp(h, n, nl)) return (char *)h;
+    return NULL;
+}
+
+void strlcat(char *d, const char *s, usize cap) {
+    usize l = strlen(d);
+    if (l + 1 < cap) strlcpy(d + l, s, cap - l);
+}
+
 void strlcpy(char *d, const char *s, usize cap) {
     usize i = 0;
     if (!cap) return;

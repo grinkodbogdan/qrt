@@ -26,7 +26,7 @@ typedef struct app {
     int  (*tick)(u64 now_ms);                      /* called ~60 Hz while open; 1 = redraw */
 } app_t;
 
-extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life, app_lab, app_terminal, app_wifi;
+extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life, app_lab, app_terminal, app_wifi, app_browser;
 
 /* shell services for apps */
 void shell_redraw(void);                /* redraw the whole screen */
@@ -48,6 +48,10 @@ void shell_go_home(void);
 void shell_set_rotation(int rot);
 void shell_set_dock_edge(int edge);      /* 0 right, 1 left, 2 bottom, 3 top */
 int  shell_dock_edge(void);
+int  shell_volume(void);                 /* mock audio volume 0..100 */
+void shell_set_volume(int v);            /* shows the volume indicator */
+int  shell_sleep_after(void);            /* seconds of inactivity before sleep; 0 = never */
+void shell_set_sleep_after(int seconds);
 int  shell_rotation(void);
 void shell_set_accent(int idx);
 int  shell_accent_index(void);

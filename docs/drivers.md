@@ -75,6 +75,9 @@ Not there yet:
 - an ACPI interpreter (AML is scanned for ids only, never executed, so
   `_CRS`, `_PS0`, GPIO and PMIC methods are unavailable)
 - GPIO interrupts (pads are polled: see `src/drivers/buttons.c`)
+- ACPI methods such as `_BCM`: the backlight driver (`src/drivers/backlight.c`)
+  writes the PWM that `\_SB.PCI0.GFX0` saves and restores, found through the
+  firmware NVS variable `P10A`, instead of running AML
 - runtime power management
 - a block-device layer
 
@@ -105,6 +108,9 @@ threads), signals, listening sockets, and dynamic linking.
 | `wlan.c` | 802.11 station: scan, auth, association, WPA2-PSK handshakes, group CCMP |
 | `crypto.c` | SHA-1, HMAC, PBKDF2, the 802.11 PRF, AES-128, key wrap, CCM |
 | `netstack.c` | polling and the lock shared by the shell and Linux programs |
+| `http.c` | HTTP/1.1 client for the browser: GET/POST, redirects, chunked replies |
+| `tls.c` | TLS 1.3 client: TLS_AES_128_GCM_SHA256, X25519; certificates not verified yet |
+| `crypto_tls.c` | SHA-256, HMAC, HKDF, X25519, AES-GCM |
 
 A NIC driver fills a `netif_t` (MAC and a `send` hook), calls
 `net_register()`, and passes received Ethernet frames to `net_input()`.

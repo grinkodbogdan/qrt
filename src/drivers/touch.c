@@ -24,22 +24,31 @@ static const struct { u8 addr; u16 reg; const char *name; } candidates[TOUCH_CAN
     { 0x0a, 0x0001, "Wacom touch + pen" },
 };
 
-/* GNVS offsets in this DSDT (OEM table id CBX3, region length 0x36C). */
-static void read_board_vars(void) {
-    if (!k.dsdt || memcmp(k.dsdt + 16, "CBX3", 4)) return;
+/* The firmware's global NVS area, found in this board's DSDT (OEM table id
+ * CBX3, region length 0x36C); 0 on any other machine. */
+u32 venue_gnvs(void) {
+    static u32 cached, done;
+    if (done) return cached;
+    done = 1;
+    if (!k.dsdt || memcmp(k.dsdt + 16, "CBX3", 4)) return 0;
     for (u32 i = 36; i + 16 < k.dsdt_len; i++) {
         const u8 *p = k.dsdt + i;
         /* OperationRegion (GNVS, SystemMemory, DWordConst addr, WordConst 0x036C) */
         if (p[0] == 0x5b && p[1] == 0x80 && !memcmp(p + 2, "GNVS", 4) && p[6] == 0 && p[7] == 0x0c &&
-            p[12] == 0x0b && (p[13] | p[14] << 8) == 0x36c) {
-            u32 addr = p[8] | p[9] << 8 | p[10] << 16 | (u32)p[11] << 24;
-            const volatile u8 *g = (const volatile u8 *)(usize)addr;
-            nt.gnvs = addr;
-            nt.osid = g[38]; nt.itsa = g[793]; nt.bdid = g[802]; nt.mpnl = g[842]; nt.wlid = g[871];
-            nt.board_valid = 1;
-            return;
-        }
+            p[12] == 0x0b && (p[13] | p[14] << 8) == 0x36c)
+            return cached = p[8] | p[9] << 8 | p[10] << 16 | (u32)p[11] << 24;
     }
+    return 0;
+}
+
+/* GNVS offsets in this DSDT */
+static void read_board_vars(void) {
+    u32 addr = venue_gnvs();
+    if (!addr) return;
+    const volatile u8 *g = (const volatile u8 *)(usize)addr;
+    nt.gnvs = addr;
+    nt.osid = g[38]; nt.itsa = g[793]; nt.bdid = g[802]; nt.mpnl = g[842]; nt.wlid = g[871];
+    nt.board_valid = 1;
 }
 
 void ntouch_probe(void) {

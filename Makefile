@@ -14,11 +14,11 @@ PYTHON  ?= python3
 HOSTCC  ?= gcc
 
 SRC := src/kernel/kernel.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
-       src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c src/drivers/e1000.c \
-       src/drivers/iwm/iwm.c src/net/wifilog.c src/net/crypto.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
+       src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c src/drivers/backlight.c src/drivers/e1000.c \
+       src/drivers/iwm/iwm.c src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
        src/ui/gfx.c src/ui/shell.c src/ui/fontdata.c \
        src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c \
-       src/apps/settings.c src/apps/life.c src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/ui/osk.c \
+       src/apps/settings.c src/apps/life.c src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/apps/browser.c src/apps/html.c src/ui/osk.c \
        src/drivers/dwi2c.c src/drivers/i2chid.c src/drivers/hidparse.c src/drivers/touch.c
 
 CFLAGS := -std=c11 -O2 -ffreestanding -fno-stack-protector -fno-stack-check \
@@ -45,7 +45,7 @@ OVMF32VAR := $(OVMF_DIR)/OVMF32_VARS_4M.fd
 OVMF64    := $(OVMF_DIR)/OVMF_CODE_4M.fd
 OVMF64VAR := $(OVMF_DIR)/OVMF_VARS_4M.fd
 
-.PHONY: all efi run run64 test check clean fonts
+.PHONY: check-tls all efi run run64 test check clean fonts
 
 all: build/qrt.img
 
@@ -108,6 +108,13 @@ check:
 	$(HOSTCC) -Wall -Wextra -O1 -o build/test_hid tests/test_hid.c && build/test_hid
 	$(HOSTCC) -Wall -Wextra -O1 -o build/test_crypto tests/test_crypto.c && build/test_crypto
 	$(HOSTCC) -Wall -Wextra -Wno-unused-parameter -O1 -fshort-wchar -o build/test_wlan tests/test_wlan.c && build/test_wlan
+	$(HOSTCC) -Wall -Wextra -O1 -o build/test_http tests/test_http.c && build/test_http
+	$(HOSTCC) -Wall -Wextra -O1 -o build/test_html tests/test_html.c && build/test_html
+
+# TLS 1.3 client against a local OpenSSL server (needs openssl and python3)
+check-tls:
+	@mkdir -p build
+	$(HOSTCC) -Wall -Wextra -Wno-unused-function -O2 -o build/test_tls tests/test_tls.c && tools/tls-test.sh
 
 clean:
 	rm -rf build

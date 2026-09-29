@@ -12,6 +12,8 @@
 #include "../kernel/smp.h"
 #include "osk.h"
 #include "../net/netstack.h"
+#include "../drivers/backlight.h"
+#include "../drivers/buttons.h"
 
 ui_t ui;
 
@@ -21,7 +23,7 @@ const u32 accent_palette[N_ACCENTS] = {
 };
 const char *accent_names[N_ACCENTS] = { "Fuchsia", "Iris", "Lagoon", "Ember", "Sky", "Lime" };
 
-static const app_t *apps[] = { &app_files, &app_terminal, &app_wifi, &app_sketch, &app_settings, &app_system, &app_clock, &app_life, &app_lab };
+static const app_t *apps[] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_sketch, &app_settings, &app_system, &app_clock, &app_life, &app_lab };
 #define N_APPS ((int)ARRAY_LEN(apps))
 
 typedef enum { VIEW_HOME, VIEW_APP } view_t;
@@ -36,6 +38,14 @@ static struct {
     int launcher_open, launch_pressed, dock_pressed, power_open, owner, keyboard_pending;
     int dock_edge;                /* DOCK_RIGHT/LEFT/BOTTOM/TOP, saved as QrtDockEdge */
     int dock_drag, drag_x, drag_y, drag_x0, drag_y0;    /* the dock following a finger */
+    int grab_fx, grab_fy, grab_vert;  /* where the finger holds the dock (per mille of its size) */
+    int animating; u64 anim_t0; rect_t anim_from, anim_to, anim_rect;   /* snapping to an edge */
+    int locked, asleep, lock_dragging, lock_y0, lock_armed;
+    u64 last_input_ms, now_ms;
+    int sleep_after;              /* seconds without input before sleeping; 0 = never (QrtSleepAfter) */
+    int volume, volume_saved;     /* mock audio: 0..100 (QrtVolume) */
+    u64 osd_until;
+    int osd_shown;
     u32 running;                  /* bit i: apps[i] was opened */
     char query[48];
     int cursor_x, cursor_y, cursor_on, cursor_dirty;
@@ -345,14 +355,25 @@ static int nearest_edge(int x, int y) {
 }
 
 /* While dragged, the panel takes the shape it would have on the nearest edge
- * and is centred under the finger. */
+ * and stays under the finger at the point where it was picked up.  After a
+ * drop it glides to its edge (sh.anim_rect, advanced once per frame). */
 static int dock_shape(void) { return sh.dock_drag == 2 ? nearest_edge(sh.drag_x, sh.drag_y) : sh.dock_edge; }
 static rect_t dock_rect(void) {
+    if (sh.animating) return sh.anim_rect;
     if (sh.dock_drag != 2) return dock_rect_at(sh.dock_edge);
-    rect_t r = dock_rect_at(dock_shape());
-    r.x = CLAMP(sh.drag_x - r.w / 2, 0, ui.W - r.w);
-    r.y = CLAMP(sh.drag_y - r.h / 2, STATUS_H, ui.H - r.h);
+    int shape = dock_shape();
+    rect_t r = dock_rect_at(shape);
+    int fx = sh.grab_fx, fy = sh.grab_fy;
+    if (dock_vertical(shape) != sh.grab_vert) { int t = fx; fx = fy; fy = t; }   /* turned: keep the spot along its length */
+    r.x = CLAMP(sh.drag_x - r.w * fx / 1000, 0, ui.W - r.w);
+    r.y = CLAMP(sh.drag_y - r.h * fy / 1000, STATUS_H, ui.H - r.h);
     return r;
+}
+/* what a moving dock repaints: the panel and its drop shadow */
+static rect_t dock_paint_rect(void) {
+    rect_t d = dock_rect();
+    int m = dp(26);
+    return (rect_t){ d.x - m, d.y - m, d.w + 2 * m, d.h + 2 * m };
 }
 
 static rect_t content_rect(void) {
@@ -370,7 +391,7 @@ static rect_t content_rect(void) {
 static rect_t work_rect(void) { rect_t c = content_rect(); c.h -= osk_height(); return c; }
 
 /* ---- dock ------------------------------------------------------------------- */
-static const app_t *const pinned[] = { &app_files, &app_terminal, &app_wifi, &app_sketch, &app_settings };
+static const app_t *const pinned[] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_sketch, &app_settings };
 
 static int app_index(const app_t *a) { for (int i = 0; i < N_APPS; i++) if (apps[i] == a) return i; return -1; }
 
@@ -423,14 +444,10 @@ static void app_icon(canvas_t *c, const app_t *a, float cx, float cy, float r) {
 static void draw_dock(canvas_t *c) {
     rect_t d = dock_rect();
     int edge = dock_shape(), vert = dock_vertical(edge), rad = dp(22);
-    if (sh.dock_drag == 2) {
-        /* where it will land */
-        rect_t land = dock_rect_at(edge);
-        gfx_rrect_outline(c, land, rad, dp(2), ALPHA(ui.accent, 200));
-        gfx_shadow(c, d, rad, dp(18), RGBA(0, 0, 0, 120));
-    }
-    gfx_rrect(c, d, rad, RGBA(8, 6, 18, sh.dock_drag == 2 ? 215 : 185));
-    gfx_rrect_outline(c, d, rad, 1, ui.stroke);
+    int lifted = sh.dock_drag == 2 || sh.animating;
+    if (lifted) gfx_shadow(c, d, rad, dp(18), RGBA(0, 0, 0, 120));
+    gfx_rrect(c, d, rad, RGBA(8, 6, 18, lifted ? 215 : 185));
+    gfx_rrect_outline(c, d, rad, 1, lifted ? ALPHA(ui.accent, 160) : ui.stroke);
     int items[16], n = dock_items(items);
     rect_t lr = dock_launcher_rect();
     for (int i = 0; i < n; i++) {
@@ -580,9 +597,10 @@ static void draw_launcher(canvas_t *c) {
 }
 
 /* ---- power menu (hardware power button) ---------------------------------------- */
-static const char *power_items[] = { "Restart", "Shut down", "Firmware setup", "Cancel" };
+static const char *power_items[] = { "Sleep", "Restart", "Shut down", "Firmware setup", "Cancel" };
+#define N_POWER 5
 static rect_t power_panel(void) {
-    int w = MIN(ui.W - dp(40), dp(360)), h = dp(76) + 4 * dp(56);
+    int w = MIN(ui.W - dp(40), dp(360)), h = dp(76) + N_POWER * dp(56);
     return (rect_t){ (ui.W - w) / 2, (ui.H - h) / 2, w, h };
 }
 static rect_t power_row(int i) { rect_t p = power_panel(); return (rect_t){ p.x + dp(14), p.y + dp(64) + i * dp(56), p.w - dp(28), dp(50) }; }
@@ -591,8 +609,8 @@ static void draw_power(canvas_t *c) {
     rect_t p = power_panel();
     ui_card(c, p, dp(24), 1);
     gfx_text(c, ui.title, p.x + dp(20), p.y + dp(20), "Power", ui.text);
-    for (int i = 0; i < 4; i++)
-        ui_button(c, power_row(i), power_items[i], i == 1 ? RGB(0xe5, 0x48, 0x4d) : RGBA(255, 255, 255, 30), ui.text);
+    for (int i = 0; i < N_POWER; i++)
+        ui_button(c, power_row(i), power_items[i], i == 2 ? RGB(0xe5, 0x48, 0x4d) : RGBA(255, 255, 255, 30), ui.text);
 }
 
 /* ---- app chrome ----------------------------------------------------------------- */
@@ -626,6 +644,8 @@ static void draw_app(canvas_t *c) {
  * with d as the canvas limit, so primitives outside it are rejected by their
  * clip test and the cost scales with the damaged area, not the screen.
  */
+static void draw_lock(canvas_t *c, const EFI_TIME *t);
+static void draw_osd(canvas_t *c);
 static EFI_TIME frame_time;           /* wall clock sampled once per frame on the boot core */
 void shell_time(EFI_TIME *t) { *t = frame_time; }
 
@@ -635,16 +655,20 @@ static void compose_rect(rect_t d) {
     canvas_t c = sh.scene;
     gfx_limit(&c, d);
     d = c.limit;
-    const canvas_t *wall = sh.view == VIEW_APP || sh.launcher_open ? &sh.wall_dim : &sh.wall;
+    const canvas_t *wall = !sh.locked && (sh.view == VIEW_APP || sh.launcher_open) ? &sh.wall_dim : &sh.wall;
     for (int y = d.y; y < d.y + d.h; y++)
         memcpy(c.px + (usize)y * c.stride + d.x, wall->px + (usize)y * wall->stride + d.x, (usize)d.w * 4);
     draw_status(&c, &frame_time);
-    if (sh.view == VIEW_HOME) draw_home(&c, &frame_time);
-    else draw_app(&c);
-    if (sh.launcher_open) draw_launcher(&c);
-    osk_draw(&c, content_rect());
-    draw_dock(&c);
+    if (sh.locked) draw_lock(&c, &frame_time);
+    else {
+        if (sh.view == VIEW_HOME) draw_home(&c, &frame_time);
+        else draw_app(&c);
+        if (sh.launcher_open) draw_launcher(&c);
+        osk_draw(&c, content_rect());
+        draw_dock(&c);
+    }
     if (sh.power_open) draw_power(&c);
+    if (sh.osd_shown) draw_osd(&c);
 }
 
 static rect_t compose_area;
@@ -754,21 +778,36 @@ static void launcher_pointer(const event_t *e) {
 
 /* A touch on the dock is a tap (open an app, or the launcher) or, once it
  * moves past a threshold, a drag: the dock follows the finger and, on
- * release, sticks to the nearest edge. */
+ * release, glides to the nearest edge.  Only the panel's own area is
+ * repainted while it moves, so dragging costs a small fraction of a frame. */
 static void dock_pointer(const event_t *e) {
     int items[16], n = dock_items(items), hit = -1;
     for (int i = 0; i < n; i++) if (in_rect(dock_slot(i), e->x, e->y)) hit = i;
     if (in_rect(dock_launcher_rect(), e->x, e->y)) hit = 99;
     switch (e->type) {
-    case EV_DOWN:
+    case EV_DOWN: {
+        rect_t d = dock_rect();
+        sh.animating = 0;
         sh.dock_pressed = hit;
         sh.dock_drag = 1;
         sh.drag_x0 = e->x; sh.drag_y0 = e->y;
+        sh.grab_fx = CLAMP((e->x - d.x) * 1000 / MAX(1, d.w), 0, 1000);
+        sh.grab_fy = CLAMP((e->y - d.y) * 1000 / MAX(1, d.h), 0, 1000);
+        sh.grab_vert = dock_vertical(sh.dock_edge);
         shell_damage(dock_rect());
         break;
+    }
     case EV_MOVE:
-        if (sh.dock_drag == 1 && (ABS_I(e->x - sh.drag_x0) > dp(24) || ABS_I(e->y - sh.drag_y0) > dp(24))) sh.dock_drag = 2;
-        if (sh.dock_drag == 2) { sh.drag_x = e->x; sh.drag_y = e->y; sh.dirty = 1; }
+        if (sh.dock_drag == 1 && (ABS_I(e->x - sh.drag_x0) > dp(14) || ABS_I(e->y - sh.drag_y0) > dp(14))) {
+            sh.dock_drag = 2;
+            sh.dock_pressed = -1;
+            shell_damage(dock_paint_rect());
+        }
+        if (sh.dock_drag == 2) {
+            shell_damage(dock_paint_rect());                 /* where it was */
+            sh.drag_x = e->x; sh.drag_y = e->y;
+            shell_damage(dock_paint_rect());                 /* where it is */
+        }
         break;
     default: break;
     }
@@ -776,10 +815,13 @@ static void dock_pointer(const event_t *e) {
     if (e->type != EV_UP) return;
     if (sh.dock_drag == 2) {
         int edge = nearest_edge(e->x, e->y);
+        sh.anim_from = sh.anim_rect = dock_rect();
         sh.dock_drag = 0;
         sh.dock_pressed = -1;
-        if (edge != sh.dock_edge) { shell_set_dock_edge(edge); osk_hide(); }
-        sh.dirty = 1;
+        if (edge != sh.dock_edge) { shell_set_dock_edge(edge); osk_hide(); }   /* content moves: one full repaint */
+        sh.anim_to = dock_rect_at(sh.dock_edge);
+        sh.animating = 1;
+        sh.anim_t0 = k_now_ms();
         return;
     }
     sh.dock_drag = 0;
@@ -796,29 +838,179 @@ static void dock_pointer(const event_t *e) {
     shell_damage(dock_rect());
 }
 
+/* one step of the snap animation (main loop, once per frame) */
+static void dock_animate(u64 now) {
+    if (!sh.animating) return;
+    shell_damage(dock_paint_rect());
+    float t = (float)(now - sh.anim_t0) / 150.0f;
+    if (t >= 1) { sh.animating = 0; shell_damage(dock_rect()); return; }
+    float e = 1 - (1 - t) * (1 - t) * (1 - t);             /* ease out */
+    rect_t a = sh.anim_from, b = sh.anim_to;
+    sh.anim_rect = (rect_t){ a.x + (int)((b.x - a.x) * e), a.y + (int)((b.y - a.y) * e),
+                             a.w + (int)((b.w - a.w) * e), a.h + (int)((b.h - a.h) * e) };
+    shell_damage(dock_paint_rect());
+}
+
+static void go_to_sleep(void);
 static void power_pointer(const event_t *e) {
     if (!tap_track(&sh.tap, e, dp(12))) return;
     int hit = -1;
-    for (int i = 0; i < 4; i++) if (in_rect(power_row(i), e->x, e->y)) hit = i;
-    if (hit == 0) hal_reboot();
-    else if (hit == 1) hal_shutdown();
-    else if (hit == 2) hal_reboot_to_firmware();
+    for (int i = 0; i < N_POWER; i++) if (in_rect(power_row(i), e->x, e->y)) hit = i;
     sh.power_open = 0;
     sh.dirty = 1;
+    if (hit == 0) go_to_sleep();
+    else if (hit == 1) hal_reboot();
+    else if (hit == 2) hal_shutdown();
+    else if (hit == 3) hal_reboot_to_firmware();
 }
 
-/* Hardware buttons: power opens the power menu, volume up the launcher,
- * volume down goes back (keyboard, launcher, then the open app). */
+/* ---- volume (mock audio: there is no sound driver yet) ---------------------------- */
+static rect_t osd_rect(void) {
+    int w = MIN(ui.W - dp(40), dp(320)), h = dp(60);
+    return (rect_t){ (ui.W - w) / 2, STATUS_H + dp(14), w, h };
+}
+static rect_t osd_paint_rect(void) { rect_t r = osd_rect(); int m = dp(20); return (rect_t){ r.x - m, r.y - m, r.w + 2 * m, r.h + 2 * m }; }
+static void speaker_icon(canvas_t *c, float x, float cy, float s, int muted, int level, u32 fg) {
+    /* body and cone */
+    gfx_rrect(c, (rect_t){ (int)x, (int)(cy - s * 0.25f), (int)(s * 0.3f), (int)(s * 0.5f) }, dp(2), fg);
+    for (int i = 0; i <= 6; i++) {
+        float t = i / 6.0f;
+        gfx_line(c, x + s * 0.3f, cy - s * 0.25f + t * s * 0.5f, x + s * 0.62f, cy - s * 0.5f + t * s, dp(2), fg);
+    }
+    if (muted) {
+        gfx_line(c, x + s * 0.8f, cy - s * 0.2f, x + s * 1.2f, cy + s * 0.2f, dp(2.4f), fg);
+        gfx_line(c, x + s * 0.8f, cy + s * 0.2f, x + s * 1.2f, cy - s * 0.2f, dp(2.4f), fg);
+        return;
+    }
+    /* sound waves: one to three arcs */
+    int waves = level > 66 ? 3 : level > 33 ? 2 : 1;
+    for (int w = 0; w < waves; w++) {
+        float r = s * (0.3f + 0.22f * w), cx = x + s * 0.55f;
+        float px = cx + r * fcos(-0.9f), py = cy + r * fsin(-0.9f);
+        for (int k2 = 1; k2 <= 6; k2++) {
+            float a = -0.9f + 1.8f * k2 / 6;
+            float qx = cx + r * fcos(a), qy = cy + r * fsin(a);
+            gfx_line(c, px, py, qx, qy, dp(2.2f), fg);
+            px = qx; py = qy;
+        }
+    }
+}
+static void draw_osd(canvas_t *c) {
+    rect_t r = osd_rect();
+    gfx_shadow(c, r, r.h / 2, dp(12), RGBA(0, 0, 0, 90));
+    gfx_rrect(c, r, r.h / 2, RGBA(20, 16, 34, 235));
+    gfx_rrect_outline(c, r, r.h / 2, 1, ui.stroke);
+    float cy = r.y + r.h / 2.0f;
+    speaker_icon(c, r.x + dp(20), cy, dp(26), sh.volume == 0, sh.volume, ui.text);
+    char pct[16];
+    fmt(pct, sizeof pct, sh.volume ? "%d%%" : "Muted", sh.volume);
+    int tw = text_width(ui.label, pct);
+    gfx_text(c, ui.label, r.x + r.w - dp(20) - tw, (int)cy - ui.label->line / 2, pct, ui.text);
+    int bx = r.x + dp(64), bw = r.w - dp(64) - dp(34) - text_width(ui.label, "100%");
+    rect_t track = { bx, (int)cy - dp(3), bw, dp(6) };
+    gfx_rrect(c, track, dp(3), RGBA(255, 255, 255, 40));
+    if (sh.volume) gfx_rrect(c, (rect_t){ bx, track.y, MAX(dp(6), bw * sh.volume / 100), track.h }, dp(3), ui.accent);
+}
+int shell_volume(void) { return sh.volume; }
+void shell_set_volume(int v) {
+    sh.volume = CLAMP(v, 0, 100);
+    sh.osd_until = k_now_ms() + 1500;
+    sh.osd_shown = 1;
+    shell_damage(osd_paint_rect());
+    klog("volume: %d%% (mock audio: no sound driver yet)", sh.volume);
+}
+
+/* ---- lock screen and sleep --------------------------------------------------------- */
+int shell_sleep_after(void) { return sh.sleep_after; }
+void shell_set_sleep_after(int seconds) {
+    sh.sleep_after = MAX(0, seconds);
+    hal_setting_set(u"QrtSleepAfter", (u32)sh.sleep_after);
+}
+static void lock_screen(void) {
+    if (sh.locked) return;
+    sh.locked = 1;
+    sh.launcher_open = 0;
+    sh.lock_dragging = sh.lock_armed = 0;
+    osk_hide();
+    sh.dirty = 1;
+    klog("shell: locked");
+}
+static void go_to_sleep(void) {
+    lock_screen();
+    if (sh.asleep) return;
+    sh.asleep = 1;
+    sh.power_open = 0;
+    sh.cursor_on = 0;
+    backlight_power(0);
+    /* no backlight control (QEMU, firmware mode): at least a black panel */
+    memset(sh.scene.px, 0, (usize)sh.scene.stride * ui.H * 4);
+    present(&sh.scene, full_rect());
+    klog("shell: asleep%s", backlight_available() ? " (backlight off)" : " (screen blanked)");
+}
+static void wake_up(void) {
+    if (!sh.asleep) return;
+    sh.asleep = 0;
+    backlight_power(1);
+    sh.last_input_ms = k_now_ms();
+    sh.dirty = 1;
+    klog("shell: awake");
+}
+static void unlock(void) {
+    sh.locked = 0;
+    sh.lock_dragging = sh.lock_armed = 0;
+    sh.dirty = 1;
+}
+static rect_t lock_hint_rect(void) { return (rect_t){ 0, ui.H - dp(120), ui.W, dp(100) }; }
+static void draw_lock(canvas_t *c, const EFI_TIME *t) {
+    char buf[64];
+    clock_text(buf, sizeof buf, t);
+    int y = ui.H * 30 / 100;
+    int w = text_width(ui.huge, buf);
+    gfx_text(c, ui.huge, (ui.W - w) / 2, y, buf, ui.text);
+    y += ui.huge->line;
+    fmt(buf, sizeof buf, "%s, %d %s", weekday(t), t->Day, month_name(t->Month));
+    gfx_text_center(c, ui.title, (rect_t){ 0, y, ui.W, ui.title->line }, buf, ui.text);
+    y += ui.title->line + dp(10);
+    const char *net = shell_net_status();
+    if (net) gfx_text_center(c, ui.small, (rect_t){ 0, y, ui.W, ui.small->line }, net, ui.text2);
+    rect_t h = lock_hint_rect();
+    float cx = ui.W / 2.0f, cy = h.y + dp(28);
+    u32 col = sh.lock_armed ? ui.accent : ui.text2;
+    gfx_line(c, cx - dp(12), cy + dp(6), cx, cy - dp(6), dp(3), col);
+    gfx_line(c, cx, cy - dp(6), cx + dp(12), cy + dp(6), dp(3), col);
+    gfx_text_center(c, ui.label, (rect_t){ 0, h.y + dp(46), ui.W, ui.label->line },
+                    sh.lock_armed ? "Release to unlock" : "Swipe up to unlock", col);
+}
+static void lock_pointer(const event_t *e) {
+    if (e->type == EV_DOWN) { sh.lock_dragging = 1; sh.lock_y0 = e->y; sh.lock_armed = 0; }
+    else if (e->type == EV_MOVE && sh.lock_dragging) {
+        int armed = sh.lock_y0 - e->y > dp(110);
+        if (armed != sh.lock_armed) { sh.lock_armed = armed; shell_damage(lock_hint_rect()); }
+    } else if (e->type == EV_UP) {
+        int go = sh.lock_dragging && sh.lock_armed;
+        sh.lock_dragging = 0;
+        if (go) unlock();
+        else if (sh.lock_armed) { sh.lock_armed = 0; shell_damage(lock_hint_rect()); }
+    }
+}
+
+/* Hardware buttons.  Power: lock (on the lock screen: sleep); held for a
+ * second: the power menu.  Volume: mock audio volume with an on-screen
+ * indicator.  Windows: the launcher (the dock's app list). */
 static int hardware_key(const event_t *e) {
     switch (e->scan) {
-    case SCAN_POWER: sh.power_open = !sh.power_open; sh.dirty = 1; return 1;
-    case SCAN_VOLUP: case SCAN_HOMEBTN: open_launcher(!sh.launcher_open); return 1;
-    case SCAN_VOLDN:
-        if (sh.power_open) sh.power_open = 0;
-        else if (osk_visible()) osk_hide();
-        else if (sh.launcher_open) open_launcher(0);
-        else if (sh.view == VIEW_APP) shell_go_home();
+    case SCAN_POWER:
+        sh.power_open = 0;
+        if (sh.locked) go_to_sleep(); else lock_screen();
         sh.dirty = 1;
+        return 1;
+    case SCAN_POWER_LONG: sh.power_open = 1; sh.dirty = 1; return 1;
+    case SCAN_VOLUP: shell_set_volume(sh.volume + 5); return 1;
+    case SCAN_VOLDN: shell_set_volume(sh.volume - 5); return 1;
+    case SCAN_HOMEBTN:
+        if (sh.locked) return 1;
+        sh.power_open = 0;
+        open_launcher(!sh.launcher_open);
         return 1;
     }
     return 0;
@@ -827,6 +1019,7 @@ static int hardware_key(const event_t *e) {
 static void key_event(const event_t *e) {
     if (hardware_key(e)) return;
     if (sh.power_open) { if (e->scan == SCAN_ESC) { sh.power_open = 0; sh.dirty = 1; } return; }
+    if (sh.locked) { if (e->ch == '\r' || e->ch == ' ') unlock(); return; }   /* a keyboard unlocks with Enter */
     if (sh.launcher_open) { launcher_key(e); return; }
     if (sh.view == VIEW_HOME) {
         /* typing on the home screen searches */
@@ -838,9 +1031,17 @@ static void key_event(const event_t *e) {
     if (sh.app->event && sh.app->event(e, app_area()) && !sh.app_damaged) shell_damage(app_area());
 }
 
-enum { OWN_NONE, OWN_OSK, OWN_DOCK, OWN_MAIN, OWN_POWER };
+enum { OWN_NONE, OWN_OSK, OWN_DOCK, OWN_MAIN, OWN_POWER, OWN_LOCK };
 
 static void dispatch(event_t e) {
+    sh.last_input_ms = sh.now_ms;
+    if (sh.asleep) {
+        /* asleep: power or the Windows button (or a keyboard) wakes it; touch and volume do not,
+         * unless there are no hardware buttons (firmware mode, other machines) */
+        if (e.type == EV_KEY && e.scan != SCAN_VOLUP && e.scan != SCAN_VOLDN && e.scan != SCAN_POWER_LONG) wake_up();
+        else if (e.type == EV_DOWN && !buttons_active()) { wake_up(); sh.owner = OWN_NONE; }
+        return;
+    }
     if (e.type == EV_KEY) { key_event(&e); return; }
     int lx, ly;
     to_logical(e.x, e.y, &lx, &ly);
@@ -851,6 +1052,7 @@ static void dispatch(event_t e) {
     /* a touch belongs to whatever it started on until it lifts */
     if (e.type == EV_DOWN || e.type == EV_SCROLL) {
         if (sh.power_open) sh.owner = OWN_POWER;
+        else if (sh.locked) sh.owner = OWN_LOCK;
         else if (osk_visible() && in_rect(osk_rect(content_rect()), e.x, e.y)) sh.owner = OWN_OSK;
         else if (in_rect(dock_rect(), e.x, e.y)) sh.owner = OWN_DOCK;
         else sh.owner = OWN_MAIN;
@@ -860,6 +1062,7 @@ static void dispatch(event_t e) {
 
     switch (owner) {
     case OWN_POWER: power_pointer(&e); return;
+    case OWN_LOCK: lock_pointer(&e); return;
     case OWN_OSK: {
         event_t keys[4];
         int n = osk_pointer(&e, content_rect(), keys, 4);
@@ -975,6 +1178,8 @@ void shell_main(void) {
     sh.rot = (int)hal_setting_get(u"QrtRotation", 0) & 3;
     sh.accent_idx = (int)hal_setting_get(u"QrtAccent", 0) % N_ACCENTS;
     sh.dock_edge = (int)hal_setting_get(u"QrtDockEdge", DOCK_RIGHT) & 3;
+    sh.sleep_after = (int)hal_setting_get(u"QrtSleepAfter", 120);
+    sh.volume = sh.volume_saved = CLAMP((int)hal_setting_get(u"QrtVolume", 50), 0, 100);
     sh.launch_pressed = sh.dock_pressed = -1;
     k.graphics_up = 1;
     if (!k.native) k.st->ConOut->EnableCursor(k.st->ConOut, 0);
@@ -990,8 +1195,10 @@ void shell_main(void) {
 
 
     sh.dirty = 1;
+    sh.last_input_ms = k_now_ms();
     for (;;) {
         hal_wait_frame();
+        sh.now_ms = k_now_ms();
 
         event_t ev[32];
         int n = hal_poll(ev, 32);
@@ -999,6 +1206,22 @@ void shell_main(void) {
 
         u64 now = k_now_ms();
         netstack_poll();
+        if (sh.asleep) {
+            /* the panel is dark: keep the network and the buttons going, draw nothing */
+            for (int i = 0; i < 3; i++) hal_wait_frame();
+            continue;
+        }
+        /* sleep after the configured idle time (sooner on the lock screen) */
+        if (sh.sleep_after) {
+            u64 limit = (u64)(sh.locked ? MIN(sh.sleep_after, 20) : sh.sleep_after) * 1000;
+            if (now - sh.last_input_ms > limit) { go_to_sleep(); continue; }
+        }
+        dock_animate(now);
+        if (sh.osd_shown && now > sh.osd_until) {
+            sh.osd_shown = 0;
+            shell_damage(osd_paint_rect());
+            if (sh.volume != sh.volume_saved) { sh.volume_saved = sh.volume; hal_setting_set(u"QrtVolume", (u32)sh.volume); }
+        }
         event_t rep[4];
         int nr = osk_tick(now, rep, 4);
         if (nr) shell_damage(osk_rect(content_rect()));

@@ -62,7 +62,9 @@ class QMP:
     KEYMAP = {"ret": "\r", "esc": "\x1b", "backspace": "\x08", "spc": " ", "tab": "\t",
               "up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D",
               # the tablet's buttons, as F9/F10/F11 on the serial console
-              "volup": "\x1b[20~", "voldown": "\x1b[21~", "power": "\x1b[23~"}
+              "volup": "\x1b[20~", "voldown": "\x1b[21~", "power": "\x1b[23~",
+              # F12: power held for a second; F8: the Windows button
+              "powerlong": "\x1b[24~", "win": "\x1b[19~"}
 
     def keys(self, *names, settle=0.6):
         for n in names:
@@ -77,7 +79,65 @@ class QMP:
         return path
 
 
+TEST_PAGE = """<!doctype html><html><head><title>QRT browser test</title><style>p{color:red}</style>
+<script>document.write('<p>scripts must not show</p>')</script></head><body>
+<p><a href="/page2.html">Next page (a link)</a></p>
+<h1>Hello from the host</h1>
+<p>This page came over <b>%s</b> from QEMU's host. Caf&eacute; &mdash; &ldquo;quotes&rdquo; &amp; entities.</p>
+<ul><li>First item</li><li>Second item with <a href="https://example.com/">a link</a></li></ul>
+<form action="/search"><input name="q" value="qrt"><button>Search</button></form>
+<pre>  preformatted
+    text</pre><hr><p><small>small print</small></p></body></html>"""
+
+
+def start_web_fixtures():
+    """HTTP on 18080 and HTTPS (TLS 1.3, throwaway certificate) on 18443 for
+    the browser; the guest reaches them at 10.0.2.2."""
+    import http.server, ssl, tempfile, threading, urllib.parse
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            u = urllib.parse.urlparse(self.path)
+            scheme = "https (TLS 1.3)" if isinstance(self.connection, ssl.SSLSocket) else "plain http"
+            if u.path == "/page2.html":
+                body = "<title>Page two</title><h2>Page two</h2><p>The link worked.</p>"
+            elif u.path == "/search":
+                q = urllib.parse.parse_qs(u.query).get("q", [""])[0]
+                body = "<title>Results</title><h2>Search results</h2><p>You searched for <b>%s</b>.</p>" % q
+            elif u.path == "/moved":
+                self.send_response(302); self.send_header("Location", "/page2.html"); self.end_headers(); return
+            else:
+                body = TEST_PAGE % scheme
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            if u.path == "/page2.html":
+                self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
+                for i in range(0, len(data), 20):
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(data[i:i + 20]), data[i:i + 20]))
+                self.wfile.write(b"0\r\n\r\n")
+                return
+            self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+        def log_message(self, *a): pass
+
+    srv = http.server.ThreadingHTTPServer(("0.0.0.0", 18080), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        d = tempfile.mkdtemp()
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", d + "/k.pem", "-out", d + "/c.pem",
+                        "-days", "1", "-subj", "/CN=10.0.2.2"], check=True, capture_output=True)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        ctx.load_cert_chain(d + "/c.pem", d + "/k.pem")
+        tsrv = http.server.ThreadingHTTPServer(("0.0.0.0", 18443), H)
+        tsrv.socket = ctx.wrap_socket(tsrv.socket, server_side=True)
+        threading.Thread(target=tsrv.serve_forever, daemon=True).start()
+    except Exception as e:  # noqa
+        print("https fixture unavailable:", e)
+
+
 def main():
+    start_web_fixtures()
     sock = os.path.join(ROOT, "build", f"qmp-{ARCH}.sock")
     serial = os.path.join(ROOT, "build", f"serial-{ARCH}.log")
     for p in (sock, serial, serial + ".sock", os.path.join(ROOT, "build", f"vars-{ARCH}.fd")):
@@ -149,7 +209,7 @@ def default_script(q, shots):
     hanging from y 47; the keyboard is centred in the 1172 px content area)."""
     back = (45, 76)
     # pinned apps; the launcher button follows them while only they are in the dock
-    dock = {"files": 94, "terminal": 170, "wifi": 246, "sketch": 322, "settings": 398, "launcher": 488}
+    dock = {"files": 94, "terminal": 170, "browser": 246, "wifi": 322, "sketch": 398, "settings": 474, "launcher": 564}
 
     def dock_tap(name, settle=1.2):
         q.tap(1226, dock[name], settle=settle)
@@ -199,6 +259,24 @@ def default_script(q, shots):
     q.tap(400, 350)                        # rows: "..", hwdump, welcome.txt
     shots.append(q.shot("07-files-text"))
     q.keys("backspace")
+    # Browser: start page, then the host's test pages over http and https (x64: native network)
+    dock_tap("browser", settle=1.5)
+    shots.append(q.shot("19-browser-home"))
+    if ARCH == "x64":
+        def open_url(u, wait=6):
+            q.tap(600, 141, settle=0.8)                  # address bar -> keyboard
+            q.keys(*[c for c in u], settle=0.2)
+            q.keys("ret", settle=wait)
+        open_url("10.0.2.2:18080/")
+        shots.append(q.shot("19-browser-http"))
+        q.tap(80, 232, settle=5)                        # "Next page (a link)": chunked reply
+        shots.append(q.shot("19-browser-link"))
+        open_url("https://10.0.2.2:18443/", wait=10)
+        shots.append(q.shot("19-browser-https"))
+        open_url("http://10.0.2.2:18080/moved")         # a redirect
+        open_url("10.0.2.2:18080/search?q=from+the+bar")
+        shots.append(q.shot("19-browser-form"))
+        q.keys("backspace", settle=5)                   # back
     # Wi-Fi (no Intel 8260 in QEMU: the app must say so cleanly)
     dock_tap("wifi")
     shots.append(q.shot("08-wifi"))
@@ -212,14 +290,23 @@ def default_script(q, shots):
     launch("touch")
     q.tap(640, 141, settle=2)              # probe (no LPSS I2C in QEMU: must refuse cleanly)
     shots.append(q.shot("12-touchlab"))
-    # hardware buttons: volume up = launcher, volume down = back, power = power menu
-    q.keys("volup", settle=1.0)
+    # hardware buttons: volume = mock audio indicator, Windows = launcher,
+    # power = lock (again: sleep, again: wake), power held = power menu
+    q.keys("esc", settle=0.8)
+    q.keys("volup", "volup", "volup", settle=0.4)
+    shots.append(q.shot("13-button-volume"))
+    q.keys("win", settle=1.0)
     shots.append(q.shot("13-button-launcher"))
-    q.keys("voldown", settle=1.0)
-    q.keys("voldown", settle=1.0)
+    q.keys("win", settle=1.0)
     q.keys("power", settle=1.0)
+    shots.append(q.shot("13-lock"))
+    q.keys("power", settle=1.0)
+    shots.append(q.shot("13-asleep"))
+    q.keys("power", settle=1.0)            # wakes to the lock screen
+    q.keys("powerlong", settle=1.0)
     shots.append(q.shot("13-button-power"))
-    q.keys("voldown", settle=1.0)
+    q.keys("esc", settle=0.8)
+    q.drag([(640, 700)] + [(640, 700 - i * 30) for i in range(1, 10)], settle=1.2)   # swipe up to unlock
     shots.append(q.shot("13-home"))
     # the dock: drag it to the bottom edge (screenshot mid-drag), then left, then back right
     q._pkt("d", 1226, 300); time.sleep(0.1)
@@ -236,6 +323,9 @@ def default_script(q, shots):
     # Settings: rotate to portrait
     dock_tap("settings")
     shots.append(q.shot("14-settings"))
+    q.drag([(600, 600)] + [(600, 600 - i * 40) for i in range(1, 10)], settle=1.0)
+    shots.append(q.shot("14-settings-more"))
+    q.drag([(600, 200)] + [(600, 200 + i * 60) for i in range(1, 10)], settle=1.0)
     q.tap(456, 305)                        # rotation 90 deg -> 800x1280 portrait canvas
     time.sleep(2)
     shots.append(q.shot("15-settings-portrait"))
