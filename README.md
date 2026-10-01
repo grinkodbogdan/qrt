@@ -65,12 +65,32 @@ written from scratch. It is not Linux, but it can run Linux programs.
   - **Windows button**: opens and closes the launcher (the dock's list of
     all apps).
 
-  QRT reads these straight from the Cherry Trail GPIO pads the DSDT names.
-  At start-up it switches each pad to GPIO-input mode, as Linux's
-  pinctrl-cherryview does. Until 0.5.6 it only read the pads, and only in
-  native mode: the likely reason the buttons did nothing on the tablet.
-  In QEMU, keys on the serial console stand in for them: F9 and F10 for
-  volume, F11 for power, F12 for power held, F8 for Windows.
+  QRT reads them from three sources:
+  - the input bit of the Cherry Trail GPIO pads the DSDT names. At start-up
+    QRT switches each pad to GPIO-input mode, as Linux's pinctrl-cherryview
+    does.
+  - the GPIO controller's interrupt-status register, which latches every
+    edge on those pads even when the input bit does not move.
+  - for power, the ACPI fixed power button: this tablet's FADT declares
+    one, so a press sets `PWRBTN_STS` in `PM1_STS` (I/O port 0x400). QRT
+    switches the firmware into ACPI mode first (`SMI_CMD`), as an OS does,
+    so that the firmware's SMI handler stops taking the press. This source
+    reports presses only, so a power press it catches is always short.
+
+  **Button test** (type "button" in the launcher) shows each source live.
+  In QEMU, keys on the serial console stand in for the buttons: F9 and F10
+  for volume, F11 for power, F12 for power held, F8 for Windows.
+- **Animations.** Changes of view animate:
+  - Apps rise in when they open and sink away when minimised or closed.
+  - The launcher and the open-apps view slide up, and the lock screen
+    fades in.
+  - Swiping up for the open apps, and swiping up to unlock, follow the
+    finger. On release the view finishes the move, or snaps back if it
+    went less than a third of the way.
+  - The dock and the top bar stay still while the content moves.
+  - An animation frame only blends or shifts two finished pictures (the
+    old screen and the new state, drawn once), on every core, so it costs
+    about one copy of the screen.
 - **Lock screen and sleep.** The lock screen shows the time and the date.
   Swipe up to unlock (or press Enter on a keyboard).
   - After a period without a touch or a button press, QRT locks and
@@ -306,7 +326,7 @@ FreeBSD's.
 | Display | works (framebuffer, 1200×1920, rotation) |
 | Touch | works: QRT's own Wacom driver; tested on the tablet in firmware mode. Native mode needs the same driver after the handover, which is **new in 0.5 and untested on hardware**. |
 | Storage | the boot stick is read into RAM at boot; writes go to RAM only |
-| Buttons | power, volume and Windows through GPIO, both kernel modes. 0.5.6 sets the pads to GPIO input first; earlier versions did not, and the buttons did nothing on the tablet (**the fix is untested on hardware**). |
+| Buttons | power, volume and Windows through GPIO (input bit and edge latch) and the ACPI fixed power button, both kernel modes. **Not working on the tablet up to 0.5.6; 0.5.7's extra sources are untested.** Button test shows what each source sees. |
 | Wi-Fi | Intel 8260 driver, WPA2-Personal: **works** (scanning, connecting, DHCP) |
 | Backlight | LPSS PWM #1, native mode: brightness and sleep (**new in 0.5.5.3, untested on hardware**). QRT only takes control if the firmware left that PWM running. |
 | Sleep | backlight off and a slower frame loop; not ACPI suspend |
@@ -341,6 +361,20 @@ In QEMU with 4 cores, a full 1280×800 redraw drops from 74 ms on one core to
 24 ms. Type `bench` in the launcher's search field to measure; the result
 appears in **System Monitor → Hardware**.
 
+When the screen is rotated (the 5855's panel is portrait, so landscape use
+is rotated), every frame must be turned before it reaches the panel. Up
+to 0.5.6 that was a straight per-pixel loop: each write landed on a new
+cache line, and the rotation took most of the frame time. In 0.5.7 the
+frame is turned in 32×32 tiles, which keeps both reads and writes in the
+cache. The tiles are spread over every core and written straight into
+the framebuffer in native mode, instead of through a staging copy. With
+the screen rotated in QEMU, a full frame went from 12.6 ms (10.7 ms of it
+for the rotation) to 6.2 ms (4.0 ms).
+
+The Atom has no GPU driver in QRT (the Intel Gen8 3D and blit engines need a
+large driver), so this, and redrawing only what changed, is where the speed
+comes from.
+
 ## Touchscreen
 
 The touchscreen stack is `src/drivers/dwi2c.c`, `i2chid.c`, `hidparse.c` and
@@ -353,9 +387,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.5.6.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.5.7.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.5.6.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.5.7.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

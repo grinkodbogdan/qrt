@@ -4,6 +4,7 @@
 #include "../kernel/vfs.h"
 #include "../kernel/dev.h"
 #include "../net/net.h"
+#include "../drivers/buttons.h"
 #if defined(__x86_64__)
 #include "../arch/x64/sched.h"
 #include "../arch/x64/irq.h"
@@ -17,7 +18,7 @@ static struct {
 } ks;
 
 static struct { scroll_t sc; tap_t tap; int tab; } st;
-enum { TAB_RES, TAB_HW, TAB_LOG };
+enum { TAB_RES, TAB_HW, TAB_LOG, TAB_BTN };   /* TAB_BTN: the Button test, from the launcher */
 static const char *tabs[] = { "Resources", "Hardware", "Log" };
 
 static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
@@ -172,6 +173,18 @@ static void draw(canvas_t *c, rect_t a) {
         kv(&f, "Operating system", "QRT " QRT_VERSION);
         kv(&f, "Kernel", k.native ? "Tessera (native)" : "Tessera (on the firmware)");
         kv(&f, "Architecture", QRT_ARCH);
+    } else if (st.tab == TAB_BTN) {
+        f.y += dp(4);
+        heading(&f, "Button test");
+        gfx_text_fit(c, ui.body, body.x + dp(4), f.y, body.w, "Press each button: its line should change. A photo of this screen helps find a fault.", ui.text2);
+        f.y += ui.body->line + dp(12);
+        char lines[8][112];
+        int n = buttons_debug(lines, 8);
+        const font_t *m = font_pick(F_MONO, dp(12));
+        rect_t box = { body.x, f.y, body.w, n * (m->line + dp(6)) + dp(20) };
+        gfx_rrect(c, box, dp(12), RGB(0x1d, 0x1d, 0x20));
+        for (int i = 0; i < n; i++) gfx_text_fit(c, m, box.x + dp(12), box.y + dp(10) + i * (m->line + dp(6)), box.w - dp(24), lines[i], RGB(0xde, 0xdd, 0xda));
+        f.y = box.y + box.h;
     } else {
         const font_t *m = font_pick(F_MONO, dp(12));
         rect_t box = { body.x, f.y + dp(4), body.w, 0 };
@@ -191,6 +204,7 @@ static void draw(canvas_t *c, rect_t a) {
 
 static int event(const event_t *e, rect_t a) {
     if (e->type == EV_KEY && e->scan == 0x7f01) { st.tab = TAB_HW; st.sc.off = 0; return 1; }   /* from the shell after "bench" */
+    if (e->type == EV_KEY && e->scan == 0x7f02) { st.tab = TAB_BTN; st.sc.off = 0; return 1; }  /* "Button test" */
     if (tap_track(&st.tap, e, dp(12)))
         for (int i = 0; i < 3; i++) if (in_rect(tab_rect(a, i), e->x, e->y)) { st.tab = i; st.sc.off = 0; return 1; }
     return scroll_event(&st.sc, e, body_rect(a), dp(48));
@@ -199,6 +213,7 @@ static int event(const event_t *e, rect_t a) {
 
 static int tick(u64 now) {
     static u64 last;
+    if (st.tab == TAB_BTN && now - last >= 100) { last = now; return 1; }   /* live */
     if (now - last < 1000) return 0;
     last = now;
 #if defined(__x86_64__)

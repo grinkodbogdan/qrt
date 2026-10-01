@@ -288,12 +288,14 @@ def default_script(q, shots):
     shots.append(q.shot("09-system-hw"))
     launch("clock")
     shots.append(q.shot("10-clock"))
+    launch("button")
+    shots.append(q.shot("10-button-test"))
     # open apps: swipe up on the home screen, close one with its x, one by swiping it up
     q.keys("esc", settle=1.0)
     q.drag([(500, 650)] + [(500, 650 - i * 30) for i in range(1, 10)], settle=1.5)
     shots.append(q.shot("11-overview"))
-    q.tap(361, 132, settle=1.0)            # x on the first window (Terminal)
-    q.drag([(205, 260)] + [(205, 260 - i * 25) for i in range(1, 10)], settle=1.2)   # swipe the new first window up
+    q.tap(268, 133, settle=1.0)            # x on the first window (Files; 7 windows -> 4 columns)
+    q.drag([(205, 300)] + [(205, 300 - i * 25) for i in range(1, 10)], settle=1.2)   # swipe the new first window (Terminal) up
     shots.append(q.shot("12-overview-closed"))
     q.tap(600, 760, settle=1.0)            # empty space: back home
     # hardware buttons: volume = mock audio indicator, Windows = launcher,

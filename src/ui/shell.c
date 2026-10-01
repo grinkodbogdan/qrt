@@ -48,7 +48,7 @@ static struct {
     int overview;                 /* the grid of open apps */
     canvas_t thumbs[16];          /* a picture of each open app, taken when it was left */
     int ov_card, ov_dy, ov_dragging, ov_y0, ov_x0;
-    int home_y0, home_tracking;
+    int home_y0, home_tracking, ov_gesture, lock_gesture;
     u64 osd_until;
     int osd_shown;
     u32 running;                  /* bit i: apps[i] was opened */
@@ -68,6 +68,149 @@ void shell_damage(rect_t r) { sh.dmg = rect_union(sh.dmg, r); sh.app_damaged = 1
 static rect_t full_rect(void) { return (rect_t){ 0, 0, ui.W, ui.H }; }
 int  shell_rotation(void) { return sh.rot; }
 int  shell_accent_index(void) { return sh.accent_idx; }
+
+/* ---- transitions -----------------------------------------------------------------
+ * Changes of view animate between two pictures: the screen as it was (a copy
+ * of the last frame) and the new state, drawn once.  Each animation frame only
+ * blends or shifts those two pictures, spread over the cores, so animating
+ * costs about one copy of the screen per frame.  Interactive gestures (swipe
+ * up for the open apps, swipe up to unlock) set the progress from the finger
+ * and finish or snap back when it lifts. */
+enum { TR_RISE = 1, TR_SINK, TR_FADE, TR_UNLOCK };
+typedef struct {
+    int active, kind, interactive, target, ms;
+    float p, p0;
+    u64 t0;
+    void (*done)(int committed);
+    canvas_t from;
+    float cur;                                   /* progress of the frame being built */
+} trans_t;
+static trans_t tr;
+
+static void compose(rect_t d);
+
+static void trans_end(void) {
+    if (!tr.active) return;
+    tr.active = 0;
+    void (*done)(int) = tr.done;
+    tr.done = NULL;
+    if (done) done(tr.target);
+    sh.dirty = 1;
+}
+
+static void trans_snapshot(void) {
+    if (!tr.from.px || tr.from.w != ui.W || tr.from.h != ui.H) { if (tr.from.px) canvas_free(&tr.from); tr.from = canvas_new(ui.W, ui.H); }
+    memcpy(tr.from.px, sh.scene.px, (usize)ui.W * ui.H * 4);
+}
+
+static void trans_start(int kind, int ms) {
+    if (!sh.scene.px || sh.asleep) return;
+    trans_end();
+    trans_snapshot();
+    tr = (trans_t){ .active = 1, .kind = kind, .ms = ms, .target = 1, .t0 = k_now_ms(), .from = tr.from };
+    sh.dirty = 1;
+}
+
+/* the new state must be set up by the caller, then drawn with trans_draw_target() */
+static void trans_begin_interactive(int kind, void (*done)(int)) {
+    trans_end();
+    trans_snapshot();
+    tr = (trans_t){ .active = 1, .kind = kind, .interactive = 1, .target = 1, .done = done, .from = tr.from };
+}
+static void trans_draw_target(void) { compose(full_rect()); sh.dmg = (rect_t){ 0 }; }
+static void trans_set(float p) { tr.p = CLAMP(p, 0.0f, 1.0f); }
+static void trans_release(int commit) {
+    tr.interactive = 0;
+    tr.p0 = tr.p;
+    tr.target = commit;
+    tr.t0 = k_now_ms();
+    float dist = commit ? 1 - tr.p : tr.p;
+    tr.ms = 60 + (int)(200 * dist);
+}
+
+static inline u32 lerp_px(u32 a, u32 b, u32 t) {         /* t 0..256: a -> b */
+    u32 rb = (((a & 0xff00ff) * (256 - t) + (b & 0xff00ff) * t) >> 8) & 0xff00ff;
+    u32 g = (((a & 0x00ff00) * (256 - t) + (b & 0x00ff00) * t) >> 8) & 0x00ff00;
+    return 0xff000000u | rb | g;
+}
+
+static rect_t content_rect(void);
+
+static void trans_rows(int y0, int y1) {
+    float p = tr.cur;
+    int W = ui.W, H = ui.H, R = dp(56);
+    const canvas_t *from = &tr.from, *to = &sh.scene;
+    /* the top bar and the dock stay put; only the content area moves (unlocking moves everything) */
+    rect_t ca = tr.kind == TR_UNLOCK ? full_rect() : content_rect();
+    for (int y = y0; y < y1; y++) {
+        u32 *o = sh.frame.px + (usize)y * sh.frame.stride;
+        if (tr.kind != TR_FADE && tr.kind != TR_UNLOCK && (y < ca.y || y >= ca.y + ca.h)) {
+            memcpy(o, to->px + (usize)y * to->stride, (usize)W * 4);
+            continue;
+        }
+        const u32 *a, *b;                                 /* blend a -> b by t */
+        u32 t;
+        switch (tr.kind) {
+        case TR_RISE: {                                    /* the new view rises in and fades in */
+            int sy = MIN(y + (int)((1 - p) * R), ca.y + ca.h - 1);
+            a = from->px + (usize)y * from->stride;
+            b = to->px + (usize)sy * to->stride;
+            t = (u32)(p * 256);
+            break;
+        }
+        case TR_SINK: {                                    /* the old view sinks and fades out */
+            int sy = MAX(y - (int)(p * R), ca.y);
+            b = to->px + (usize)y * to->stride;
+            a = from->px + (usize)sy * from->stride;
+            t = (u32)(p * 256);
+            break;
+        }
+        case TR_UNLOCK: {                                  /* the lock screen slides up off the screen */
+            int sy = y + (int)(p * H);
+            b = to->px + (usize)y * to->stride;
+            a = sy < H ? from->px + (usize)sy * from->stride : b;
+            t = (u32)(p * 160);
+            break;
+        }
+        default:
+            a = from->px + (usize)y * from->stride;
+            b = to->px + (usize)y * to->stride;
+            t = (u32)(p * 256);
+        }
+        int x0 = 0, x1 = W;
+        if (tr.kind == TR_RISE || tr.kind == TR_SINK) {
+            /* shifted rows only inside the content columns; the dock column comes from the new picture */
+            const u32 *straight = to->px + (usize)y * to->stride;
+            x0 = ca.x; x1 = ca.x + ca.w;
+            if (x0 > 0) memcpy(o, straight, (usize)x0 * 4);
+            if (x1 < W) memcpy(o + x1, straight + x1, (usize)(W - x1) * 4);
+        }
+        if (t >= 256) memcpy(o + x0, b + x0, (usize)(x1 - x0) * 4);
+        else if (!t || a == b) memcpy(o + x0, a + x0, (usize)(x1 - x0) * 4);
+        else for (int x = x0; x < x1; x++) o[x] = lerp_px(a[x], b[x], t);
+    }
+}
+static void trans_job(void *arg, int i, int n) { (void)arg; trans_rows(ui.H * i / n, ui.H * (i + 1) / n); }
+
+static void present(const canvas_t *src, rect_t d);
+
+/* one animation frame; returns 0 once the transition is over */
+static int trans_frame(void) {
+    float p;
+    if (tr.interactive) p = tr.p;
+    else {
+        float t = (float)(k_now_ms() - tr.t0) / (float)MAX(1, tr.ms);
+        if (t >= 1) { trans_end(); return 0; }
+        float e = 1 - (1 - t) * (1 - t) * (1 - t);        /* ease out */
+        p = tr.p0 + ((float)tr.target - tr.p0) * e;
+    }
+    tr.cur = p;
+    int n = smp_workers();
+    if (n) smp_run(trans_job, NULL, MIN(4 * (n + 1), 32)); else trans_rows(0, ui.H);
+    present(&sh.frame, full_rect());
+    return 1;
+}
+
 
 /* ---- widgets -------------------------------------------------------------- */
 int tap_track(tap_t *t, const event_t *e, int slop) {
@@ -217,6 +360,8 @@ static void alloc_canvases(void) {
 }
 
 static void relayout(void) {
+    tr.active = 0;
+    if (tr.from.px) canvas_free(&tr.from);
     ui_metrics();
     alloc_canvases();
     build_wallpaper();
@@ -247,6 +392,61 @@ static void to_logical(int px, int py, int *lx, int *ly) {
 }
 
 /* Push rectangle d (logical coords) of src to the panel, rotating on the way. */
+/*
+ * Push a rectangle of the logical canvas to the panel.  When the screen is
+ * rotated, the canvas is turned in 32x32 tiles, so that both the reads and
+ * the writes of a tile stay in the cache (a straight per-pixel rotation
+ * touches a new cache line for every pixel and used to take most of the
+ * frame), and the tiles are spread over every core.  In native mode the
+ * tiles go straight into the framebuffer; under the firmware they go to a
+ * staging canvas that GOP's Blt copies.
+ */
+#define TILE 32
+static struct { const canvas_t *src; rect_t d; u32 *dst; usize dstride; int fw, fh, swap; } rot_job;
+
+static void rotate_band(int y0, int y1) {
+    const canvas_t *src = rot_job.src;
+    rect_t d = rot_job.d;
+    u32 *dst = rot_job.dst;
+    usize ds = rot_job.dstride;
+    int fw = rot_job.fw, fh = rot_job.fh, swap = rot_job.swap;
+    for (int by = y0; by < y1; by += TILE) {
+        int ye = MIN(by + TILE, y1);
+        for (int bx = d.x; bx < d.x + d.w; bx += TILE) {
+            int xe = MIN(bx + TILE, d.x + d.w);
+            for (int lx = bx; lx < xe; lx++) {
+                const u32 *col = src->px + lx;
+                u32 *o;
+                if (sh.rot == 1) {                         /* logical (lx, ly) -> panel (fw-1-ly, lx) */
+                    o = dst + (usize)lx * ds + (fw - 1);
+                    for (int ly = by; ly < ye; ly++) {
+                        u32 p = col[(usize)ly * src->stride];
+                        if (swap) p = (p & 0xff00ff00u) | ((p >> 16) & 0xff) | ((p & 0xff) << 16);
+                        o[-ly] = p;
+                    }
+                } else {                                   /* rot 3: -> panel (ly, fh-1-lx) */
+                    o = dst + (usize)(fh - 1 - lx) * ds;
+                    for (int ly = by; ly < ye; ly++) {
+                        u32 p = col[(usize)ly * src->stride];
+                        if (swap) p = (p & 0xff00ff00u) | ((p >> 16) & 0xff) | ((p & 0xff) << 16);
+                        o[ly] = p;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void rotate_job_fn(void *arg, int i, int n) {
+    (void)arg;
+    rect_t d = rot_job.d;
+    /* bands of whole tiles */
+    int tiles = (d.h + TILE - 1) / TILE;
+    int t0 = tiles * i / n, t1 = tiles * (i + 1) / n;
+    int y0 = d.y + t0 * TILE, y1 = MIN(d.y + t1 * TILE, d.y + d.h);
+    if (y0 < y1) rotate_band(y0, y1);
+}
+
 static void present(const canvas_t *src, rect_t d) {
     d = rect_intersect(d, full_rect());
     if (d.w <= 0 || d.h <= 0) return;
@@ -255,22 +455,29 @@ static void present(const canvas_t *src, rect_t d) {
         return;
     }
     int fw = (int)k.fb_w, fh = (int)k.fb_h;
-    u32 *p = sh.phys.px;
-    for (int ly = d.y; ly < d.y + d.h; ly++) {
-        const u32 *row = src->px + (usize)ly * src->stride;
-        switch (sh.rot) {
-        case 1: { u32 *o = p + (fw - 1 - ly);            for (int lx = d.x; lx < d.x + d.w; lx++) o[(usize)lx * fw] = row[lx]; break; }
-        case 2: { u32 *o = p + (usize)(fh - 1 - ly) * fw; for (int lx = d.x; lx < d.x + d.w; lx++) o[fw - 1 - lx] = row[lx]; break; }
-        default: { u32 *o = p + ly;                        for (int lx = d.x; lx < d.x + d.w; lx++) o[(usize)(fh - 1 - lx) * fw] = row[lx]; break; }
+    if (sh.rot == 2) {                                     /* upside down: rows stay rows */
+        u32 *p = sh.phys.px;
+        for (int ly = d.y; ly < d.y + d.h; ly++) {
+            const u32 *row = src->px + (usize)ly * src->stride;
+            u32 *o = p + (usize)(fh - 1 - ly) * fw;
+            for (int lx = d.x; lx < d.x + d.w; lx++) o[fw - 1 - lx] = row[lx];
         }
+        hal_present(p, fw, fw - (d.x + d.w), fh - (d.y + d.h), d.w, d.h);
+        return;
     }
-    rect_t r;
-    switch (sh.rot) {
-    case 1:  r = (rect_t){ fw - (d.y + d.h), d.x, d.h, d.w }; break;
-    case 2:  r = (rect_t){ fw - (d.x + d.w), fh - (d.y + d.h), d.w, d.h }; break;
-    default: r = (rect_t){ d.y, fh - (d.x + d.w), d.h, d.w }; break;
-    }
-    hal_present(p, fw, r.x, r.y, r.w, r.h);
+    int direct = k.native && k.fb_base;
+    rot_job.src = src;
+    rot_job.d = d;
+    rot_job.fw = fw; rot_job.fh = fh;
+    rot_job.dst = direct ? (u32 *)(usize)k.fb_base : sh.phys.px;
+    rot_job.dstride = direct ? k.fb_stride : (usize)fw;
+    rot_job.swap = direct && k.fb_rgb;
+    int n = smp_workers();
+    if (n && (u64)d.w * d.h >= 60000) smp_run(rotate_job_fn, NULL, MIN(4 * (n + 1), (d.h + TILE - 1) / TILE));
+    else rotate_band(d.y, d.y + d.h);
+    if (direct) return;
+    rect_t r = sh.rot == 1 ? (rect_t){ fw - (d.y + d.h), d.x, d.h, d.w } : (rect_t){ d.y, fh - (d.x + d.w), d.h, d.w };
+    hal_present(sh.phys.px, fw, r.x, r.y, r.w, r.h);
 }
 
 static void draw_cursor(canvas_t *c, int x, int y) {
@@ -538,7 +745,7 @@ static void draw_home(canvas_t *c, const EFI_TIME *t) {
 /* ---- launcher: every app, plus search over apps and actions ------------------ */
 typedef struct { const char *title, *sub; int app; int action; } suggestion_t;
 enum { ACT_NONE, ACT_SHUTDOWN, ACT_REBOOT, ACT_FIRMWARE, ACT_ROTATE, ACT_ACCENT,
-       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET, ACT_BENCH, ACT_SMP, ACT_KEYBOARD, ACT_OVERVIEW };
+       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET, ACT_BENCH, ACT_SMP, ACT_KEYBOARD, ACT_OVERVIEW, ACT_BUTTONS };
 
 /* only listed when searched for ("bench" and the multicore switch stay reachable by name) */
 static const suggestion_t actions[] = {
@@ -552,6 +759,7 @@ static const suggestion_t actions[] = {
     { "Touch: flip X", "Mirror touch left-right", -1, ACT_TOUCH_FLIPX },
     { "Touch: flip Y", "Mirror touch top-bottom", -1, ACT_TOUCH_FLIPY },
     { "Touch: reset", "Use the firmware's mapping", -1, ACT_TOUCH_RESET },
+    { "Button test", "See what the hardware buttons do", -1, ACT_BUTTONS },
     { "Graphics benchmark", "Time the screen redraw", -1, ACT_BENCH },
     { "Multicore drawing on/off", "Draw with every CPU core", -1, ACT_SMP },
 };
@@ -706,6 +914,7 @@ static void capture_thumb(void) {
 
 static void close_app(int i) {
     if (i < 0) return;
+    if (sh.app == apps[i] && !sh.overview) trans_start(TR_SINK, 200);
     sh.running &= ~(1u << i);
     if (sh.thumbs[i].px) canvas_free(&sh.thumbs[i]);
     if (apps[i]->close) apps[i]->close();
@@ -715,6 +924,7 @@ static void close_app(int i) {
 
 static void open_overview(void) {
     capture_thumb();
+    trans_start(TR_RISE, 220);
     sh.overview = 1;
     sh.launcher_open = 0;
     sh.ov_card = -1;
@@ -791,9 +1001,13 @@ static void overview_pointer(const event_t *e) {
         break;
     case EV_MOVE:
         if (sh.ov_card >= 0 && (sh.ov_dragging || sh.ov_y0 - e->y > dp(12))) {
+            int old = sh.ov_dy;
             sh.ov_dragging = 1;
             sh.ov_dy = MIN(0, e->y - sh.ov_y0);
-            sh.dirty = 1;
+            /* repaint only the strip the card moves through */
+            rect_t cr = ov_card_rect(sh.ov_card, n);
+            int top = cr.y + MIN(old, sh.ov_dy) - dp(8);
+            shell_damage((rect_t){ cr.x - dp(8), top, cr.w + dp(16), cr.y + cr.h + dp(8) - top });
         }
         break;
     case EV_UP: {
@@ -802,17 +1016,17 @@ static void overview_pointer(const event_t *e) {
         sh.dirty = 1;
         if (card >= 0 && sh.ov_dragging) {
             sh.ov_dragging = 0;
-            if (-sh.ov_dy > dp(110)) close_app(list[card]);
+            if (-sh.ov_dy > dp(110)) { trans_start(TR_FADE, 160); close_app(list[card]); }
             return;
         }
         if (ABS_I(e->x - sh.ov_x0) > dp(12) || ABS_I(e->y - sh.ov_y0) > dp(12)) return;
         if (card >= 0 && card == hit) {
-            if (in_rect(ov_close_rect(ov_card_rect(card, n)), e->x, e->y)) { close_app(list[card]); return; }
+            if (in_rect(ov_close_rect(ov_card_rect(card, n)), e->x, e->y)) { trans_start(TR_FADE, 160); close_app(list[card]); return; }
             sh.overview = 0;
             open_app(list[card]);
             return;
         }
-        if (hit < 0) sh.overview = 0;                  /* empty space: back to the home screen */
+        if (hit < 0) { trans_start(TR_FADE, 180); sh.overview = 0; }   /* empty space: back to the home screen */
         break;
     }
     default: break;
@@ -877,6 +1091,7 @@ static void compose(rect_t d) {
 /* ---- navigation ---------------------------------------------------------------- */
 static void open_app(int i) {
     if (sh.view == VIEW_APP && sh.app != apps[i]) capture_thumb();
+    trans_start(sh.view == VIEW_APP && !sh.overview && !sh.launcher_open ? TR_FADE : TR_RISE, 220);
     sh.overview = 0;
     sh.app = apps[i];
     sh.view = VIEW_APP;
@@ -890,6 +1105,7 @@ static void open_app(int i) {
 
 void shell_go_home(void) {
     capture_thumb();
+    if (sh.view == VIEW_APP || sh.overview || sh.launcher_open) trans_start(sh.view == VIEW_APP ? TR_SINK : TR_FADE, 200);
     sh.overview = 0;
     sh.view = VIEW_HOME;
     sh.app = NULL;
@@ -904,6 +1120,7 @@ void shell_keyboard(int show) {
 }
 
 static void open_launcher(int on) {
+    if (on != sh.launcher_open) trans_start(on ? TR_RISE : TR_FADE, on ? 200 : 150);
     sh.launcher_open = on;
     sh.query[0] = 0;
     sh.launch_pressed = -1;
@@ -926,6 +1143,10 @@ static void run_action(int act) {
     case ACT_SMP: smp_set_enabled(!smp_enabled()); break;
     case ACT_KEYBOARD: sh.keyboard_pending = 1; break;
     case ACT_OVERVIEW: open_overview(); break;
+    case ACT_BUTTONS:
+        for (int i = 0; i < N_APPS; i++) if (apps[i] == &app_system) open_app(i);
+        if (sh.app == &app_system) app_system.event(&(event_t){ .type = EV_KEY, .scan = 0x7f02 }, app_area());
+        break;
     }
 }
 
@@ -1115,6 +1336,7 @@ void shell_set_sleep_after(int seconds) {
 }
 static void lock_screen(void) {
     if (sh.locked) return;
+    trans_start(TR_FADE, 200);
     sh.locked = 1;
     sh.launcher_open = 0;
     sh.lock_dragging = sh.lock_armed = 0;
@@ -1124,6 +1346,7 @@ static void lock_screen(void) {
 }
 static void go_to_sleep(void) {
     lock_screen();
+    trans_end();
     if (sh.asleep) return;
     sh.asleep = 1;
     sh.power_open = 0;
@@ -1143,6 +1366,7 @@ static void wake_up(void) {
     klog("shell: awake");
 }
 static void unlock(void) {
+    if (sh.locked) trans_start(TR_UNLOCK, 260);
     sh.locked = 0;
     sh.lock_dragging = sh.lock_armed = 0;
     sh.dirty = 1;
@@ -1167,16 +1391,25 @@ static void draw_lock(canvas_t *c, const EFI_TIME *t) {
     gfx_text_center(c, ui.label, (rect_t){ 0, h.y + dp(46), ui.W, ui.label->line },
                     sh.lock_armed ? "Release to unlock" : "Swipe up to unlock", col);
 }
+/* swipe up to unlock: the lock screen follows the finger */
+static void unlock_done(int committed) {
+    sh.lock_armed = sh.lock_dragging = 0;
+    if (!committed) sh.locked = 1;                 /* snapped back */
+}
 static void lock_pointer(const event_t *e) {
-    if (e->type == EV_DOWN) { sh.lock_dragging = 1; sh.lock_y0 = e->y; sh.lock_armed = 0; }
+    if (e->type == EV_DOWN) { sh.lock_dragging = 1; sh.lock_y0 = e->y; sh.lock_armed = 0; sh.lock_gesture = 0; }
     else if (e->type == EV_MOVE && sh.lock_dragging) {
-        int armed = sh.lock_y0 - e->y > dp(110);
-        if (armed != sh.lock_armed) { sh.lock_armed = armed; shell_damage(lock_hint_rect()); }
+        int dy = sh.lock_y0 - e->y;
+        if (!sh.lock_gesture && dy > dp(12)) {
+            trans_begin_interactive(TR_UNLOCK, unlock_done);
+            sh.locked = 0;
+            trans_draw_target();
+            sh.lock_gesture = 1;
+        }
+        if (sh.lock_gesture) trans_set((float)dy / (float)(ui.H * 0.6f));
     } else if (e->type == EV_UP) {
-        int go = sh.lock_dragging && sh.lock_armed;
         sh.lock_dragging = 0;
-        if (go) unlock();
-        else if (sh.lock_armed) { sh.lock_armed = 0; shell_damage(lock_hint_rect()); }
+        if (sh.lock_gesture) { sh.lock_gesture = 0; trans_release(tr.p > 0.25f); }
     }
 }
 
@@ -1207,7 +1440,11 @@ static void key_event(const event_t *e) {
     if (sh.power_open) { if (e->scan == SCAN_ESC) { sh.power_open = 0; sh.dirty = 1; } return; }
     if (sh.locked) { if (e->ch == '\r' || e->ch == ' ') unlock(); return; }   /* a keyboard unlocks with Enter */
     if (sh.launcher_open) { launcher_key(e); return; }
-    if (sh.overview) { if (e->scan == SCAN_ESC) { sh.overview = 0; sh.dirty = 1; } return; }
+    if (sh.overview) {
+        if (e->scan == SCAN_ESC) { trans_start(TR_FADE, 160); sh.overview = 0; sh.dirty = 1; }
+        else if (e->ch >= 32 && e->ch < 127) { sh.overview = 0; open_launcher(1); launcher_key(e); }   /* typing searches */
+        return;
+    }
     if (sh.view == VIEW_HOME) {
         /* typing on the home screen searches */
         if (e->ch >= 32 && e->ch < 127) { open_launcher(1); launcher_key(e); }
@@ -1219,6 +1456,8 @@ static void key_event(const event_t *e) {
 }
 
 enum { OWN_NONE, OWN_OSK, OWN_DOCK, OWN_MAIN, OWN_POWER, OWN_LOCK };
+
+static void ov_gesture_done(int committed) { if (!committed) sh.overview = 0; }
 
 static void dispatch(event_t e) {
     sh.last_input_ms = sh.now_ms;
@@ -1262,12 +1501,26 @@ static void dispatch(event_t e) {
     case OWN_MAIN: break;
     default: return;
     }
+    if (sh.ov_gesture) {
+        /* the open apps rise with the finger; past a third they stay */
+        if (e.type == EV_MOVE) trans_set((float)(sh.home_y0 - e.y) / (float)dp(280));
+        else if (e.type == EV_UP) { sh.ov_gesture = 0; trans_release(tr.p > 0.3f); }
+        return;
+    }
     if (sh.launcher_open) { launcher_pointer(&e); return; }
     if (sh.overview) { overview_pointer(&e); return; }
     if (sh.view == VIEW_HOME) {
         /* swipe up on the home screen: the open apps */
         if (e.type == EV_DOWN) { sh.home_tracking = 1; sh.home_y0 = e.y; }
-        else if (e.type == EV_MOVE && sh.home_tracking && sh.home_y0 - e.y > dp(90)) { sh.home_tracking = 0; open_overview(); sh.owner = OWN_NONE; }
+        else if (e.type == EV_MOVE && sh.home_tracking && sh.home_y0 - e.y > dp(12)) {
+            sh.home_tracking = 0;
+            trans_begin_interactive(TR_RISE, ov_gesture_done);
+            sh.overview = 1;
+            sh.ov_card = -1;
+            trans_draw_target();
+            sh.ov_gesture = 1;
+            trans_set((float)(sh.home_y0 - e.y) / (float)dp(280));
+        }
         else if (e.type == EV_UP) sh.home_tracking = 0;
         return;
     }
@@ -1298,6 +1551,14 @@ static void splash(float t) {
 static rect_t cursor_rect(int x, int y) { return (rect_t){ x - dp(3), y - dp(3), dp(20), dp(28) }; }
 
 static void render(void) {
+    if (tr.active) {
+        /* keep the target picture current (app ticks, presses), then animate */
+        if (sh.dmg.w > 0 && sh.dmg.h > 0) compose(sh.dmg);
+        sh.dmg = sh.pdmg = (rect_t){ 0 };
+        if (trans_frame()) return;
+        /* over: show the final state (trans_end asked for a full redraw) */
+        sh.dmg = full_rect();
+    }
     rect_t pd = rect_intersect(rect_union(sh.dmg, sh.pdmg), full_rect());
     if (pd.w <= 0 || pd.h <= 0) { sh.dmg = sh.pdmg = (rect_t){ 0 }; return; }
     u64 t0 = k_now_us();

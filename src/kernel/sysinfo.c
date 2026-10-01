@@ -68,6 +68,7 @@ static void find_dsdt(const u8 *rsdp) {
     for (u32 i = 0; i < n; i++) {
         const u8 *t = phys_ptr(wide ? *(const u64 *)(root + 36 + i * 8) : *(const u32 *)(root + 36 + i * 4));
         if (!t || memcmp(t, "FACP", 4)) continue;
+        k.fadt = t;
         u32 flen = *(const u32 *)(t + 4);
         u64 d = flen >= 148 ? *(const u64 *)(t + 140) : 0;
         if (!d) d = *(const u32 *)(t + 40);
