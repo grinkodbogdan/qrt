@@ -127,12 +127,8 @@ int buttons_init(void) {
     const volatile u8 *gn = (const volatile u8 *)(usize)venue_gnvs();
     board_id = gn[0x322];                             /* BDID */
     pmic_id = gn[0x349];                              /* PMID */
-    if (board_id == 1) {                              /* _CRS "PBUF" */
-        btn[2].comm = 0; btn[2].pin = 0x3d;
-        btn[3].comm = 1; btn[3].pin = 0x08;
-    } else if (pmic_id == 3 && board_id != 9 && board_id != 10) {
-        btn[3].pin = -1;                              /* "WBUF": the Windows button is on the PMIC */
-    }
+    /* The pins above were confirmed on a 5855 with the Button test's pad scanner
+     * (SW/5f Windows, SW/5d volume up, N/08 volume down), whatever BDID says. */
     klog("buttons: board id %d, PMIC id %d", board_id, pmic_id);
     for (int i = 0; i < N_BTN; i++) {
         if (btn[i].pin < 0) continue;
@@ -140,13 +136,14 @@ int buttons_init(void) {
         u32 v = *c0, v1 = *c1;
         if (v == 0xffffffffu) { fmt(why, sizeof why, "GPIO bank GPO%d does not answer", btn[i].comm); klog("buttons: %s", why); return 0; }
         u32 cfg = (v & PAD_CFG_MASK) >> PAD_CFG_SHIFT;
+        btn[i].intsel = -1;
+        /* power is PMU_PWRBTN_B: in its native function the PMC turns a press into
+         * PWRBTN_STS; switching it to GPIO would take it away from the PMC */
+        if (btn[i].scan == SCAN_POWER) { btn[i].intsel = (int)((v >> 28) & 15); continue; }
         if (!(v1 & PAD1_CFGLOCK) && (!(v & PAD_GPIOEN) || cfg == PAD_CFG_GPO || cfg == PAD_CFG_HIZ)) {
             *c0 = (v & ~PAD_CFG_MASK) | PAD_GPIOEN | (PAD_CFG_GPI << PAD_CFG_SHIFT);
             klog("buttons: %s pad switched to GPIO input (PADCTRL0 %08x -> %08x)", btn[i].name, v, *c0);
         }
-        /* latch both edges in the interrupt status (the line stays masked) */
-        btn[i].intsel = (int)((*c0 >> 28) & 15);
-        if (!(*c1 & PAD1_CFGLOCK) && (*c1 & 7) == 0) *c1 = (*c1 & ~7u) | 3u;
     }
     hal_delay_us(2000);                               /* let the input settle */
     for (int i = 0; i < N_BTN; i++) {
@@ -220,8 +217,16 @@ static int scan_lines(char lines[][112], int n, int max) {
     return n;
 }
 
+static int sent;                  /* events handed to the shell, for the Button test */
+static u16 last_sent;
+
 int buttons_poll(event_t *out, int max) {
     if (sc.on) scan_poll();
+    static int tried;
+    if (!active && !tried) {          /* do not depend on the ACPI device list binding the driver */
+        tried = 1;
+        if (venue_gnvs()) { buttons_init(); klog("buttons: started from the input path: %s", why); }
+    }
     if (!active) return 0;
     int n = 0;
     u64 now = k_now_ms();
@@ -231,7 +236,9 @@ int buttons_poll(event_t *out, int max) {
         if (btn[i].pin < 0) continue;
         int rx = level(i);
         if (rx != btn[i].idle) btn[i].rx_moved = 1;
-        if (btn[i].intsel >= 0 && (ist[btn[i].comm] >> btn[i].intsel) & 1) {
+        /* the interrupt line is shared with other pads: only power, whose pad may
+         * not show its level, uses it, and only until the level is seen to move */
+        if (btn[i].intsel >= 0 && !btn[i].rx_moved && (ist[btn[i].comm] >> btn[i].intsel) & 1) {
             *intstat(btn[i].comm) = 1u << btn[i].intsel;               /* write 1 to clear */
             btn[i].edges++;
             if (!btn[i].rx_moved) btn[i].virt = !btn[i].virt;         /* the input bit is not moving: edges are the state */
@@ -272,6 +279,7 @@ int buttons_poll(event_t *out, int max) {
         klog("buttons: ACPI power button");
         if (!btn[0].presses) out[n++] = (event_t){ .type = EV_KEY, .scan = SCAN_POWER };
     }
+    for (int i = 0; i < n; i++) { sent++; last_sent = out[i].scan; }
     return n;
 }
 
@@ -291,6 +299,12 @@ int buttons_debug(char lines[][112], int max) {
     if (n < max) {
         if (fx.on) fmt(lines[n++], 112, "ACPI power button: PM1_STS %04x (port %x), SCI_EN %d, presses %d", io_inw(fx.sts), fx.sts, fx.sci, fx.presses);
         else strlcpy(lines[n++], "ACPI power button: not present", 112);
+    }
+    if (n < max) {
+        const char *ln = last_sent == SCAN_POWER ? "power" : last_sent == SCAN_POWER_LONG ? "power (held)" :
+                         last_sent == SCAN_VOLUP ? "volume up" : last_sent == SCAN_VOLDN ? "volume down" :
+                         last_sent == SCAN_HOMEBTN ? "Windows" : "-";
+        fmt(lines[n++], 112, "events sent to the shell: %d, last: %s", sent, ln);
     }
     return scan_lines(lines, n, max);
 }
