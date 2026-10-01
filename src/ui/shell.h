@@ -28,7 +28,7 @@ typedef struct app {
     void (*close)(void);                           /* optional: the user closed the app */
 } app_t;
 
-extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life, app_lab, app_terminal, app_wifi, app_browser;
+extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life, app_lab, app_terminal, app_wifi, app_browser, app_bluetooth;
 
 /* shell services for apps */
 void shell_redraw(void);                /* redraw the whole screen */

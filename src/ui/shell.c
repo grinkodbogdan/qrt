@@ -25,7 +25,7 @@ const u32 accent_palette[N_ACCENTS] = {
 };
 const char *accent_names[N_ACCENTS] = { "Blue", "Teal", "Green", "Orange", "Red", "Purple" };
 
-static const app_t *apps[] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_settings, &app_system, &app_clock, &app_sketch };
+static const app_t *apps[] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_bluetooth, &app_settings, &app_system, &app_clock, &app_sketch };
 #define N_APPS ((int)ARRAY_LEN(apps))
 
 typedef enum { VIEW_HOME, VIEW_APP } view_t;

@@ -383,6 +383,9 @@ def default_script(q, shots):
     shots.append(q.shot("16-home-portrait"))
     q.keys("c", "l", "o", "c", "k", "ret", settle=2)
     shots.append(q.shot("17-clock-portrait"))
+    q.keys("esc", settle=2)
+    q.keys(*"bluetooth", "ret", settle=2)          # QEMU has no Bluetooth controller: the panel says so
+    shots.append(q.shot("20-bluetooth"))
 
 
 if __name__ == "__main__":

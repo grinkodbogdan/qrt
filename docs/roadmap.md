@@ -49,7 +49,7 @@ is set up register by register over I2C.
 
 | Milestone | State |
 |---|---|
-| Find the fitted codec: its id registers over I2C2 (as Linux's rt5670.c/rt5640.c do) | **0.6.1**, result shown in System Monitor |
+| Find the fitted codec: its id registers over I2C2 (as Linux's rt5670.c/rt5640.c do) | **0.6.1**: an RT5670/RT5672 (id 0x6271) on the tablet |
 | Codec power-up, headphone and speaker paths and volume over the DesignWare I2C driver (the volume keys already drive a mock control) | next |
 | SST DSP: load the firmware into its memory, the IPC mailbox, start an SSP (I2S) port to the codec | |
 | PCM playback: a ring buffer the DSP reads by DMA, a beep from the shell, then sounds | |
@@ -64,10 +64,10 @@ the internal xHCI controller (PCI `8086:22b5`). The Broadcom ids in the DSDT
 
 | Milestone | State |
 |---|---|
-| xHCI host controller driver, enumeration of root-port devices, boot keyboards | **0.6.1** (QEMU-tested; the tablet's USB device list will show the Bluetooth device's id) |
+| xHCI host controller driver, enumeration of root-port devices, boot keyboards | **0.6.1**; on the tablet it found a hub (0424:2807) on port 1 and the Bluetooth controller (8087:0a2b) on port 4 |
 | USB hubs, mass storage (sticks) | |
-| Bluetooth over USB (HCI on the control and interrupt endpoints), Intel's firmware download (`ibt-11-5.sfi`) | |
-| HCI: inquiry (scan), the list of nearby devices in a Bluetooth panel in Settings | |
+| Bluetooth over USB (HCI on the control, interrupt and bulk endpoints), Intel's firmware download (`ibt-11-5.sfi`, `.ddc`) | **0.6.2** (tested against a simulated bootloader) |
+| HCI: inquiry and LE scan, the list of nearby devices in the Bluetooth app | **0.6.2** |
 | L2CAP, pairing (Secure Simple Pairing), HID keyboards and mice | |
 | A2DP audio (needs the audio work in section 3 and an SBC encoder) | |
 

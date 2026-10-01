@@ -10,16 +10,21 @@
  * routing, scratchpad buffers and context sizes.
  *
  * Polled, like QRT's other drivers: one command ring, one event ring
- * (interrupter 0, interrupts off), read each frame from the input path.
+ * (interrupter 0, interrupts off), read each frame from the input path and
+ * by any driver waiting for a transfer.  All users run on the boot core, so
+ * turning interrupts off around ring and event-ring work is the lock.
  * Devices on root ports are addressed, their descriptors read and listed;
- * boot-protocol HID keyboards are configured and turned into key events.
- * Hubs (devices behind them) come later.
+ * class drivers open endpoints through usb.h: boot-protocol HID keyboards
+ * (here) and Bluetooth (src/drivers/bt).  Hubs come later.
  */
 #include "../../kernel/kernel.h"
 #include "xhci.h"
+#include "usb.h"
+#include "../bt/bt.h"
 
 #if defined(__x86_64__)
 #include "../../arch/x64/mm.h"
+#include "../../arch/x64/sched.h"
 
 typedef struct { volatile u64 ptr; volatile u32 status, flags; } trb_t;
 typedef struct { trb_t *trb; u32 n, idx, cycle; } ring_t;
@@ -82,7 +87,21 @@ typedef struct { trb_t *trb; u32 n, idx, cycle; } ring_t;
 #define MAX_DEV     16
 #define RING_N      256
 
+#define MAX_EP 8
+#define IN_BUF 4096
+
 typedef struct {
+    int open, dci, in, type, mps;          /* type: 2 bulk, 3 interrupt (USB attributes) */
+    ring_t ring;
+    u8 *buf;                               /* IN: receive buffer; OUT: bounce buffer */
+    usb_in_cb cb;
+    void *arg;
+    volatile int done, cc, residue;
+} uep_t;
+
+typedef struct { u8 addr, attr, iface; u16 mps; u8 ival; } epdesc_t;
+
+struct udev {
     int used, slot, port, speed;
     u8 *out, *in;                          /* device context, input context */
     ring_t ep0;
@@ -90,13 +109,14 @@ typedef struct {
     u16 vid, pid, mps0;
     u8 dclass, iclass, isub, iproto;
     char what[48];
-    /* boot keyboard */
-    int kbd, kdci;
-    ring_t kring;
-    u8 *kbuf;
+    int max_dci;
+    uep_t ep[MAX_EP];
+    epdesc_t eps[16];
+    int neps;
+    int kbd;                               /* boot keyboard */
     u8 prev[8];
     volatile int ctl_done, ctl_cc;
-} udev_t;
+};
 
 static struct {
     pci_dev_t *pci;
@@ -114,9 +134,15 @@ static struct {
     char status[96];
     int active;
     u32 port_change;
-    /* key repeat */
+    /* keys from keyboards, collected in the event loop */
+    event_t keys[32];
+    int nkeys;
     u16 rep_scan; c16 rep_ch; u64 rep_next; int rep_on;
 } x;
+
+/* the lock: everything runs on the boot core */
+#define LOCK()   u64 lock_fl_ = irq_save()
+#define UNLOCK() irq_restore(lock_fl_)
 
 static u32 rd(volatile u8 *b, u32 r) { return *(volatile u32 *)(b + r); }
 static void wr(volatile u8 *b, u32 r, u32 v) { *(volatile u32 *)(b + r) = v; }
@@ -170,11 +196,19 @@ static udev_t *dev_by_slot(u32 slot) {
     return NULL;
 }
 
-static void kbd_report(udev_t *d, event_t *out, int *n, int max);
-static void kbd_queue(udev_t *d);
+static void ep_queue(udev_t *d, uep_t *e) {
+    ring_push(&e->ring, phys(e->buf), e->type == 3 ? (u32)e->mps : IN_BUF, TRB_TYPE(T_NORMAL) | TRB_IOC | TRB_ISP);
+    x.db[d->slot] = (u32)e->dci;
+}
 
-static int events(event_t *out, int max) {
-    int n = 0, any = 0;
+static uep_t *ep_by_dci(udev_t *d, u32 dci) {
+    for (int i = 0; i < MAX_EP; i++) if (d->ep[i].open && d->ep[i].dci == (int)dci) return &d->ep[i];
+    return NULL;
+}
+
+/* Drain the event ring.  Interrupts must be off (LOCK). */
+static void events_locked(void) {
+    int any = 0;
     for (;;) {
         trb_t *e = &x.evt[x.evt_idx];
         u32 fl = e->flags;
@@ -185,11 +219,14 @@ static int events(event_t *out, int max) {
         } else if (type == E_TRANSFER) {
             udev_t *d = dev_by_slot(slot);
             u32 dci = (fl >> 16) & 31;
+            uep_t *ep = d ? ep_by_dci(d, dci) : NULL;
             if (d && dci == 1) { d->ctl_cc = (int)cc; d->ctl_done = 1; }
-            else if (d && d->kbd && (int)dci == d->kdci) {
-                if (cc == CC_SUCCESS || cc == CC_SHORT) { if (out) kbd_report(d, out, &n, max); }
-                kbd_queue(d);
-            }
+            else if (ep && ep->in) {
+                int len = (ep->type == 3 ? ep->mps : IN_BUF) - (int)(e->status & 0xffffff);
+                if ((cc == CC_SUCCESS || cc == CC_SHORT) && ep->cb && len > 0) ep->cb(ep->arg, ep->buf, len);
+                if (cc == CC_SUCCESS || cc == CC_SHORT) ep_queue(d, ep);
+                else klog("usb: port %d endpoint %u stopped (cc %u)", d->port, dci, cc);
+            } else if (ep) { ep->cc = (int)cc; ep->residue = (int)(e->status & 0xffffff); ep->done = 1; }
         } else if (type == E_PORT_CHANGE) {
             u32 port = (u32)(e->ptr >> 24) & 0xff;
             if (port >= 1 && port <= 32) x.port_change |= 1u << (port - 1);
@@ -198,15 +235,34 @@ static int events(event_t *out, int max) {
         any = 1;
     }
     if (any) wr64(x.rt, 0x38, phys(&x.evt[x.evt_idx]) | 8);               /* ERDP, clear busy */
-    return n;
+}
+
+void usb_poll(void) {
+    if (!x.evt) return;
+    LOCK();
+    events_locked();
+    UNLOCK();
+}
+
+/* wait for a flag set by the event loop; other threads run meanwhile */
+static int wait_flag(volatile int *flag, u32 ms) {
+    u64 end = k_now_us() + (u64)ms * 1000;
+    while (!*flag) {
+        usb_poll();
+        if (*flag) break;
+        if (k_now_us() > end) return 0;
+        thread_yield();
+    }
+    return 1;
 }
 
 static int command(u64 ptr, u32 status, u32 flags, u32 *slot) {
+    LOCK();
     x.cmd_done = 0;
     x.cmd_trb = ring_push(&x.cmd, ptr, status, flags);
     x.db[0] = 0;
-    u64 end = k_now_us() + 500000;
-    while (!x.cmd_done) { events(NULL, 0); if (k_now_us() > end) return -1; }
+    UNLOCK();
+    if (!wait_flag(&x.cmd_done, 500)) return -1;
     if (slot) *slot = x.cmd_slot;
     return (int)x.cmd_cc;
 }
@@ -229,24 +285,93 @@ static int control(udev_t *d, u8 rtype, u8 req, u16 val, u16 idx, void *data, u1
     if (!in && len) memcpy(d->buf, data, len);
     u64 setup = rtype | (u64)req << 8 | (u64)val << 16 | (u64)idx << 32 | (u64)len << 48;
     u32 trt = len ? (in ? 3u : 2u) << 16 : 0;
+    LOCK();
     ring_push(&d->ep0, setup, 8, TRB_TYPE(T_SETUP) | TRB_IDT | trt);
     if (len) ring_push(&d->ep0, phys(d->buf), len, TRB_TYPE(T_DATA) | (in ? TRB_DIR_IN : 0));
     ring_push(&d->ep0, 0, 0, TRB_TYPE(T_STATUS) | TRB_IOC | (len && in ? 0 : TRB_DIR_IN));
     d->ctl_done = 0;
     x.db[d->slot] = 1;
-    u64 end = k_now_us() + 500000;
-    while (!d->ctl_done) { events(NULL, 0); if (k_now_us() > end) return -1; }
+    UNLOCK();
+    if (!wait_flag(&d->ctl_done, 1000)) return -1;
     if (d->ctl_cc != CC_SUCCESS && d->ctl_cc != CC_SHORT) return -d->ctl_cc;
     if (in && len) memcpy(data, d->buf, len);
     return 0;
 }
 
-/* ---- keyboards (HID boot protocol) ------------------------------------------------------------- */
-static void kbd_queue(udev_t *d) {
-    ring_push(&d->kring, phys(d->kbuf), 8, TRB_TYPE(T_NORMAL) | TRB_IOC | TRB_ISP);
-    x.db[d->slot] = (u32)d->kdci;
+int usb_control(udev_t *d, u8 rtype, u8 req, u16 val, u16 idx, void *data, u16 len) {
+    return d && d->used ? control(d, rtype, req, val, idx, data, len) : -1;
 }
 
+/* ---- endpoints ------------------------------------------------------------------------------------ */
+static int ep_open(udev_t *d, u8 addr, usb_in_cb cb, void *arg) {
+    epdesc_t *de = NULL;
+    for (int i = 0; i < d->neps; i++) if (d->eps[i].addr == addr) de = &d->eps[i];
+    if (!de || (de->attr & 3) == 0 || (de->attr & 3) == 1) return -1;      /* bulk or interrupt only */
+    uep_t *e = NULL;
+    for (int i = 0; i < MAX_EP; i++) if (!d->ep[i].open) { e = &d->ep[i]; break; }
+    if (!e) return -1;
+    ring_t keep = e->ring;
+    u8 *buf = e->buf;
+    memset(e, 0, sizeof *e);
+    e->ring = keep;
+    e->buf = buf ? buf : hal_dma_alloc(IN_BUF);
+    if (!e->buf || !ring_reset(&e->ring)) return -1;
+    e->in = (addr & 0x80) != 0;
+    e->type = de->attr & 3;
+    e->mps = de->mps & 0x7ff;
+    e->dci = (addr & 15) * 2 + (e->in ? 1 : 0);
+    e->cb = cb;
+    e->arg = arg;
+    int ival = 0;
+    if (e->type == 3) {
+        if (d->speed == SPEED_HIGH || d->speed == SPEED_SUPER) ival = MAX(de->ival, 1) - 1;
+        else { ival = 3; while ((1 << ival) < de->ival * 8 && ival < 10) ival++; }   /* frames -> 2^n * 125 us */
+    }
+    int xtype = e->type == 2 ? (e->in ? 6 : 2) : (e->in ? 7 : 3);           /* xHCI endpoint types */
+    if (e->dci > d->max_dci) d->max_dci = e->dci;
+    memset(d->in, 0, 4096);
+    ictx(d, 0)[1] = 1u | (1u << e->dci);
+    ictx(d, 1)[0] = ((u32)d->speed << 20) | ((u32)d->max_dci << 27);
+    ictx(d, 1)[1] = (u32)d->port << 16;
+    ep_ctx(ictx(d, 1 + e->dci), xtype, e->mps, ival, phys(e->ring.trb), e->type == 3 ? e->mps : 1024);
+    int cc = command(phys(d->in), 0, TRB_TYPE(T_CONFIG_EP) | ((u32)d->slot << 24), NULL);
+    if (cc != CC_SUCCESS) { klog("usb: port %d: endpoint %02x not configured (cc %d)", d->port, addr, cc); return -1; }
+    LOCK();
+    e->open = 1;
+    if (e->in) ep_queue(d, e);
+    UNLOCK();
+    return 0;
+}
+
+int usb_open_in(udev_t *d, u8 addr, usb_in_cb cb, void *arg) { return d && (addr & 0x80) ? ep_open(d, addr, cb, arg) : -1; }
+int usb_open_out(udev_t *d, u8 addr) { return d && !(addr & 0x80) ? ep_open(d, addr, NULL, NULL) : -1; }
+
+int usb_bulk_out(udev_t *d, u8 addr, const void *data, int len) {
+    uep_t *e = NULL;
+    for (int i = 0; i < MAX_EP; i++) if (d->ep[i].open && d->ep[i].dci == (addr & 15) * 2) e = &d->ep[i];
+    if (!e || len > IN_BUF) return -1;
+    memcpy(e->buf, data, (usize)len);
+    LOCK();
+    e->done = 0;
+    ring_push(&e->ring, phys(e->buf), (u32)len, TRB_TYPE(T_NORMAL) | TRB_IOC);
+    x.db[d->slot] = (u32)e->dci;
+    UNLOCK();
+    if (!wait_flag(&e->done, 1000)) return -1;
+    return e->cc == CC_SUCCESS ? 0 : -e->cc;
+}
+
+int usb_find_ep(udev_t *d, int iface, int type, int in) {
+    for (int i = 0; i < d->neps; i++)
+        if (d->eps[i].iface == iface && (d->eps[i].attr & 3) == type && ((d->eps[i].addr & 0x80) != 0) == (in != 0)) return d->eps[i].addr;
+    return 0;
+}
+
+u16 usb_vid(udev_t *d) { return d->vid; }
+u16 usb_pid(udev_t *d) { return d->pid; }
+const char *usb_name(udev_t *d) { return d->what; }
+void usb_set_name(udev_t *d, const char *name) { strlcpy(d->what, name, sizeof d->what); }
+
+/* ---- keyboards (HID boot protocol) ------------------------------------------------------------- */
 static void key_of(u8 u, int shift, int ctrl, u16 *scan, c16 *ch) {
     static const char lo[] = "abcdefghijklmnopqrstuvwxyz1234567890";
     static const char hi[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()";
@@ -272,8 +397,10 @@ static void key_of(u8 u, int shift, int ctrl, u16 *scan, c16 *ch) {
     }
 }
 
-static void kbd_report(udev_t *d, event_t *out, int *n, int max) {
-    const u8 *r = d->kbuf;
+/* interrupt-IN callback: a boot report (modifiers, reserved, six keys) */
+static void kbd_report(void *arg, const u8 *r, int len) {
+    udev_t *d = arg;
+    if (len < 8) return;
     int shift = (r[0] & 0x22) != 0, ctrl = (r[0] & 0x11) != 0;
     int pressed_any = 0;
     for (int i = 2; i < 8; i++) {
@@ -285,8 +412,8 @@ static void kbd_report(udev_t *d, event_t *out, int *n, int max) {
         if (was) continue;
         u16 sc; c16 ch;
         key_of(u, shift, ctrl, &sc, &ch);
-        if ((sc || ch) && *n < max) {
-            out[(*n)++] = (event_t){ .type = EV_KEY, .scan = sc, .ch = ch };
+        if ((sc || ch) && x.nkeys < (int)ARRAY_LEN(x.keys)) {
+            x.keys[x.nkeys++] = (event_t){ .type = EV_KEY, .scan = sc, .ch = ch };
             x.rep_scan = sc; x.rep_ch = ch; x.rep_on = 1; x.rep_next = k_now_ms() + 500;
         }
     }
@@ -333,17 +460,15 @@ static void attach(int p) {
     port_reset(p);
     u32 v = rd(x.op, PORTSC(p));
     if (!(v & PS_CCS) || !(v & PS_PED)) { klog("usb: port %d did not enable (%08x)", p + 1, v); return; }
-    /* keep a slot's DMA pages across re-attaches */
-    u8 *out = d->out, *in = d->in, *buf = d->buf, *kbuf = d->kbuf;
-    ring_t ep0 = d->ep0, kr = d->kring;
+    /* keep a slot's DMA pages and rings across re-attaches */
+    udev_t keep = *d;
     memset(d, 0, sizeof *d);
-    d->out = out ? out : hal_dma_alloc(4096);
-    d->in = in ? in : hal_dma_alloc(4096);
-    d->buf = buf ? buf : hal_dma_alloc(4096);
-    d->kbuf = kbuf ? kbuf : hal_dma_alloc(64);
-    d->ep0 = ep0;
-    d->kring = kr;
-    if (!d->out || !d->in || !d->buf || !d->kbuf || !ring_reset(&d->ep0)) return;
+    d->out = keep.out ? keep.out : hal_dma_alloc(4096);
+    d->in = keep.in ? keep.in : hal_dma_alloc(4096);
+    d->buf = keep.buf ? keep.buf : hal_dma_alloc(4096);
+    d->ep0 = keep.ep0;
+    for (int i = 0; i < MAX_EP; i++) { d->ep[i].ring = keep.ep[i].ring; d->ep[i].buf = keep.ep[i].buf; }
+    if (!d->out || !d->in || !d->buf || !ring_reset(&d->ep0)) return;
     memset(d->out, 0, 4096);
     d->port = p + 1;
     d->speed = PS_SPEED(v);
@@ -381,14 +506,15 @@ static void attach(int p) {
     if (control(d, 0x80, 6, 0x0200, 0, cfg, 9)) { free_dev(d); return; }
     u16 total = (u16)MIN(cfg[2] | cfg[3] << 8, (int)sizeof cfg);
     if (control(d, 0x80, 6, 0x0200, 0, cfg, total)) { free_dev(d); return; }
-    int kbd_if = -1, kbd_ep = 0, kbd_mps = 8, kbd_ival = 10, cur_if = -1, cur_cls = 0, cur_sub = 0, cur_proto = 0;
+    int kbd_if = -1, kbd_ep = 0, cur_if = -1, cur_alt = 0, cur_cls = 0, cur_sub = 0, cur_proto = 0;
     for (int o = 0; o + 2 <= total && cfg[o] >= 2; o += cfg[o]) {
         if (cfg[o + 1] == 4 && o + 9 <= total) {                       /* interface */
-            cur_if = cfg[o + 2]; cur_cls = cfg[o + 5]; cur_sub = cfg[o + 6]; cur_proto = cfg[o + 7];
+            cur_if = cfg[o + 2]; cur_alt = cfg[o + 3]; cur_cls = cfg[o + 5]; cur_sub = cfg[o + 6]; cur_proto = cfg[o + 7];
             if (!d->iclass) { d->iclass = (u8)cur_cls; d->isub = (u8)cur_sub; d->iproto = (u8)cur_proto; }
-        } else if (cfg[o + 1] == 5 && o + 7 <= total) {                /* endpoint */
+        } else if (cfg[o + 1] == 5 && o + 7 <= total && cur_alt == 0 && d->neps < (int)ARRAY_LEN(d->eps)) {   /* endpoint */
+            d->eps[d->neps++] = (epdesc_t){ cfg[o + 2], cfg[o + 3], (u8)cur_if, (u16)(cfg[o + 4] | cfg[o + 5] << 8), cfg[o + 6] };
             if (cur_cls == 3 && cur_sub == 1 && cur_proto == 1 && kbd_if < 0 && (cfg[o + 2] & 0x80) && (cfg[o + 3] & 3) == 3) {
-                kbd_if = cur_if; kbd_ep = cfg[o + 2] & 15; kbd_mps = (cfg[o + 4] | cfg[o + 5] << 8) & 0x7ff; kbd_ival = cfg[o + 6];
+                kbd_if = cur_if; kbd_ep = cfg[o + 2];
             }
         }
     }
@@ -398,30 +524,19 @@ static void attach(int p) {
     else if (!nm && d->iclass == 3 && d->iproto == 2) nm = "USB mouse";
     fmt(d->what, sizeof d->what, "%s", nm ? nm : class_name(d->iclass ? d->iclass : d->dclass));
     control(d, 0x00, 9, cfg[5], 0, NULL, 0);                           /* SET_CONFIGURATION */
-    klog("usb: port %d: %04x:%04x %s, %s speed, class %02x/%02x", d->port, d->vid, d->pid, d->what,
+    klog("usb: port %d: %04x:%04x %s, %s speed, class %02x/%02x, %d endpoints", d->port, d->vid, d->pid, d->what,
          d->speed == SPEED_SUPER ? "super" : d->speed == SPEED_HIGH ? "high" : d->speed == SPEED_LOW ? "low" : "full",
-         d->dclass, d->iclass);
-    if (kbd_if < 0) return;
+         d->dclass, d->iclass, d->neps);
 
-    /* boot keyboard: boot protocol, no idle reports, one interrupt-IN endpoint */
-    control(d, 0x21, 0x0b, 0, (u16)kbd_if, NULL, 0);                   /* SET_PROTOCOL boot */
-    control(d, 0x21, 0x0a, 0, (u16)kbd_if, NULL, 0);                   /* SET_IDLE 0 */
-    if (!ring_reset(&d->kring)) return;
-    d->kdci = kbd_ep * 2 + 1;
-    int ival;
-    if (d->speed == SPEED_HIGH || d->speed == SPEED_SUPER) ival = MAX(kbd_ival, 1) - 1;
-    else { ival = 3; while ((1 << ival) < kbd_ival * 8 && ival < 10) ival++; }   /* frames -> 2^n * 125 us */
-    memset(d->in, 0, 4096);
-    ictx(d, 0)[1] = 1u | (1u << d->kdci);
-    ictx(d, 1)[0] = ((u32)d->speed << 20) | ((u32)d->kdci << 27);
-    ictx(d, 1)[1] = (u32)d->port << 16;
-    ep_ctx(ictx(d, 1 + d->kdci), 7, kbd_mps, ival, phys(d->kring.trb), kbd_mps);
-    int c2 = command(phys(d->in), 0, TRB_TYPE(T_CONFIG_EP) | ((u32)d->slot << 24), NULL);
-    if (c2 != CC_SUCCESS) { klog("usb: keyboard endpoint not configured (cc %d)", c2); return; }
-    d->kbd = 1;
-    memset(d->prev, 0, sizeof d->prev);
-    kbd_queue(d);
-    klog("usb: port %d: keyboard ready (endpoint %d, interval %d)", d->port, kbd_ep, ival);
+    if (kbd_if >= 0) {                                                 /* boot keyboard */
+        control(d, 0x21, 0x0b, 0, (u16)kbd_if, NULL, 0);               /* SET_PROTOCOL boot */
+        control(d, 0x21, 0x0a, 0, (u16)kbd_if, NULL, 0);               /* SET_IDLE 0 */
+        memset(d->prev, 0, sizeof d->prev);
+        if (!ep_open(d, (u8)kbd_ep, kbd_report, d)) { d->kbd = 1; klog("usb: port %d: keyboard ready", d->port); }
+        return;
+    }
+    /* Bluetooth: the wireless-controller class (e0/01/01), as Linux's btusb matches it */
+    if (d->dclass == 0xe0 || (d->iclass == 0xe0 && d->isub == 1 && d->iproto == 1)) bt_usb_attach(d);
 }
 
 static void scan_ports(void) {
@@ -522,7 +637,12 @@ int xhci_probe(pci_dev_t *pd) {
 
 int xhci_poll(event_t *out, int max) {
     if (!x.active) return 0;
-    int n = events(out, max);
+    LOCK();
+    events_locked();
+    int n = 0;
+    while (n < max && n < x.nkeys) { out[n] = x.keys[n]; n++; }
+    x.nkeys = 0;
+    UNLOCK();
     if (x.port_change) {
         x.port_change = 0;
         scan_ports();
