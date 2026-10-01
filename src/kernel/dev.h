@@ -46,7 +46,7 @@ struct device {
     void *priv;
 };
 
-#define DEV_MAX 96
+#define DEV_MAX 256              /* the Venue lists 27 PCI devices and ~90 ACPI ids */
 extern device_t devs[DEV_MAX];
 extern int n_devs;
 

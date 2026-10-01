@@ -329,7 +329,7 @@ FreeBSD's.
 | GPU | Intel Gen8 3D engine copies and turns each frame: **works** (0.5.8, coherent mode); it tests itself at boot and falls back to the CPU |
 | Touch | works: QRT's own Wacom driver; tested on the tablet in firmware mode. Native mode needs the same driver after the handover, which is **new in 0.5 and untested on hardware**. |
 | Storage | the boot stick is read into RAM at boot; writes go to RAM only |
-| Buttons | power, volume and Windows through GPIO (input bit and edge latch) and the ACPI fixed power button, both kernel modes. Pins confirmed on the tablet with the Button test's pad scanner: SW/5f Windows, SW/5d volume up, N/08 volume down (power: PMU_PWRBTN_B, left in its native function for the ACPI power button). Up to 0.5.9 the driver never started on the tablet: the ACPI device list did not bind it (the Button test said "not started"). **0.5.9.1** starts it from the input path instead and no longer reads the shared interrupt-status line for these pads; **untested on the tablet.** |
+| Buttons | power, volume and Windows through GPIO (input bit and edge latch) and the ACPI fixed power button, both kernel modes. Pins confirmed on the tablet with the Button test's pad scanner: SW/5f Windows, SW/5d volume up, N/08 volume down (power: PMU_PWRBTN_B, left in its native function for the ACPI power button). Up to 0.5.9 the driver never started on the tablet: the ACPI device list did not bind it (the Button test said "not started"). 0.5.9.1 starts it from the input path: **works** (volume, Windows); 0.5.9.2 also raises the device table limit that dropped the button devices. |
 | Wi-Fi | Intel 8260 driver, WPA2-Personal: **works** (scanning, connecting, DHCP) |
 | Backlight | LPSS PWM #1, native mode: brightness and sleep (**new in 0.5.5.3, untested on hardware**). QRT only takes control if the firmware left that PWM running. |
 | Sleep | backlight off and a slower frame loop; not ACPI suspend |
@@ -413,7 +413,9 @@ Intel GPU). It has since been confirmed working on the 5855:
 - Every GPU job has a 100 ms limit. If one runs over, the GPU is reset and
   switched off for the rest of the session.
 - If a start ever hangs the tablet, the next boot notices (a flag in NVRAM
-  that is only cleared after 300 good frames) and leaves the GPU off.
+  that is cleared after 20 good frames) and leaves the GPU off for that one
+  boot. (Up to 0.5.9.1 the flag needed 300 frames and then switched the GPU
+  off for good, so a short session could turn it off by mistake.)
 - **Settings → Startup → Graphics acceleration** turns it on or off.
 
 **System Monitor → Hardware → Graphics** shows its state and how long the
@@ -435,9 +437,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.5.9.1.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.5.9.2.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.5.9.1.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.5.9.2.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

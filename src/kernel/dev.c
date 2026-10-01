@@ -67,7 +67,7 @@ static int list_matches(const char *const *ids, const char *name) {
 }
 
 static device_t *add(bus_kind_t bus, const char *name, const char *what) {
-    if (n_devs >= DEV_MAX) return NULL;
+    if (n_devs >= DEV_MAX) { klog("dev: device table full, %s dropped", name); return NULL; }
     device_t *d = &devs[n_devs++];
     memset(d, 0, sizeof *d);
     d->bus = bus;

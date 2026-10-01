@@ -161,7 +161,7 @@ static void draw(canvas_t *c, rect_t a) {
     if (sizeof(void *) == 8) {
         int fw = st.fw_mode;                     /* draw() may run on any core: no firmware calls here */
         group(c, L.g_start, L.y_start, "Startup", 2);
-        row_label(c, L.g_start, 0, "Kernel mode", "Applies after a restart");
+        row_label(c, L.g_start, 0, "Kernel mode", k.boot_note[0] ? k.boot_note : "Applies after a restart");
         segment(c, L.kern[0], "Native", !fw, 1, 0);
         segment(c, L.kern[1], "Firmware", fw, 0, 1);
         row_label(c, L.g_start, 1, "Graphics acceleration", gpu_status());

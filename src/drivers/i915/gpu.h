@@ -4,6 +4,7 @@
 #include "../pci.h"
 
 int  gpu_probe(pci_dev_t *d);      /* boot: set up the render engine and self-test; 1 = in use */
+void gpu_autostart(void);          /* shell start: probe it if the device list did not */
 int  gpu_active(void);             /* present through the GPU */
 int  gpu_supported(void);          /* this is a GPU the driver knows */
 const char *gpu_status(void);      /* one line for Settings / the device list */

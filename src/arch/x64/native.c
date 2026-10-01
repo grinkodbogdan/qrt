@@ -173,6 +173,7 @@ static void native_main(void *arg) {
         hal_reboot();
     }
     klog("native: %s", nt.status[0] ? nt.status : "touch not present");
+    strlcpy(k.boot_note, "Native kernel", sizeof k.boot_note);
     irq_init();                            /* I/O APICs from the MADT, every line masked */
     dev_init();                            /* enumerate PCI/ACPI/platform devices, bind drivers */
     shell_main();

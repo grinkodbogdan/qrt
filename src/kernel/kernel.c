@@ -122,15 +122,25 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
  * any key or hardware button at boot, or a failed native boot last time
  * (QrtBootMode = 2, cleared once honoured).
  */
+static int fw_because(const char *why) {
+    fmt(k.boot_note, sizeof k.boot_note, "Firmware mode: %s", why);
+    klog("boot: %s - firmware mode", why);
+    return 0;
+}
+
 static int native_wanted(void) {
     u32 mode = hal_setting_get(u"QrtBootMode", 0);
-    if (mode == 2) { hal_setting_set(u"QrtBootMode", 0); klog("boot: last native boot failed - firmware mode"); return 0; }
-    if (mode == 1) { klog("boot: firmware mode selected in settings"); return 0; }
+    if (mode == 2) { hal_setting_set(u"QrtBootMode", 0); return fw_because("the last native boot failed (once)"); }
+    if (mode == 1) return fw_because("selected in Settings");
+    /* a key held at boot asks for firmware mode; keystrokes the firmware still
+     * had queued (boot menu, a button pressed while starting) do not count */
     EFI_INPUT_KEY key;
-    if (!EFI_ERROR(k.st->ConIn->ReadKeyStroke(k.st->ConIn, &key))) { klog("boot: key held - firmware mode"); return 0; }
+    while (!EFI_ERROR(k.st->ConIn->ReadKeyStroke(k.st->ConIn, &key))) {}
+    k.bs->Stall(150000);
+    if (!EFI_ERROR(k.st->ConIn->ReadKeyStroke(k.st->ConIn, &key))) return fw_because("a key was held at boot");
     ntouch_probe();
-    if (!native_prepare()) return 0;
-    if (nt.primary < 0 && !uart_present()) { klog("boot: no native input device - firmware mode"); return 0; }
+    if (!native_prepare()) return fw_because("the native kernel could not be prepared");
+    if (nt.primary < 0 && !uart_present()) return fw_because("no touchscreen found for the native kernel");
     return 1;
 }
 #endif

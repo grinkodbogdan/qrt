@@ -1713,6 +1713,7 @@ void shell_main(void) {
     sh.volume = sh.volume_saved = CLAMP((int)hal_setting_get(u"QrtVolume", 50), 0, 100);
     sh.launch_pressed = sh.dock_pressed = -1;
     k.graphics_up = 1;
+    gpu_autostart();
     if (!k.native) k.st->ConOut->EnableCursor(k.st->ConOut, 0);
     relayout();
 

@@ -30,6 +30,8 @@ u32 pci_read32(u8 b, u8 d, u8 f, u16 o) { return 0; }
 void pci_write32(u8 b, u8 d, u8 f, u16 o, u32 v) { }
 u16 pci_read16(u8 b, u8 d, u8 f, u16 o) { return 0; }
 u64 pci_bar(u8 b, u8 d, u8 f, int bar) { return 0; }
+pci_dev_t pci_devs[PCI_MAX_DEVS];
+int pci_ndevs;
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL: "); printf(__VA_ARGS__); printf("\n"); } } while (0)

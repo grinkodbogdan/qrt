@@ -587,15 +587,14 @@ int gpu_probe(pci_dev_t *d) {
     if (!k.native || d->vendor != 0x8086 || (d->device & 0xfffc) != 0x22b0) return 0;
     g.pci = d;
     if (hal_setting_get(u"QrtGpuGuard", 0)) {
-        /* the last start never came back: leave the GPU alone this time */
+        /* the last start never came back: leave the GPU alone for this boot only */
         hal_setting_set(u"QrtGpuGuard", 0);
-        hal_setting_set(u"QrtGpu", 1);
         g.state = G_OFF;
-        strlcpy(g.status, "Off: the last start did not finish", sizeof g.status);
+        strlcpy(g.status, "Off for this boot: the last start did not finish (on again next boot)", sizeof g.status);
         klog("gpu: %s", g.status);
         return 0;
     }
-    if (hal_setting_get(u"QrtGpu", 0) == 1) {
+    if (hal_setting_get(u"QrtGpuMode", 0) == 1) {
         g.state = G_OFF;
         strlcpy(g.status, "Off (CPU drawing)", sizeof g.status);
         return 0;
@@ -619,12 +618,29 @@ int gpu_probe(pci_dev_t *d) {
 
 int gpu_supported(void) { return g.pci != NULL; }
 int gpu_active(void) { return g.state == G_READY; }
-int gpu_enabled(void) { return g.pci && hal_setting_get(u"QrtGpu", 0) != 1; }
-const char *gpu_status(void) { return g.pci ? g.status : "No supported GPU (CPU drawing)"; }
+int gpu_enabled(void) { return g.pci && hal_setting_get(u"QrtGpuMode", 0) != 1; }
+const char *gpu_status(void) {
+    if (g.pci) return g.status;
+    if (!k.native) return "Off: needs the native kernel (this boot is in firmware mode)";
+    static char b[80];
+    fmt(b, sizeof b, "No supported GPU among %d PCI devices (CPU drawing)", pci_ndevs);
+    return b;
+}
+
+/* Start the GPU even if the device list did not hand it to the driver. */
+void gpu_autostart(void) {
+    if (!k.native || g.pci) return;
+    for (int i = 0; i < pci_ndevs; i++)
+        if (pci_devs[i].vendor == 0x8086 && (pci_devs[i].device & 0xfffc) == 0x22b0) {
+            klog("gpu: not bound by the device list - starting it from the shell");
+            gpu_probe(&pci_devs[i]);
+            return;
+        }
+}
 
 void gpu_set_enabled(int on) {
     if (!g.pci) return;
-    hal_setting_set(u"QrtGpu", on ? 0 : 1);
+    hal_setting_set(u"QrtGpuMode", on ? 0 : 1);
     if (!on) {
         if (g.state == G_READY) g.state = G_OFF;
         strlcpy(g.status, "Off (CPU drawing)", sizeof g.status);
@@ -679,7 +695,7 @@ int gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int 
     if (!draw(src_gtt, sw, sh, stride * 4, g.fb_off, fw, fh, (int)k.fb_stride * 4,
               k.fb_rgb ? I965_SURFACEFORMAT_R8G8B8A8_UNORM : I965_SURFACEFORMAT_B8G8R8A8_UNORM, rot, &r, 1, "a frame"))
         return 0;
-    if (++g.frames == 300 && g.guard) {                /* it works: disarm the crash guard */
+    if (++g.frames == 20 && g.guard) {                 /* it works: disarm the crash guard */
         hal_setting_set(u"QrtGpuGuard", 0);
         g.guard = 0;
     }
@@ -687,6 +703,7 @@ int gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int 
 }
 
 #else   /* 32-bit builds run on the firmware only */
+void gpu_autostart(void) {}
 int gpu_probe(pci_dev_t *d) { (void)d; return 0; }
 int gpu_supported(void) { return 0; }
 int gpu_active(void) { return 0; }

@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.5.9.1"
+#define QRT_VERSION "0.5.9.2"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8
@@ -75,6 +75,7 @@ typedef struct {
     u32 dsdt_len;
     u64 ram_bytes;
     int is_venue;
+    char boot_note[80];               /* which kernel mode this boot runs in, and why */
     int handles, drivers_connected;
 
     /* clock */
