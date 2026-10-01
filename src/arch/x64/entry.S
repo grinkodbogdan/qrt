@@ -77,6 +77,31 @@ enter_user:
     swapgs
     iretq
 
+/* void enter_user_frame(frame_t *f) - start a cloned thread in ring 3 from a
+ * copy of its parent's system-call frame (on this thread's kernel stack) */
+    .globl enter_user_frame
+enter_user_frame:
+    cli
+    movq %rcx, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    addq $16, %rsp
+    swapgs
+    iretq
+
 /*
  * SYSCALL lands here: RCX = user RIP, R11 = user RFLAGS, interrupts off
  * (SFMASK).  Build the same frame an interrupt would (so frame_t works for

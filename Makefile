@@ -74,7 +74,29 @@ build/BOOTX64.EFI: $(X64_OBJ)
 
 # Linux programs shipped in /bin (run by the native kernel's Linux layer)
 BUSYBOX ?= /bin/busybox
-ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox
+ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
+          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/lib64/ld-linux-x86-64.so.2
+
+# Dynamically linked programs and the host's glibc / libstdc++ they run with
+# (ld.so in /lib64, the libraries in /lib/x86_64-linux-gnu, as on Debian/Ubuntu)
+GLIBC_LIBS := libc.so.6 libm.so.6 libstdc++.so.6 libgcc_s.so.1
+build/rootfs/lib64/ld-linux-x86-64.so.2: tools/LIBS.txt
+	@mkdir -p build/rootfs/lib64 build/rootfs/lib/x86_64-linux-gnu
+	cp -L /lib64/ld-linux-x86-64.so.2 $@
+	for l in $(GLIBC_LIBS); do cp -L /lib/x86_64-linux-gnu/$$l build/rootfs/lib/x86_64-linux-gnu/; done
+	cp tools/LIBS.txt build/rootfs/lib/x86_64-linux-gnu/README.txt
+
+build/rootfs/bin/dynhello: tests/linux/dynhello.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -s -o $@ $<
+
+build/rootfs/bin/threads: tests/linux/threads.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -s -o $@ $< -lpthread
+
+build/rootfs/bin/cxx: tests/linux/cxx.cpp
+	@mkdir -p $(dir $@)
+	g++ -O2 -s -o $@ $<
 
 build/rootfs/bin/hello: tests/linux/hello.c
 	@mkdir -p $(dir $@)

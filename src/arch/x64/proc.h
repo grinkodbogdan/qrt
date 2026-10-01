@@ -1,4 +1,4 @@
-/* proc.h - user processes: Linux x86-64 static binaries in ring 3. */
+/* proc.h - user processes: Linux x86-64 programs in ring 3 (static or with ld.so, threads). */
 #pragma once
 #include "sched.h"
 #include "../../kernel/vfs.h"
@@ -23,7 +23,7 @@ typedef struct {
 } ufile_t;
 
 #define MAX_FDS  32
-#define MAX_VMAS 64
+#define MAX_VMAS 512
 
 typedef struct { u64 start, end; } vma_t;
 
@@ -34,7 +34,10 @@ typedef struct proc {
     u64 cr3;
     thread_t *th;
     term_t *term;
-    u64 entry, sp;
+    u64 entry, sp;                /* the program's entry point; initial stack */
+    u64 start;                    /* where the first thread starts: entry, or ld.so's */
+    u64 interp_base;              /* AT_BASE: where ld.so was loaded (0: static) */
+    int nthreads;                 /* live threads */
     u64 brk_start, brk;
     u64 mmap_next;
     vma_t vma[MAX_VMAS];
@@ -45,7 +48,6 @@ typedef struct proc {
     int exit_code;
     u64 syscalls;
     volatile int killed;
-    volatile int in_syscall;      /* Stop is cooperative while the program is inside the kernel */
 } proc_t;
 
 #define USER_STACK_TOP   USER_TOP
@@ -61,4 +63,9 @@ proc_t *proc_current(void);
 void    proc_exit(int code);                      /* current process; never returns */
 int     proc_user_ok(proc_t *p, u64 addr, u64 len);/* validate + fault in; 1 if accessible */
 int     proc_add_vma(proc_t *p, u64 start, u64 end);
+u64     proc_find_free(proc_t *p, u64 len);      /* a free range in the mmap window, 0 if none */
+int     proc_range_free(proc_t *p, u64 start, u64 end);
+void    proc_unmap(proc_t *p, u64 start, u64 end);  /* drop pages and VMAs in [start, end) */
+i64     proc_clone(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 ctid, u64 tls);
+void    proc_thread_exit(int code);              /* this thread only; the last one ends the process */
 void    proc_init(void);

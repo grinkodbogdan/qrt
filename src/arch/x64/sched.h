@@ -15,6 +15,9 @@ typedef struct thread {
     u64 wake_tick;
     const char *name;
     struct proc *proc;          /* NULL for kernel threads */
+    int tid;                    /* Linux thread id (user threads) */
+    u64 clear_tid;              /* CLONE_CHILD_CLEARTID / set_tid_address: zeroed and woken at exit */
+    volatile int in_sys;        /* inside a system call: may hold kernel locks */
     u64 cpu_ticks;              /* ticks spent running */
     struct thread *next;
     u8 fpu[512] __attribute__((aligned(16)));

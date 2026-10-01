@@ -162,16 +162,37 @@ On 32-bit UEFI (Venue 8 Pro 5830) QRT always runs in firmware mode.
 
 ## Linux programs
 
-Open **Terminal**. It runs static x86-64 Linux ELF programs, unmodified,
-through Tessera's Linux system-call layer (`src/arch/x64/linux.c`). The
-image includes a static **busybox**, so `ls -l /`, `cat /proc/cpuinfo`,
-`free`, `date`, `sha256sum`, `wc`, `uname -a`, and anything else busybox
-provides work. `/bin` also holds two test programs, one linked against glibc
-(`hello`) and one against musl (`hello-musl`). They check stdio, `malloc`,
-files, directory listing, `/proc` and thread-local storage.
+Open **Terminal**. It runs x86-64 Linux ELF programs, unmodified, through
+Tessera's Linux system-call layer (`src/arch/x64/linux.c`, `proc.c`), the way
+WSL1 or FreeBSD's Linuxulator do: this is the Linux ABI, not the Linux
+kernel.
 
-To add your own program, compile it with `gcc -static` (or `musl-gcc
--static`) and copy it into `\bin` on the stick.
+Since 0.6.0 that includes **dynamically linked programs**. A program that
+names a loader (`PT_INTERP`) gets it: the kernel maps
+`/lib64/ld-linux-x86-64.so.2` next to it and starts there, and glibc's loader
+maps `libc.so.6` and the rest itself with file-backed `mmap` (`MAP_FIXED`
+included), as on any Linux system. Threads work too: `clone` for threads
+(the new thread starts from a copy of its parent's registers and gets its own
+TLS), and `futex` with `WAIT`/`WAKE`, bitsets, timeouts, `REQUEUE` and
+`WAKE_OP`, which is what glibc's mutexes, condition variables and
+`pthread_join` sleep on. The image ships glibc 2.39's loader, `libc`, `libm`,
+`libstdc++` and `libgcc_s` in `/lib/x86_64-linux-gnu`, and three test
+programs:
+- `dynhello` loads `libm` at run time with `dlopen`.
+- `threads` runs four threads through a mutex, a condition variable and
+  `pthread_join`.
+- `cxx` uses libstdc++: containers, exceptions, `std::thread`, iostreams.
+
+The QEMU test runs all three and checks that they exit with 0.
+
+The image also includes a static **busybox**, so `ls -l /`, `cat
+/proc/cpuinfo`, `free`, `date`, `sha256sum`, `wc`, `uname -a`, and anything
+else busybox provides work. `hello` (static glibc) and `hello-musl` check
+stdio, `malloc`, files, directory listing, `/proc` and TLS.
+
+To add your own program, build it on an x86-64 Linux machine (dynamically
+against glibc, or `-static`) and copy it into `\bin` on the stick, with any
+extra libraries in `\lib\x86_64-linux-gnu`.
 
 Programs can use the network. Linux `AF_INET` sockets (TCP, UDP and ICMP),
 `poll` and `select` sit on QRT's own TCP/IP stack. glibc resolves names
@@ -185,13 +206,14 @@ The Terminal also has a few built-ins:
 - `clear`
 - `help`
 
-Not supported yet:
-- `fork`/`exec`/threads (so there are no pipelines or shells)
+Not supported yet (see [docs/roadmap.md](docs/roadmap.md)):
+- `fork`/`exec` (so there are no pipelines or shells)
 - signals (busybox `ping` sends only one packet: use the built-in `ping`)
-- listening sockets
+- memory protection (`mprotect` is accepted but pages stay writable)
+- listening sockets, Unix sockets, `epoll`, `eventfd`
+- more than 1 GiB of address space per process
 - IPv6
-- dynamic linking
-- keyboard input to programs
+- keyboard input to programs, and any graphical program
 
 ## Wi-Fi and networking
 
@@ -316,7 +338,7 @@ Built in:
   the network stack can be tested.
 - **chipset**: devices the kernel handles itself
 
-[docs/drivers.md](docs/drivers.md) covers the primitives a driver gets
+[docs/roadmap.md](docs/roadmap.md) lists what comes next (Firefox, GPU drawing, audio, Bluetooth). [docs/drivers.md](docs/drivers.md) covers the primitives a driver gets
 (MMIO, DMA memory, IRQ/MSI, threads). It also lays out the plan for using
 Linux drivers: port them by hand now, then a LinuxKPI-style shim like
 FreeBSD's.
@@ -437,9 +459,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.5.9.2.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.6.0.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.5.9.2.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.6.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

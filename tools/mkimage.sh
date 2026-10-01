@@ -41,9 +41,17 @@ if [ -n "$rootfs" ] && [ -d "$rootfs/bin" ]; then
     done
 fi
 
+# shared libraries for dynamically linked programs (/lib64, /lib/x86_64-linux-gnu)
+for d in lib lib64; do
+    if [ -n "$rootfs" ] && [ -d "$rootfs/$d" ]; then
+        mcopy -s -i "$esp" "$rootfs/$d" ::/
+    fi
+done
+
 # device firmware (Wi-Fi) under \lib\firmware, with its licence
 if [ -d "$here/firmware" ]; then
-    mmd -i "$esp" ::/lib ::/lib/firmware
+    mmd -i "$esp" ::/lib 2>/dev/null || true
+    mmd -i "$esp" ::/lib/firmware
     for f in "$here"/firmware/*; do
         [ -s "$f" ] && mcopy -i "$esp" "$f" ::/lib/firmware/
     done

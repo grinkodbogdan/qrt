@@ -1,9 +1,10 @@
 /*
  * linux.c - the Linux x86-64 system call ABI on top of the Tessera kernel.
  *
- * Enough of Linux for unmodified static binaries (glibc, musl, busybox):
- * files and directories on the VFS, anonymous memory (brk/mmap), TLS
- * (arch_prctl), time, identity, and exit.  Unknown calls return -ENOSYS and
+ * Enough of Linux for unmodified binaries, static or dynamically linked
+ * (glibc's ld.so, musl, busybox, libstdc++): files and directories on the
+ * VFS, memory (brk, anonymous and file-backed mmap with MAP_FIXED, munmap),
+ * TLS (arch_prctl), threads (clone + futex), time, identity, and exit.  Unknown calls return -ENOSYS and
  * are logged once, so missing pieces are easy to find.  Like WSL1 or
  * FreeBSD's Linuxulator, this is the ABI, not the Linux kernel.
  */
@@ -12,9 +13,9 @@
 #include "../../net/crypto.h"
 #include "mm.h"
 
-enum { EPERM = 1, ENOENT = 2, EINTR = 4, EBADF = 9, ECHILD = 10, ENOMEM = 12, EFAULT = 14, EEXIST = 17,
+enum { EPERM = 1, ENOENT = 2, EINTR = 4, EBADF = 9, ECHILD = 10, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EEXIST = 17,
        ENOTDIR = 20, EISDIR = 21, EINVAL = 22, EMFILE = 24, ENOTTY = 25, ESPIPE = 29, ERANGE = 34,
-       ENOSYS = 38, ENOTEMPTY = 39 };
+       ENOSYS = 38, ENOTEMPTY = 39, ETIMEDOUT = 110 };
 
 #define O_ACCMODE 3
 #define O_CREAT   0100
@@ -253,19 +254,132 @@ static i64 do_stat_path(proc_t *p, int dirfd, u64 upath, u64 ust, int flags) {
     return 0;
 }
 
+#define MAP_FIXED           0x10
+#define MAP_ANONYMOUS       0x20
+#define MAP_FIXED_NOREPLACE 0x100000
+
 static i64 do_mmap(proc_t *p, u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u64 off) {
-    (void)prot; (void)addr;
-    if (!len) return -EINVAL;
+    (void)prot;                                            /* no page protections yet: all user pages are RW */
+    if (!len || (off & (PAGE - 1))) return -EINVAL;
     len = (len + PAGE - 1) & ~(PAGE - 1);
-    u64 va = p->mmap_next;
-    if (va + len > USER_MMAP_END) return -ENOMEM;
-    p->mmap_next += len + PAGE;                            /* guard gap */
+    int anon = (flags & MAP_ANONYMOUS) || fd < 0;
+    if (!anon && (fd >= MAX_FDS || p->fd[fd].type != F_FILE)) return -EBADF;
+    u64 va;
+    if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) {
+        if (addr & (PAGE - 1)) return -EINVAL;
+        if (addr < PAGE || addr + len > USER_STACK_TOP - USER_STACK_SIZE) return -ENOMEM;
+        va = addr;
+        if ((flags & MAP_FIXED_NOREPLACE) && !(flags & MAP_FIXED)) {
+            for (int i = 0; i < p->nvma; i++) if (va < p->vma[i].end && p->vma[i].start < va + len) return -EEXIST;
+        }
+        proc_unmap(p, va, va + len);                       /* MAP_FIXED replaces what was there */
+    } else {
+        u64 hint = addr & ~(PAGE - 1);
+        va = hint && proc_range_free(p, hint, hint + len) ? hint : proc_find_free(p, len);
+        if (!va) return -ENOMEM;
+    }
     if (proc_add_vma(p, va, va + len)) return -ENOMEM;
-    if (!(flags & 0x20) && fd >= 0 && fd < MAX_FDS && p->fd[fd].type == F_FILE) {   /* file mapping: private copy */
-        if (!UOK(va, len)) return -ENOMEM;
-        vfs_read(p->fd[fd].vn, off, (void *)(usize)va, len);
+    if (!anon) {                                           /* file mapping: a private copy */
+        vnode_t *vn = p->fd[fd].vn;
+        u64 fsz = vfs_size(vn);
+        if (off < fsz) {
+            u64 n = MIN(len, fsz - off);
+            if (!UOK(va, n)) return -ENOMEM;
+            vfs_read(vn, off, (void *)(usize)va, n);
+        }
     }
     return (i64)va;
+}
+
+/* ---- futex: the wait queue threads sleep on (pthread mutexes, condvars, join) ---------- */
+typedef struct waiter { proc_t *p; u64 addr; thread_t *t; volatile int woken; struct waiter *next; } waiter_t;
+static waiter_t *waiters;                                  /* all user threads run on the boot core */
+
+i64 futex_wake(proc_t *p, u64 uaddr, int n) {
+    int woke = 0;
+    u64 fl = irq_save();
+    for (waiter_t *w = waiters; w && woke < n; w = w->next)
+        if (w->p == p && w->addr == uaddr && !w->woken) { w->woken = 1; thread_wake(w->t); woke++; }
+    irq_restore(fl);
+    return woke;
+}
+
+static int futex_requeue(proc_t *p, u64 from, u64 to, int wake, int move) {
+    int woke = 0, moved = 0;
+    u64 fl = irq_save();
+    for (waiter_t *w = waiters; w; w = w->next) {
+        if (w->p != p || w->addr != from || w->woken) continue;
+        if (woke < wake) { w->woken = 1; thread_wake(w->t); woke++; }
+        else if (moved < move) { w->addr = to; moved++; }
+    }
+    irq_restore(fl);
+    return woke + moved;
+}
+
+/* deadline_us: 0 = forever, else k_now_us() time */
+static i64 futex_wait(proc_t *p, u64 uaddr, u32 val, u64 deadline_us) {
+    if (!UOK(uaddr, 4)) return -EFAULT;
+    waiter_t w = { p, uaddr, thread_current(), 0, NULL };
+    u64 fl = irq_save();
+    if (*(volatile u32 *)(usize)uaddr != val) { irq_restore(fl); return -EAGAIN; }
+    w.next = waiters;
+    waiters = &w;
+    i64 r = 0;
+    for (;;) {
+        if (w.woken) break;
+        if (p->killed) { r = -EINTR; break; }
+        u64 now = k_now_us(), ms = 50;
+        if (deadline_us) {
+            if (now >= deadline_us) { r = -ETIMEDOUT; break; }
+            ms = MIN(ms, (deadline_us - now + 999) / 1000);
+        }
+        thread_sleep_ms(ms);                               /* futex_wake ends the sleep early */
+    }
+    for (waiter_t **pp = &waiters; *pp; pp = &(*pp)->next) if (*pp == &w) { *pp = w.next; break; }
+    irq_restore(fl);
+    return r;
+}
+
+static i64 do_futex(proc_t *p, u64 uaddr, int op, u32 val, u64 utime, u64 uaddr2, u32 val3) {
+    int cmd = op & 0x7f, realtime = op & 256;
+    switch (cmd) {
+    case 0: case 9: {                                      /* WAIT (relative), WAIT_BITSET (absolute) */
+        u64 deadline = 0;
+        if (utime) {
+            if (!UOK(utime, 16)) return -EFAULT;
+            const i64 *ts = (const i64 *)(usize)utime;
+            u64 ns = (u64)ts[0] * 1000000000ull + (u64)ts[1];
+            if (cmd == 0) deadline = k_now_us() + ns / 1000 + 1;
+            else if (realtime) {
+                u64 rt_now = epoch_now() * 1000000000ull + (k_now_us() % 1000000) * 1000;
+                deadline = ns > rt_now ? k_now_us() + (ns - rt_now) / 1000 + 1 : k_now_us();
+            } else deadline = ns / 1000 + 1;                /* CLOCK_MONOTONIC is k_now_us based */
+            if (!deadline) deadline = 1;
+        }
+        return futex_wait(p, uaddr, val, deadline);
+    }
+    case 1: case 10: return futex_wake(p, uaddr, (int)val);           /* WAKE, WAKE_BITSET */
+    case 3: return futex_requeue(p, uaddr, uaddr2, (int)val, (int)utime);  /* REQUEUE */
+    case 4:                                                 /* CMP_REQUEUE */
+        if (!UOK(uaddr, 4)) return -EFAULT;
+        if (*(volatile u32 *)(usize)uaddr != val3) return -EAGAIN;
+        return futex_requeue(p, uaddr, uaddr2, (int)val, (int)utime);
+    case 5: {                                               /* WAKE_OP: the op on uaddr2, then wake both */
+        if (!UOK(uaddr2, 4)) return -EFAULT;
+        u32 *u2 = (u32 *)(usize)uaddr2, old = *u2;
+        u32 opk = (val3 >> 28) & 7, cmp = (val3 >> 24) & 15, oparg = (val3 >> 12) & 0xfff, cmparg = val3 & 0xfff;
+        if (val3 & (8u << 28)) oparg = 1u << oparg;
+        switch (opk) { case 0: *u2 = oparg; break; case 1: *u2 += oparg; break; case 2: *u2 |= oparg; break;
+                       case 3: *u2 &= ~oparg; break; case 4: *u2 ^= oparg; break; }
+        int c = 0;
+        switch (cmp) { case 0: c = old == cmparg; break; case 1: c = old != cmparg; break; case 2: c = (i32)old < (i32)cmparg; break;
+                       case 3: c = (i32)old <= (i32)cmparg; break; case 4: c = (i32)old > (i32)cmparg; break; case 5: c = (i32)old >= (i32)cmparg; break; }
+        i64 n = futex_wake(p, uaddr, (int)val);
+        if (c) n += futex_wake(p, uaddr2, (int)utime);
+        return n;
+    }
+    default: return -ENOSYS;                                /* PI futexes */
+    }
 }
 
 static i64 do_brk(proc_t *p, u64 want) {
@@ -300,8 +414,9 @@ void syscall_dispatch(frame_t *f) {
     proc_t *p = proc_current();
     u64 nr = f->rax, a0 = f->rdi, a1 = f->rsi, a2 = f->rdx, a3 = f->r10, a4 = f->r8, a5 = f->r9;
     i64 r = -ENOSYS;
+    thread_t *me = thread_current();
     p->syscalls++;
-    p->in_syscall = 1;
+    me->in_sys = 1;
     switch (nr) {
     case 0:  r = do_read(p, (int)a0, a1, a2); break;
     case 1:  r = do_write(p, (int)a0, a1, a2); break;
@@ -386,10 +501,11 @@ void syscall_dispatch(frame_t *f) {
     }
     case 217: r = do_getdents(p, (int)a0, a1, a2); break;
     case 9:  r = do_mmap(p, a0, a1, a2, a3, (i64)a4, a5); break;
-    case 11: {                                          /* munmap */
-        for (u64 a = a0 & ~(PAGE - 1); a < a0 + a1 && a < USER_TOP; a += PAGE) as_unmap(p->cr3, a);
+    case 11:                                            /* munmap */
+        if (a0 & (PAGE - 1)) { r = -EINVAL; break; }
+        proc_unmap(p, a0, (a0 + a1 + PAGE - 1) & ~(PAGE - 1));
         r = 0; break;
-    }
+    case 25: r = -ENOMEM; break;                        /* mremap: glibc falls back to malloc + copy */
     case 10: case 28: r = 0; break;                     /* mprotect, madvise: accepted */
     case 12: r = do_brk(p, a0); break;
     case 158:                                           /* arch_prctl */
@@ -397,7 +513,7 @@ void syscall_dispatch(frame_t *f) {
         else if (a0 == 0x1003) { if (UOK(a1, 8)) { *(u64 *)(usize)a1 = thread_current()->fs_base; r = 0; } else r = -EFAULT; }
         else r = -EINVAL;
         break;
-    case 218: r = p->pid; break;                        /* set_tid_address */
+    case 218: me->clear_tid = a0; r = me->tid; break;   /* set_tid_address */
     case 273: case 13: case 14: case 131: r = 0; break; /* robust list, signals, sigaltstack: accepted */
     case 334: r = -ENOSYS; break;                       /* rseq: glibc copes */
     case 16:                                            /* ioctl */
@@ -478,7 +594,8 @@ void syscall_dispatch(frame_t *f) {
     }
     case 63: r = do_uname(p, a0); break;
     case 39: r = p->pid; break;
-    case 186: r = p->pid; break;
+    case 186: r = me->tid; break;                       /* gettid */
+    case 200: case 234: r = 0; break;                   /* tkill, tgkill: no signals yet */
     case 110: r = 1; break;
     case 102: case 104: case 107: case 108: r = 0; break;       /* root */
     case 95: r = 022; break;                                    /* umask */
@@ -540,12 +657,16 @@ void syscall_dispatch(frame_t *f) {
         if (!UOK(a0, a1)) { r = -EFAULT; break; }
         random_bytes((u8 *)(usize)a0, (usize)a1);
         r = (i64)a1; break;
-    case 202: r = 0; break;                                     /* futex: single-threaded programs */
-    case 56: case 57: case 58: case 59: case 61: r = -ENOSYS; break;   /* clone/fork/vfork/execve/wait4 */
-    case 60: case 231: proc_exit((int)(a0 & 0xff)); break;      /* exit, exit_group */
+    case 202: r = do_futex(p, a0, (int)a1, (u32)a2, a3, a4, (u32)a5); break;
+    case 56: r = proc_clone(p, f, a0, a1, a2, a3, a4); break;   /* clone: threads */
+    case 435: r = -ENOSYS; break;                               /* clone3: glibc falls back to clone */
+    case 57: case 58: case 59: r = -ENOSYS; break;              /* fork/vfork/execve: not yet */
+    case 61: r = -ECHILD; break;                                /* wait4 */
+    case 60: me->in_sys = 0; proc_thread_exit((int)(a0 & 0xff)); break;   /* exit: this thread */
+    case 231: me->in_sys = 0; proc_exit((int)(a0 & 0xff)); break;         /* exit_group */
     default: log_unknown(nr); break;
     }
     f->rax = (u64)r;
-    p->in_syscall = 0;
-    if (p->killed) proc_exit(137);                              /* Stop pressed while we were in the kernel */
+    me->in_sys = 0;
+    if (p->killed) proc_thread_exit(137);                       /* the process is going (Stop, exit_group) */
 }

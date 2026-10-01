@@ -1,0 +1,14 @@
+Shared libraries in /lib64 and /lib/x86_64-linux-gnu
+
+These are unmodified binaries from Ubuntu 24.04 (x86-64), shipped so that
+dynamically linked Linux programs run on QRT's Linux layer:
+
+  ld-linux-x86-64.so.2, libc.so.6, libm.so.6   GNU C Library 2.39 (Ubuntu glibc 2.39-0ubuntu8)
+                                                LGPL-2.1-or-later
+  libstdc++.so.6, libgcc_s.so.1                 GCC 14 runtime libraries
+                                                GPL-3.0-or-later with the GCC Runtime Library Exception
+
+Source code: the Ubuntu source packages "glibc" and "gcc-14"
+(https://launchpad.net/ubuntu/+source/glibc, https://launchpad.net/ubuntu/+source/gcc-14),
+or upstream at https://sourceware.org/glibc/ and https://gcc.gnu.org/.
+You may replace these libraries with your own builds.

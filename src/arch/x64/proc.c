@@ -4,12 +4,20 @@
  * Every process gets its own page tables: the first GiB of the address space
  * is the process's; everything above is the kernel's identity map,
  * supervisor-only.  So a classic non-PIE binary linked at 0x400000 loads at
- * its own addresses; static-PIE binaries are placed at 256 MiB.  The stack
- * sits at the top of the first GiB and grows on demand; brk and anonymous
- * mmap regions are also populated lazily, page by page, from page faults.
+ * its own addresses; PIE binaries are placed at 256 MiB.  The stack sits at
+ * the top of the first GiB and grows on demand; brk and anonymous mmap
+ * regions are also populated lazily, page by page, from page faults.
  *
- * Processes run in ring 3 on the boot core as ordinary scheduler threads and
- * enter the kernel through SYSCALL (linux.c).
+ * A dynamically linked program names its loader (PT_INTERP, e.g.
+ * /lib64/ld-linux-x86-64.so.2): the loader is placed in the mmap window and
+ * started instead, with AT_BASE/AT_ENTRY/AT_PHDR telling it about the
+ * program, exactly as Linux does; it then maps the libraries itself.
+ *
+ * Threads (clone with CLONE_VM | CLONE_THREAD) share the page tables and
+ * get their own TLS pointer; they start from a copy of the parent's
+ * system-call frame with RAX = 0.  All threads of all processes run in ring
+ * 3 on the boot core as ordinary scheduler threads and enter the kernel
+ * through SYSCALL (linux.c).
  */
 #include "proc.h"
 #include "lsock.h"
@@ -90,6 +98,41 @@ static int in_vma(proc_t *p, u64 a) {
     return 0;
 }
 
+int proc_range_free(proc_t *p, u64 start, u64 end) {
+    if (start < USER_MMAP_BASE || end > USER_MMAP_END || end <= start) return 0;
+    for (int i = 0; i < p->nvma; i++) if (start < p->vma[i].end && p->vma[i].start < end) return 0;
+    return 1;
+}
+
+/* first fit in the mmap window, one guard page after every mapping */
+u64 proc_find_free(proc_t *p, u64 len) {
+    u64 a = USER_MMAP_BASE;
+    for (int pass = 0; pass < MAX_VMAS + 1; pass++) {
+        if (a + len > USER_MMAP_END) return 0;
+        int moved = 0;
+        for (int i = 0; i < p->nvma; i++)
+            if (a < p->vma[i].end + PAGE && p->vma[i].start < a + len + PAGE) { a = p->vma[i].end + PAGE; moved = 1; }
+        if (!moved) return a;
+    }
+    return 0;
+}
+
+/* munmap: free the pages, cut the VMAs (splitting one that spans the hole) */
+void proc_unmap(proc_t *p, u64 start, u64 end) {
+    for (u64 a = start; a < end && a < USER_TOP; a += PAGE) as_unmap(p->cr3, a);
+    for (int i = 0; i < p->nvma; i++) {
+        vma_t *v = &p->vma[i];
+        if (end <= v->start || start >= v->end) continue;
+        if (start <= v->start && end >= v->end) { *v = p->vma[--p->nvma]; i--; continue; }
+        if (start > v->start && end < v->end) {                    /* split */
+            if (p->nvma < MAX_VMAS) p->vma[p->nvma++] = (vma_t){ end, v->end };
+            v->end = start;
+            continue;
+        }
+        if (start <= v->start) v->start = end; else v->end = start;
+    }
+}
+
 static int fault_in(proc_t *p, u64 a) {
     if (a >= USER_TOP || !in_vma(p, a)) return 0;
     if (as_translate(p->cr3, a)) return 1;
@@ -149,41 +192,74 @@ static void put_user(proc_t *p, u64 va, const void *src, u64 len) {
     }
 }
 
-static int load_elf(proc_t *p, const u8 *img, u64 size, u64 *phdr_va, u16 *phnum, char *err, usize cap) {
+typedef struct { u64 entry, phdr, hi, base; u16 phnum; char interp[96]; } image_t;
+
+/* Load one ELF image: an executable (ET_EXEC at its own addresses, ET_DYN at
+ * USER_PIE_BASE) or, with base != 0, a shared object such as ld.so. */
+static int load_elf(proc_t *p, const u8 *img, u64 size, u64 base, image_t *out, char *err, usize cap) {
     const ehdr_t *e = (const ehdr_t *)img;
+    memset(out, 0, sizeof *out);
     if (size < sizeof *e || memcmp(e->ident, "\x7f" "ELF", 4) || e->ident[4] != 2 || e->machine != 62) {
         fmt(err, cap, "not an x86-64 ELF program"); return 0;
     }
     if (e->type != 2 && e->type != 3) { fmt(err, cap, "ELF type %u is not executable", e->type); return 0; }
-    u64 base = e->type == 3 ? USER_PIE_BASE : 0;
-    u64 hi = 0;
-    *phdr_va = 0;
+    if (!base) base = e->type == 3 ? USER_PIE_BASE : 0;
+    if (e->phoff + (u64)e->phnum * e->phentsize > size) { fmt(err, cap, "truncated program headers"); return 0; }
     for (int i = 0; i < e->phnum; i++) {
         const phdr_t *ph = (const phdr_t *)(img + e->phoff + (u64)i * e->phentsize);
-        if (e->phoff + (u64)(i + 1) * e->phentsize > size) break;
-        if (ph->type == 3) { fmt(err, cap, "dynamically linked (needs ld.so) - use a static build"); return 0; }
-        if (ph->type == 6) *phdr_va = base + ph->vaddr;
+        if (ph->type == 3) {                                       /* PT_INTERP */
+            u64 n = MIN(ph->filesz, sizeof out->interp - 1);
+            if (ph->offset + n > size) { fmt(err, cap, "bad PT_INTERP"); return 0; }
+            memcpy(out->interp, img + ph->offset, n);
+            out->interp[n] = 0;
+        }
+        if (ph->type == 6) out->phdr = base + ph->vaddr;          /* PT_PHDR */
         if (ph->type != 1) continue;
         u64 va = base + ph->vaddr, end = va + ph->memsz;
-        if (end > USER_MMAP_BASE || ph->offset + ph->filesz > size) { fmt(err, cap, "segment at %llx does not fit", va); return 0; }
+        if (end > USER_STACK_TOP - USER_STACK_SIZE || ph->offset + ph->filesz > size) { fmt(err, cap, "segment at %llx does not fit", va); return 0; }
         for (u64 a = va & ~(PAGE - 1); a < end; a += PAGE)
             if (!as_translate(p->cr3, a)) as_map(p->cr3, a, pmm_alloc(0), 1);
         put_user(p, va, img + ph->offset, ph->filesz);
-        if (!*phdr_va && ph->offset <= e->phoff && e->phoff < ph->offset + ph->filesz)
-            *phdr_va = va + (e->phoff - ph->offset);
-        if (end > hi) hi = end;
+        if (!out->phdr && ph->offset <= e->phoff && e->phoff < ph->offset + ph->filesz)
+            out->phdr = va + (e->phoff - ph->offset);
+        if (end > out->hi) out->hi = end;
+        proc_add_vma(p, va & ~(PAGE - 1), (end + PAGE - 1) & ~(PAGE - 1));
     }
-    p->entry = base + e->entry;
-    p->brk_start = p->brk = (hi + PAGE - 1) & ~(PAGE - 1);
-    *phnum = e->phnum;
+    out->entry = base + e->entry;
+    out->base = base;
+    out->phnum = e->phnum;
     return 1;
+}
+
+/* the size of the address range an image's PT_LOAD segments span */
+static u64 elf_span(const u8 *img, u64 size) {
+    const ehdr_t *e = (const ehdr_t *)img;
+    u64 lo = ~0ull, hi = 0;
+    if (size < sizeof *e || e->phoff + (u64)e->phnum * e->phentsize > size) return 0;
+    for (int i = 0; i < e->phnum; i++) {
+        const phdr_t *ph = (const phdr_t *)(img + e->phoff + (u64)i * e->phentsize);
+        if (ph->type != 1) continue;
+        if (ph->vaddr < lo) lo = ph->vaddr;
+        if (ph->vaddr + ph->memsz > hi) hi = ph->vaddr + ph->memsz;
+    }
+    return hi > lo ? ((hi + PAGE - 1) & ~(PAGE - 1)) : 0;
+}
+
+static u8 *read_file(const char *path, u64 *size) {
+    vnode_t *n = vfs_lookup(path);
+    if (!n || n->dir) return NULL;
+    *size = vfs_size(n);
+    u8 *img = kalloc(*size ? *size : 1);
+    vfs_read(n, 0, img, *size);
+    return img;
 }
 
 /* argv, envp and the auxiliary vector, laid out the way the Linux kernel does */
 static u64 build_stack(proc_t *p, int argc, const char *const *argv, u64 phdr, u16 phnum) {
-    static const char *envp[] = { "PATH=/bin", "HOME=/", "TERM=dumb", "USER=root", "PWD=/", NULL };
+    static const char *envp[] = { "PATH=/bin:/usr/bin", "HOME=/", "TERM=dumb", "USER=root", "PWD=/",
+                                  "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu", NULL };
     u64 sp = USER_STACK_TOP;
-    u64 strs[48], envs[8];
+    u64 strs[48], envs[12];
     int nenv = 0;
     argc = MIN(argc, 40);
     for (int i = argc - 1; i >= 0; i--) { u64 n = strlen(argv[i]) + 1; sp -= n; put_user(p, sp, argv[i], n); strs[i] = sp; }
@@ -197,7 +273,7 @@ static u64 build_stack(proc_t *p, int argc, const char *const *argv, u64 phdr, u
 
     u32 id[4];
     cpuid(1, 0, id);
-    u64 aux[] = { 3, phdr, 4, 56, 5, phnum, 6, PAGE, 7, 0, 8, 0, 9, p->entry, 11, 0, 12, 0, 13, 0, 14, 0,
+    u64 aux[] = { 3, phdr, 4, 56, 5, phnum, 6, PAGE, 7, p->interp_base, 8, 0, 9, p->entry, 11, 0, 12, 0, 13, 0, 14, 0,
                   15, platform, 16, id[3], 17, 100, 23, 0, 25, random, 26, 0, 31, execfn, 0, 0 };
     u64 words = 1 + (u64)argc + 1 + (u64)nenv + 1 + ARRAY_LEN(aux);
     sp -= words * 8;
@@ -216,17 +292,15 @@ static u64 build_stack(proc_t *p, int argc, const char *const *argv, u64 phdr, u
 static void user_thread(void *arg) {
     proc_t *p = arg;
     wrmsr(MSR_FS_BASE, 0);
-    enter_user(p->entry, p->sp);
+    enter_user(p->start, p->sp);
 }
 
 proc_t *proc_spawn(const char *path, int argc, const char *const *argv, term_t *term, char *err, usize cap) {
     const char *why;
     if (!proc_user_supported(&why)) { fmt(err, cap, "%s", why); return NULL; }
-    vnode_t *n = vfs_lookup(path);
-    if (!n || n->dir) { fmt(err, cap, "%s: not found", path); return NULL; }
-    u64 size = vfs_size(n);
-    u8 *img = kalloc(size ? size : 1);
-    vfs_read(n, 0, img, size);
+    u64 size = 0;
+    u8 *img = read_file(path, &size);
+    if (!img) { fmt(err, cap, "%s: not found", path); return NULL; }
 
     proc_t *p = kalloc(sizeof *p);
     p->pid = next_pid++;
@@ -237,55 +311,156 @@ proc_t *proc_spawn(const char *path, int argc, const char *const *argv, term_t *
     strlcpy(p->cwd, "/", sizeof p->cwd);
     p->term = term;
     p->cr3 = as_create();
-    u64 phdr = 0;
-    u16 phnum = 0;
-    int ok = load_elf(p, img, size, &phdr, &phnum, err, cap);
+    image_t im;
+    int ok = load_elf(p, img, size, 0, &im, err, cap);
     kfree(img);
+    if (ok && im.interp[0]) {
+        /* dynamically linked: load the program's loader and start there */
+        u64 isize = 0;
+        u8 *iimg = read_file(im.interp, &isize);
+        u64 span = iimg ? elf_span(iimg, isize) : 0;
+        u64 ibase = span ? proc_find_free(p, span) : 0;
+        image_t ii;
+        if (!iimg) { fmt(err, cap, "%s needs %s, which is not installed", base, im.interp); ok = 0; }
+        else if (!ibase) { fmt(err, cap, "no room for %s", im.interp); ok = 0; }
+        else ok = load_elf(p, iimg, isize, ibase, &ii, err, cap);
+        if (iimg) kfree(iimg);
+        if (ok) { p->interp_base = ibase; p->start = ii.entry; }
+    } else p->start = im.entry;
     if (!ok) { as_destroy(p->cr3); kfree(p); return NULL; }
+    p->entry = im.entry;
+    p->brk_start = p->brk = (im.hi + PAGE - 1) & ~(PAGE - 1);
     proc_add_vma(p, p->brk_start, p->brk);
     p->mmap_next = USER_MMAP_BASE;
-    p->sp = build_stack(p, argc, argv, phdr, phnum);
+    p->sp = build_stack(p, argc, argv, im.phdr, im.phnum);
     p->fd[0] = (ufile_t){ F_NULL };                        /* stdin: empty */
     p->fd[1] = (ufile_t){ F_TTY };
     p->fd[2] = (ufile_t){ F_TTY };
+    p->nthreads = 1;
     p->th = thread_create(p->name, user_thread, p, p->cr3);
     p->th->proc = p;
+    p->th->tid = p->pid;
     return p;
 }
 
-void proc_exit(int code) {
-    proc_t *p = proc_current();
-    sti();                                     /* socket cleanup takes the network lock */
-    lsock_exit(p);
-    cli();
-    thread_t *t = thread_current();
+/* ---- threads -------------------------------------------------------------------- */
+#define CLONE_VM             0x00000100
+#define CLONE_THREAD         0x00010000
+#define CLONE_SETTLS         0x00080000
+#define CLONE_PARENT_SETTID  0x00100000
+#define CLONE_CHILD_CLEARTID 0x00200000
+#define CLONE_CHILD_SETTID   0x01000000
+
+extern void enter_user_frame(frame_t *f);
+extern i64 futex_wake(proc_t *p, u64 uaddr, int n);       /* linux.c */
+
+static void clone_thread(void *arg) {
+    frame_t fr = *(frame_t *)arg;                          /* onto this thread's own kernel stack */
+    kfree(arg);
+    enter_user_frame(&fr);
+}
+
+i64 proc_clone(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 ctid, u64 tls) {
+    if (!(flags & CLONE_VM) || !(flags & CLONE_THREAD)) return -38;     /* fork comes later: ENOSYS */
+    frame_t *cf = kalloc(sizeof *cf);
+    *cf = *f;
+    cf->rax = 0;                                           /* the child sees clone() return 0 */
+    if (newsp) cf->rsp = newsp;
+    int tid = next_pid++;
+    if ((flags & CLONE_PARENT_SETTID) && proc_user_ok(p, ptid, 4)) *(i32 *)(usize)ptid = tid;
+    if ((flags & CLONE_CHILD_SETTID) && proc_user_ok(p, ctid, 4)) *(i32 *)(usize)ctid = tid;
+    u64 fl = irq_save();                                   /* do not run it before it is complete */
+    thread_t *t = thread_create(p->name, clone_thread, cf, p->cr3);
+    t->proc = p;
+    t->tid = tid;
+    t->fs_base = (flags & CLONE_SETTLS) ? tls : thread_current()->fs_base;
+    t->clear_tid = (flags & CLONE_CHILD_CLEARTID) ? ctid : 0;
+    p->nthreads++;
+    irq_restore(fl);
+    return tid;
+}
+
+static void release_tid(proc_t *p, thread_t *t) {
+    if (!t->clear_tid || !proc_user_ok(p, t->clear_tid, 4)) return;
+    *(i32 *)(usize)t->clear_tid = 0;                       /* pthread_join waits for this */
+    futex_wake(p, t->clear_tid, 1);
+}
+
+static void teardown(proc_t *p, int code) {
     write_cr3(kernel_cr3());                   /* leave the address space before freeing it */
-    t->cr3 = kernel_cr3();
+    thread_current()->cr3 = kernel_cr3();
     as_destroy(p->cr3);
     p->exit_code = code;
     p->exited = 1;
+    klog("proc: %s (pid %d) exited with %d, %llu system calls", p->name, p->pid, code, p->syscalls);
     p->term->serial++;
+}
+
+/* One thread ends (exit, or a thread that noticed its process is going). */
+void proc_thread_exit(int code) {
+    proc_t *p = proc_current();
+    thread_t *t = thread_current();
+    cli();
+    release_tid(p, t);
+    if (--p->nthreads > 0) thread_exit();
+    sti();                                     /* socket cleanup takes the network lock */
+    lsock_exit(p);
+    cli();
+    teardown(p, p->killed ? (p->exit_code ? p->exit_code : 137) : code);
+    thread_exit();
+}
+
+/* exit_group: the whole process.  Threads that are not inside a system call
+ * are stopped right away; the others finish their call and leave by
+ * themselves (they see 'killed'), and the last one out tears down. */
+void proc_exit(int code) {
+    proc_t *p = proc_current();
+    thread_t *me = thread_current();
+    cli();
+    p->killed = 1;
+    p->exit_code = code;
+    thread_t *all[64];
+    int n = sched_threads(all, 64);
+    for (int i = 0; i < n; i++) {
+        thread_t *t = all[i];
+        if (t == me || t->proc != p || t->state == T_DEAD || t->in_sys) continue;
+        t->state = T_DEAD;
+        p->nthreads--;
+    }
+    if (--p->nthreads > 0) thread_exit();
+    sti();
+    lsock_exit(p);
+    cli();
+    teardown(p, code);
     thread_exit();
 }
 
 void proc_kill(proc_t *p) {
     if (!p || p->exited) return;
-    if (p->in_syscall) {
-        /* It may hold the network lock or be mid-way through a file
-         * operation: let it finish the call and exit by itself
-         * (blocking waits notice 'killed' within milliseconds). */
-        if (!p->killed) term_append(p->term, "\n[stopping]\n", 13);
-        p->killed = 1;
-        return;
-    }
-    lsock_exit(p);                             /* not in the kernel: its sockets are free to close */
     u64 fl = irq_save();
-    /* The process is not running (we are the shell on the only user core),
-     * so it can be torn down from here. */
-    p->th->state = T_DEAD;
-    as_destroy(p->cr3);
+    if (!p->killed) term_append(p->term, "\n[stopping]\n", 13);
+    p->killed = 1;
     p->exit_code = 137;
-    p->exited = 1;
-    term_append(p->term, "\n[stopped]\n", 11);
+    /* threads that are running user code (not this one: we are the shell)
+     * stop now; those in a system call leave when it returns */
+    thread_t *all[64];
+    int n = sched_threads(all, 64);
+    int left = 0;
+    for (int i = 0; i < n; i++) {
+        thread_t *t = all[i];
+        if (t->proc != p || t->state == T_DEAD) continue;
+        if (t->in_sys) { left++; thread_wake(t); continue; }
+        t->state = T_DEAD;
+        p->nthreads--;
+    }
+    if (!left && p->nthreads <= 0) {
+        irq_restore(fl);
+        lsock_exit(p);                         /* nothing of it runs any more: its sockets are free to close */
+        fl = irq_save();
+        as_destroy(p->cr3);
+        p->exited = 1;
+        term_append(p->term, "\n[stopped]\n", 11);
+        klog("proc: %s (pid %d) stopped", p->name, p->pid);
+    }
     irq_restore(fl);
 }

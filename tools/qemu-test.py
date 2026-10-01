@@ -244,6 +244,19 @@ def default_script(q, shots):
         q.keys(*[c if c != " " else "spc" for c in cmd], settle=0.2)
         q.keys("ret", settle=wait)
     shots.append(q.shot("05-terminal-net"))
+    # dynamically linked glibc programs: ld.so + libc/libm/libstdc++, threads (clone + futex)
+    if ARCH == "x64":
+        for cmd, wait in [("clear", 1), ("dynhello", 6), ("threads", 15), ("cxx", 10)]:
+            q.keys(*[c if c != " " else "spc" for c in cmd], settle=0.2)
+            q.keys("ret", settle=wait)
+        shots.append(q.shot("05-terminal-dynamic"))
+        slog = open(os.path.join(ROOT, "build", f"serial-{ARCH}.log"), errors="replace").read()
+        for prog in ["dynhello", "threads", "cxx"]:
+            if f"proc: {prog} (pid" not in slog or not any(f"proc: {prog} (pid" in l and "exited with 0," in l for l in slog.splitlines()):
+                lines = [l for l in slog.splitlines() if prog in l or "linux:" in l][-6:]
+                print(f"FAIL: {prog} did not exit cleanly\n  " + "\n  ".join(lines))
+                sys.exit(1)
+        print("linux: dynhello, threads and cxx ran and exited with 0")
     # Sketch from the dock: draw a stroke, change ink, draw another
     dock_tap("sketch")
     q.drag([(200 + i * 40, 400 + (i % 5) * 30) for i in range(20)])
@@ -254,8 +267,8 @@ def default_script(q, shots):
     dock_tap("files")
     row = lambda i: 151 + i * 61 + 30      # list rows: 61 px from y 151
     q.tap(400, row(0))                     # the QRT volume
-    # firmware volume: "..", EFI, lib, qrt; native RAM root: "..", bin, dev, EFI, etc, lib, proc, qrt, tmp
-    q.tap(400, row(7) if ARCH == "x64" else row(3))
+    # firmware volume: "..", bin, EFI, lib, lib64, qrt; native RAM root: "..", bin, dev, EFI, etc, lib, lib64, proc, qrt, tmp
+    q.tap(400, row(8) if ARCH == "x64" else row(5))
     shots.append(q.shot("07-files-dir"))
     q.tap(400, row(2))                     # rows: "..", hwdump, welcome.txt
     shots.append(q.shot("07-files-text"))
