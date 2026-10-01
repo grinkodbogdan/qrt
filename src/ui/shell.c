@@ -16,6 +16,7 @@
 #include "../drivers/backlight.h"
 #include "../drivers/buttons.h"
 #include "../drivers/i915/gpu.h"
+#include "../drivers/i915/display.h"
 
 ui_t ui;
 
@@ -485,6 +486,7 @@ static void rotate_job_fn(void *arg, int i, int n) {
 static void present(const canvas_t *src, rect_t d) {
     d = rect_intersect(d, full_rect());
     if (d.w <= 0 || d.h <= 0) return;
+    display_mirror(src->px, src->w, src->h, src->stride, d.x, d.y, d.w, d.h);   /* a monitor on the USB-C port */
     /* the GPU's 3D engine copies (and turns) the rectangle when it is up */
     if (gpu_present(src->px, src->w, src->h, src->stride, sh.rot, d.x, d.y, d.w, d.h)) return;
     if (!sh.rot) {
@@ -1714,6 +1716,7 @@ void shell_main(void) {
     sh.launch_pressed = sh.dock_pressed = -1;
     k.graphics_up = 1;
     gpu_autostart();
+    display_start();
     if (!k.native) k.st->ConOut->EnableCursor(k.st->ConOut, 0);
     relayout();
 

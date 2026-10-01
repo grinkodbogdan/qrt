@@ -361,27 +361,47 @@ int hal_reboot_to_firmware(void) {
 #define SETTING_ATTR (EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS)
 static const c16 *setting_names[] = { u"QrtRotation", u"QrtAccent", u"QrtTouchMap", u"QrtSmp", u"QrtBootMode" };
 
+/* the firmware's variable services are not re-entrant, and kernel threads (the display
+ * driver's crash guard) write settings too: no preemption during a call */
+#if defined(__x86_64__)
+#define RT_LOCK   u64 rt_fl = k.native ? irq_save() : 0
+#define RT_UNLOCK if (k.native) irq_restore(rt_fl)
+#else
+#define RT_LOCK   (void)0
+#define RT_UNLOCK (void)0
+#endif
+
 u32 hal_setting_get(const c16 *name, u32 def) {
     u32 v = def, attr = 0;
     UINTN sz = sizeof v;
-    if (EFI_ERROR(k.rt->GetVariable(name, &qrt_guid, &attr, &sz, &v)) || sz != sizeof v) return def;
+    RT_LOCK;
+    EFI_STATUS st = k.rt->GetVariable(name, &qrt_guid, &attr, &sz, &v);
+    RT_UNLOCK;
+    if (EFI_ERROR(st) || sz != sizeof v) return def;
     return v;
 }
 
 void hal_setting_set(const c16 *name, u32 value) {
+    RT_LOCK;
     k.rt->SetVariable(name, &qrt_guid, SETTING_ATTR, sizeof value, &value);
+    RT_UNLOCK;
 }
 
 /* byte strings (Wi-Fi network name and key): 0 bytes returned when unset */
 usize hal_setting_get_blob(const c16 *name, void *buf, usize cap) {
     u32 attr = 0;
     UINTN sz = cap;
-    if (EFI_ERROR(k.rt->GetVariable(name, &qrt_guid, &attr, &sz, buf))) return 0;
+    RT_LOCK;
+    EFI_STATUS st = k.rt->GetVariable(name, &qrt_guid, &attr, &sz, buf);
+    RT_UNLOCK;
+    if (EFI_ERROR(st)) return 0;
     return (usize)sz;
 }
 
 void hal_setting_set_blob(const c16 *name, const void *buf, usize len) {
+    RT_LOCK;
     k.rt->SetVariable(name, &qrt_guid, len ? SETTING_ATTR : 0, len, (void *)buf);   /* len 0 deletes */
+    RT_UNLOCK;
 }
 
 void hal_settings_prepare(void) {

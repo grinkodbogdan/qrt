@@ -369,7 +369,8 @@ FreeBSD's.
 | Backlight | LPSS PWM #1, native mode: brightness and sleep (**new in 0.5.5.3, untested on hardware**). QRT only takes control if the firmware left that PWM running. |
 | Sleep | backlight off and a slower frame loop; not ACPI suspend |
 | Audio | no sound yet: 0.6.1 identifies the codec over I2C2 - an RT5670/RT5672 on the tablet (System Monitor → Hardware → Sound); the volume keys drive a mock volume control |
-| USB | 0.6.1: QRT's own xHCI driver in native mode: devices on the root ports and behind USB 2 hubs (0.6.3) are listed under System Monitor → Hardware → USB; USB keyboards work, also behind a hub (tested in QEMU). A USB-C dock's HDMI output cannot work: DP Alt Mode needs a USB-C port, and the 5855 has micro-USB 2.0, which carries no video. QRT names such docks (USB billboard class) in the device list. |
+| USB | 0.6.1: QRT's own xHCI driver in native mode: devices on the root ports and behind USB 2 hubs (0.6.3) are listed under System Monitor → Hardware → USB; USB keyboards work, also behind a hub (tested in QEMU). USB-C docks show up by name (USB billboard class). |
+| External display | 0.6.4: a monitor on a USB-C dock (DisplayPort Alt Mode, HDMI behind the dock's converter) mirrors the screen, native mode; **new and untested on hardware** - see [External display](#external-display-064) |
 | Bluetooth | 0.6.2: the Intel 8260's Bluetooth (USB 8087:0a2b, root port 4): firmware download as Linux's btusb/btintel do it, then scanning for classic and LE devices in the **Bluetooth** app (works on the tablet: it finds devices); no pairing yet |
 | Camera, sensors, battery | no drivers yet (they need ACPI/PMIC support first; see docs/drivers.md) |
 | USB keyboard | both modes (native: QRT's xHCI driver, 0.6.1) |
@@ -462,6 +463,39 @@ that can be tested without the GPU: the batch's command lengths, the
 golden-state relocations, and that the texture coordinates sample exactly
 the pixels the CPU rotation copies, for all four rotations.
 
+### External display (0.6.4)
+
+The 5855's USB-C port can carry DisplayPort (Alternate Mode). The switch to
+DisplayPort happens in hardware - the DSDT has no Type-C or Power Delivery
+controller for an OS to drive - so a dock's monitor appears to the display
+engine as an ordinary DisplayPort sink on one of Cherry Trail's ports B, C or
+D. Which one the USB-C port is wired to is not documented, so QRT looks at all
+three. The internal panel (MIPI DSI on pipe A) is not touched.
+
+`src/drivers/i915/display.c` follows Linux's i915 (v4.9) for Cherryview step
+by step: it powers the DPIO PHY's common lanes through the PUNIT, talks to
+the sink over the AUX channel (DPCD, and the monitor's EDID over I2C-over-AUX),
+picks the monitor's preferred mode if the link can carry it (else the largest
+listed one, else 1080p or 720p), sets up the PHY and the DP PLL with Linux's
+fixed dividers, trains the link (clock recovery, then channel equalization,
+with Linux's swing and de-emphasis table), and starts pipe B (ports B and C)
+or pipe C (port D) with its own scanout buffer. The shell's picture is then
+scaled into that buffer, centred, with black bars: by the GPU (bilinear)
+when acceleration is on, by the CPU otherwise. A kernel thread checks the
+ports once a second, so plugging and unplugging work while QRT runs.
+
+- **Settings → Startup → External display** turns it on or off and says what
+  it found: the monitor's name, the mode and the link, or the step that failed.
+- If setting up a monitor ever hangs the tablet, the next boot notices (a
+  flag in NVRAM) and leaves the external display off for that boot.
+- `make check` runs the whole path against a simulated display engine and
+  DP sink (`tests/test_display.c`): AUX messages, EDID parsing, the link
+  choice, training, timings and M/N values, the plane, mirroring, unplugging.
+
+It has not run on a tablet yet. If the monitor stays dark, the status line in
+Settings and the boot log (System Monitor → Log, lines starting with
+`display:`) say how far it got.
+
 ## Touchscreen
 
 The touchscreen stack is `src/drivers/dwi2c.c`, `i2chid.c`, `hidparse.c` and
@@ -474,10 +508,10 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.6.3.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.6.4.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.6.3.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
-3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
+   `gunzip -c dist/qrt-0.6.4.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.
 

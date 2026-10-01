@@ -1,6 +1,7 @@
 /* System Monitor: resources (CPU, memory, network, tasks), hardware, and the log. */
 #include "../ui/shell.h"
 #include "../drivers/i915/gpu.h"
+#include "../drivers/i915/display.h"
 #include "../drivers/usb/xhci.h"
 #include "../drivers/audio.h"
 #include "../kernel/smp.h"
@@ -169,6 +170,7 @@ static void draw(canvas_t *c, rect_t a) {
         kv(&f, "Codec", audio_status());
         heading(&f, "Graphics");
         kv(&f, "Acceleration", gpu_status());
+        kv(&f, "External display", display_status());
         if (gpu_active()) {
             u32 frames, avg;
             int coherent;

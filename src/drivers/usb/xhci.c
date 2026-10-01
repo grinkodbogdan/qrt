@@ -1,7 +1,7 @@
 /*
  * xhci.c - the USB 3 host controller (xHCI 1.x) and the devices on its root
  * ports.  Cherry Trail has one (PCI 8086:22b5); behind it on the Venue 8 Pro
- * 5855 sit the external micro-USB port and the Bluetooth half of the Intel
+ * 5855 sit the external USB-C port and the Bluetooth half of the Intel
  * 8260 card.  QEMU's qemu-xhci is the same programming model.
  *
  * Written from the xHCI 1.1 specification, with OpenBSD's xhci(4)
@@ -451,7 +451,7 @@ static const char *class_name(u8 c) {
     case 0x07: return "printer"; case 0x08: return "storage"; case 0x09: return "hub";
     case 0x0a: return "CDC data"; case 0x0b: return "smart card"; case 0x0e: return "video";
     case 0xe0: return "wireless (Bluetooth)"; case 0xef: return "miscellaneous"; case 0xff: return "vendor";
-    case 0x11: return "USB-C dock: its display needs DP Alt Mode, which a micro-USB port cannot carry";
+    case 0x11: return "USB-C dock (its monitor: Settings -> External display)";
     }
     return "device";
 }

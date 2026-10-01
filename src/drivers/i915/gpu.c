@@ -420,17 +420,14 @@ static void vertex(float *vb, int rot, float X, float Y, int sw, int sh, int dw,
 }
 
 /* draw: src surface (index 1) -> dst surface (index 0) */
-static int draw(u32 src_gtt, int sw, int sh, int spitch, u32 dst_gtt, int dw, int dh, int dpitch, int dfmt,
-                int rot, const grect_t *r, int n, const char *what) {
+/* the batch for vertices already in the vertex buffer */
+static int draw_vb(u32 src_gtt, int sw, int sh, int spitch, u32 dst_gtt, int dw, int dh, int dpitch, int dfmt,
+                   int n, int linear, const char *what) {
     surface(0, dst_gtt, dw, dh, dpitch, dfmt);
     surface(1, src_gtt, sw, sh, spitch, I965_SURFACEFORMAT_B8G8R8A8_UNORM);
-    float *vb = (float *)(g.arena + A_VB);
-    for (int i = 0; i < n; i++, vb += 12) {
-        float x1 = r[i].x, y1 = r[i].y, x2 = r[i].x + r[i].w, y2 = r[i].y + r[i].h;
-        vertex(vb + 0, rot, x2, y2, sw, sh, dw, dh);
-        vertex(vb + 4, rot, x1, y2, sw, sh, dw, dh);
-        vertex(vb + 8, rot, x1, y1, sw, sh, dw, dh);
-    }
+    struct gen8_sampler_state *smp = (struct gen8_sampler_state *)(g.arena + A_DYN + D_SAMPLER);
+    smp->ss0.min_filter = smp->ss0.mag_filter = linear ? 1 : I965_MAPFILTER_NEAREST;
+    flush_range(smp, sizeof *smp);
     bp = (u32 *)(g.arena + A_BATCH);
     emit_states(dw, dh, n);
     flush_range(g.arena + A_BATCH, (u8 *)bp - (g.arena + A_BATCH));
@@ -438,6 +435,19 @@ static int draw(u32 src_gtt, int sw, int sh, int spitch, u32 dst_gtt, int dw, in
     flush_range(g.arena + A_VB, n * 48);
     return run_batch(g.arena_gtt + A_BATCH, what);
 }
+
+static int draw(u32 src_gtt, int sw, int sh, int spitch, u32 dst_gtt, int dw, int dh, int dpitch, int dfmt,
+                int rot, const grect_t *r, int n, const char *what) {
+    float *vb = (float *)(g.arena + A_VB);
+    for (int i = 0; i < n; i++, vb += 12) {
+        float x1 = r[i].x, y1 = r[i].y, x2 = r[i].x + r[i].w, y2 = r[i].y + r[i].h;
+        vertex(vb + 0, rot, x2, y2, sw, sh, dw, dh);
+        vertex(vb + 4, rot, x1, y2, sw, sh, dw, dh);
+        vertex(vb + 8, rot, x1, y1, sw, sh, dw, dh);
+    }
+    return draw_vb(src_gtt, sw, sh, spitch, dst_gtt, dw, dh, dpitch, dfmt, n, 0, what);
+}
+
 
 /* ---- set-up -------------------------------------------------------------------- */
 static void workarounds(void) {
@@ -521,21 +531,28 @@ static int self_test(void) {
     return 0;
 }
 
-static int bring_up(void) {
+/* the registers and the GGTT: also needed by the display driver when 3D is off */
+static const char *map_regs(void) {
+    if (g.mmio) return NULL;
     pci_dev_t *d = g.pci;
     u32 cmd = pci_read32(d->bus, d->dev, d->fn, 4);
     pci_write32(d->bus, d->dev, d->fn, 4, cmd | 0x6);                  /* memory space + bus master */
     u64 bar0 = pci_bar(d->bus, d->dev, d->fn, 0);
     g.gmadr = pci_bar(d->bus, d->dev, d->fn, 2);
-    if (!bar0 || (bar0 & 0xffffff)) { fail("unexpected register BAR"); return 0; }
-    g.mmio = mm_map_mmio(bar0, 16u << 20);
-    if (!g.mmio) { fail("registers could not be mapped"); return 0; }
-    g.gsm = (volatile u64 *)(usize)(bar0 + (8u << 20));               /* upper half of the 16 MiB BAR */
-
+    if (!bar0 || (bar0 & 0xffffff)) return "unexpected register BAR";
     u16 gmch = pci_read16(d->bus, d->dev, d->fn, 0x50);              /* SNB_GMCH_CTRL */
     u32 ggms = (gmch >> 8) & 3;                                       /* chv_get_total_gtt_size */
-    if (!ggms) { fail("no GTT"); return 0; }
+    if (!ggms) return "no GTT";
+    g.mmio = mm_map_mmio(bar0, 16u << 20);
+    if (!g.mmio) return "registers could not be mapped";
+    g.gsm = (volatile u64 *)(usize)(bar0 + (8u << 20));               /* upper half of the 16 MiB BAR */
     g.ggtt_size = (u64)((1u << (20 + ggms)) / 8) << 12;
+    return NULL;
+}
+
+static int bring_up(void) {
+    const char *why = map_regs();
+    if (why) { fail(why); return 0; }
 
     /* the framebuffer: GOP put it in the aperture, so its GTT offset is known */
     if (!k.fb_base || !g.gmadr || k.fb_base < g.gmadr || k.fb_base - g.gmadr >= (1u << 30)) {
@@ -585,6 +602,8 @@ static int bring_up(void) {
 int gpu_probe(pci_dev_t *d) {
     if (!k.native || d->vendor != 0x8086 || (d->device & 0xfffc) != 0x22b0) return 0;
     g.pci = d;
+    const char *why = map_regs();
+    if (why) klog("gpu: %s", why);
     if (hal_setting_get(u"QrtGpuGuard", 0)) {
         /* the last start never came back: leave the GPU alone for this boot only */
         hal_setting_set(u"QrtGpuGuard", 0);
@@ -701,7 +720,46 @@ int gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int 
     return 1;
 }
 
+/* ---- for the display driver (display.c) ------------------------------------------- */
+volatile u8 *gpu_regs(void) { return g.mmio; }
+
+void gpu_gtt_map(u32 off, u64 phys, usize pages) { if (g.gsm) gtt_map(off, phys, pages); }
+
+/* GGTT room for a scanout buffer of this size: below the canvas windows and the arena */
+u32 gpu_scanout_gtt(usize bytes) {
+    if (!g.ggtt_size) return 0;
+    u64 top = g.ggtt_size - (1u << 20) - SCENE_WINDOW;
+    u64 size = (bytes + 0x3ffff) & ~0x3ffffull;                     /* 256 KiB aligned */
+    if (size > (128u << 20)) return 0;
+    return (u32)(top - size);
+}
+
+/* Draw the whole canvas scaled by `scale` with its top-left at (x0, y0) of a
+ * 32-bit destination, updating only the destination rectangle r; bilinear. */
+int gpu_present_scaled(const u32 *src, int sw, int sh, int stride, u32 dst_gtt, int dw, int dh, int dpitch,
+                       int x0, int y0, float scale, int rx, int ry, int rw, int rh) {
+    if (g.state != G_READY || rw <= 0 || rh <= 0) return 0;
+    u32 src_gtt = map_canvas(src, (usize)stride * 4 * sh);
+    if (!src_gtt) return 0;
+    float *vb = (float *)(g.arena + A_VB);
+    float X1 = rx, Y1 = ry, X2 = rx + rw, Y2 = ry + rh;
+    float su = 1.0f / (scale * sw), sv = 1.0f / (scale * sh);
+    float c[3][2] = { { X2, Y2 }, { X1, Y2 }, { X1, Y1 } };
+    for (int i = 0; i < 3; i++) {
+        vb[i * 4 + 0] = (c[i][0] - x0) * su;
+        vb[i * 4 + 1] = (c[i][1] - y0) * sv;
+        vb[i * 4 + 2] = c[i][0];
+        vb[i * 4 + 3] = c[i][1];
+    }
+    return draw_vb(src_gtt, sw, sh, stride * 4, dst_gtt, dw, dh, dpitch, I965_SURFACEFORMAT_B8G8R8A8_UNORM, 1, 1, "an external frame");
+}
+
 #else   /* 32-bit builds run on the firmware only */
+volatile u8 *gpu_regs(void) { return NULL; }
+void gpu_gtt_map(u32 off, u64 phys, usize pages) { (void)off; (void)phys; (void)pages; }
+u32 gpu_scanout_gtt(usize bytes) { (void)bytes; return 0; }
+int gpu_present_scaled(const u32 *src, int sw, int sh, int stride, u32 dst_gtt, int dw, int dh, int dpitch,
+                       int x0, int y0, float scale, int rx, int ry, int rw, int rh) { return 0; }
 void gpu_autostart(void) {}
 int gpu_probe(pci_dev_t *d) { (void)d; return 0; }
 int gpu_supported(void) { return 0; }

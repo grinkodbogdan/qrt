@@ -16,3 +16,10 @@ void gpu_stats(u32 *frames, u32 *avg_us, int *coherent);
  * stride in pixels) to the framebuffer, turned by rot quarter turns as the
  * shell does it.  Returns 0 when the caller must do it on the CPU. */
 int  gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int y, int w, int h);
+
+/* for the display driver */
+volatile u8 *gpu_regs(void);                       /* BAR 0 (NULL before the GPU was found) */
+void gpu_gtt_map(u32 off, u64 phys, usize pages);  /* enter pages in the global GTT */
+u32  gpu_scanout_gtt(usize bytes);                 /* a GGTT offset for a scanout buffer */
+int  gpu_present_scaled(const u32 *src, int sw, int sh, int stride, u32 dst_gtt, int dw, int dh, int dpitch,
+                        int x0, int y0, float scale, int rx, int ry, int rw, int rh);
