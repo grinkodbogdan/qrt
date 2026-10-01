@@ -18,6 +18,7 @@ Apps
   * Terminal       - a command line for Linux programs (busybox, ls, wget...)
   * Browser        - web pages over http:// and https://
   * Wi-Fi          - connect to a wireless network
-  * Settings       - accent colour, rotation, sleep, brightness, volume
+  * Settings       - accent colour, rotation, sleep, brightness, volume,
+                   graphics acceleration
   * System Monitor - processor, memory, network and hardware
   * Clock, Drawing

@@ -12,6 +12,7 @@
 #include "backlight.h"
 #include "e1000.h"
 #include "iwm/iwm.h"
+#include "i915/gpu.h"
 #if defined(__x86_64__)
 #include "../arch/x64/irq.h"
 #endif
@@ -35,6 +36,18 @@ static int chipset_probe(device_t *d) {
     return 0;
 }
 static const driver_t drv_chipset = { "chipset", chipset_pci, chipset_acpi, NULL, chipset_probe, NULL };
+
+/* ---- Intel Gen8 graphics (Cherry Trail): the 3D engine presents the screen ---- */
+static const pci_match_t gpu_pci[] = { { 0x8086, 0x22b0, 0x03, PCI_ANY_CLS }, { 0x8086, 0x22b1, 0x03, PCI_ANY_CLS },
+                                       { 0x8086, 0x22b2, 0x03, PCI_ANY_CLS }, { 0x8086, 0x22b3, 0x03, PCI_ANY_CLS }, { 0 } };
+static void gpu_dev_status(device_t *d) { fmt(d->status, sizeof d->status, "Intel HD Graphics (Gen8): %s", gpu_status()); }
+static int gpu_dev_probe(device_t *d) {
+    if (!k.native) return DEV_NOT_MINE;           /* under the firmware GOP keeps the display */
+    gpu_probe(d->pci);
+    gpu_dev_status(d);
+    return 0;
+}
+static const driver_t drv_gpu = { "i915", gpu_pci, NULL, NULL, gpu_dev_probe, gpu_dev_status };
 
 /* ---- framebuffer --------------------------------------------------------- */
 static const pci_match_t fb_pci[] = { { PCI_ANY_ID, PCI_ANY_ID, 0x03, PCI_ANY_CLS }, { 0 } };
@@ -141,4 +154,4 @@ static int e1000_dev_probe(device_t *d) {
 }
 static const driver_t drv_e1000 = { "e1000", e1000_pci, NULL, NULL, e1000_dev_probe, e1000_dev_status };
 
-const driver_t *const builtin_drivers[] = { &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_iwm, &drv_e1000, &drv_chipset, NULL };
+const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_iwm, &drv_e1000, &drv_chipset, NULL };

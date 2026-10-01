@@ -18,7 +18,7 @@ hardware report, BIOS 1.11.0). The dump itself is **not** committed:
 
 | BDF | ID | What |
 |---|---|---|
-| 00:02.0 | 8086:22b0 | Intel HD graphics (Gen8) |
+| 00:02.0 | 8086:22b0 | Intel HD graphics (Gen8); QRT's `i915` driver uses its 3D engine to present frames (0.5.8) |
 | 00:03.0 | 8086:22b8 | Imaging unit (ISP, cameras) |
 | 00:10.0 / 00:12.0 | 8086:2294 / 2296 | SD host controllers (eMMC / microSD) |
 | 00:14.0 | 8086:22b5 | xHCI USB 3 |

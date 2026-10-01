@@ -195,6 +195,7 @@ int heap_owns(const void *p) {
 #define PTE_W   0x002ull
 #define PTE_U   0x004ull
 #define PTE_PWT 0x008ull
+#define PTE_PCD 0x010ull
 #define PTE_PS  0x080ull
 #define PTE_ADDR 0x000ffffffffff000ull
 
@@ -236,6 +237,20 @@ void mm_init(const mm_boot_t *b, const u64 *reserve, int nreserve) {
 
 /* ---- user address spaces --------------------------------------------------- */
 static u64 *tbl(u64 e) { return (u64 *)(usize)(e & PTE_ADDR); }
+
+/* Map a device's registers uncached (PAT entry 3) in the kernel's identity
+ * map.  The firmware's MTRRs normally make MMIO uncached anyway; this makes
+ * it independent of them.  Whole 2 MiB pages are changed. */
+void mm_uncached(u64 base, u64 size) {
+    if (!kpml4_phys || base + size > max_phys) return;
+    u64 *pdpt = tbl(tbl(kpml4_phys)[0]);
+    for (u64 a = base & ~((2ull << 20) - 1); a < base + size; a += 2ull << 20) {
+        u64 *pd = tbl(pdpt[a >> 30]);
+        pd[(a >> 21) & 511] |= PTE_PCD | PTE_PWT;
+    }
+    write_cr3(read_cr3());
+}
+
 
 u64 as_create(void) {
     u64 *k4 = tbl(kpml4_phys), *kp = tbl(k4[0]);

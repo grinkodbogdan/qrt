@@ -2,6 +2,7 @@
  * is kept in UEFI NVRAM and survives reboots. */
 #include "../ui/shell.h"
 #include "../drivers/backlight.h"
+#include "../drivers/i915/gpu.h"
 
 static const int sleep_secs[] = { 0, 30, 60, 120, 300, 600 };
 static const char *sleep_label[] = { "Never", "30 s", "1 min", "2 min", "5 min", "10 min" };
@@ -16,6 +17,7 @@ static struct {
     scroll_t sc;
     int confirm;          /* power button waiting for a second tap (1..3) */
     int fw_mode;          /* cached QrtBootMode == 1 */
+    int gpu_on;           /* cached gpu_enabled() */
     int slider;           /* the slider being dragged */
     int cand, x0, y0;     /* a touch that began on a slider: sideways moves it, up/down scrolls */
 } st;
@@ -35,7 +37,7 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
 typedef struct {
     int x, w;                                   /* the clamped column */
     int y_look, y_power, y_sound, y_start, y_system, y_about;
-    rect_t accent[N_ACCENTS], rot[4], sleep[N_SLEEP], kern[2], power[3];
+    rect_t accent[N_ACCENTS], rot[4], sleep[N_SLEEP], kern[2], gpu[2], power[3];
     rect_t bright, vol;                         /* slider tracks */
     rect_t g_look, g_power, g_sound, g_start, g_system, g_about;   /* group boxes */
     int bottom;
@@ -78,9 +80,10 @@ static lay_t layout(rect_t a) {
     L.y_start = y;
     if (sizeof(void *) == 8) {
         y += title;
-        L.g_start = (rect_t){ x, y, w, ROW_H };
+        L.g_start = (rect_t){ x, y, w, 2 * ROW_H };
         int kw = MIN(dp(130), w / 4);
         for (int i = 0; i < 2; i++) L.kern[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + dp(11), kw, ROW_H - dp(22) };
+        for (int i = 0; i < 2; i++) L.gpu[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + ROW_H + dp(11), kw, ROW_H - dp(22) };
         y += L.g_start.h + dp(24);
     } else L.g_start = (rect_t){ 0 };
 
@@ -157,10 +160,13 @@ static void draw(canvas_t *c, rect_t a) {
 
     if (sizeof(void *) == 8) {
         int fw = st.fw_mode;                     /* draw() may run on any core: no firmware calls here */
-        group(c, L.g_start, L.y_start, "Startup", 1);
+        group(c, L.g_start, L.y_start, "Startup", 2);
         row_label(c, L.g_start, 0, "Kernel mode", "Applies after a restart");
         segment(c, L.kern[0], "Native", !fw, 1, 0);
         segment(c, L.kern[1], "Firmware", fw, 0, 1);
+        row_label(c, L.g_start, 1, "Graphics acceleration", gpu_status());
+        segment(c, L.gpu[0], "On", st.gpu_on, 1, 0);
+        segment(c, L.gpu[1], "Off", !st.gpu_on, 0, 1);
     }
 
     group(c, L.g_system, L.y_system, "System", 1);
@@ -220,6 +226,14 @@ static int event(const event_t *e, rect_t a) {
     if (sizeof(void *) == 8)
         for (int i = 0; i < 2; i++)
             if (in_rect(L.kern[i], e->x, e->y)) { hal_setting_set(u"QrtBootMode", (u32)i); st.fw_mode = i; return 1; }
+    if (sizeof(void *) == 8 && gpu_supported())
+        for (int i = 0; i < 2; i++)
+            if (in_rect(L.gpu[i], e->x, e->y)) {
+                gpu_set_enabled(i == 0);
+                st.gpu_on = gpu_enabled();
+                shell_redraw();
+                return 1;
+            }
     for (int i = 0; i < 3; i++) {
         if (!in_rect(L.power[i], e->x, e->y)) continue;
         if (st.confirm != i + 1) { st.confirm = i + 1; return 1; }
@@ -233,6 +247,6 @@ static int event(const event_t *e, rect_t a) {
     return scrolled;
 }
 
-static void on_open(void) { st.confirm = 0; st.sc.off = 0; st.fw_mode = hal_setting_get(u"QrtBootMode", 0) == 1; }
+static void on_open(void) { st.confirm = 0; st.sc.off = 0; st.fw_mode = hal_setting_get(u"QrtBootMode", 0) == 1; st.gpu_on = gpu_enabled(); }
 
 const app_t app_settings = { "Settings", "Appearance, power, sound", RGB(0x6f, 0x6f, 0x78), icon, on_open, draw, event, NULL };

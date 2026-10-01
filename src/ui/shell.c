@@ -15,6 +15,7 @@
 #include "../net/wlan.h"
 #include "../drivers/backlight.h"
 #include "../drivers/buttons.h"
+#include "../drivers/i915/gpu.h"
 
 ui_t ui;
 
@@ -399,7 +400,8 @@ static void to_logical(int px, int py, int *lx, int *ly) {
  * touches a new cache line for every pixel and used to take most of the
  * frame), and the tiles are spread over every core.  In native mode the
  * tiles go straight into the framebuffer; under the firmware they go to a
- * staging canvas that GOP's Blt copies.
+ * staging canvas that GOP's Blt copies.  On Cherry Trail in native mode the
+ * GPU does all of this instead (src/drivers/i915/gpu.c).
  */
 #define TILE 32
 static struct { const canvas_t *src; rect_t d; u32 *dst; usize dstride; int fw, fh, swap; } rot_job;
@@ -450,6 +452,8 @@ static void rotate_job_fn(void *arg, int i, int n) {
 static void present(const canvas_t *src, rect_t d) {
     d = rect_intersect(d, full_rect());
     if (d.w <= 0 || d.h <= 0) return;
+    /* the GPU's 3D engine copies (and turns) the rectangle when it is up */
+    if (gpu_present(src->px, src->w, src->h, src->stride, sh.rot, d.x, d.y, d.w, d.h)) return;
     if (!sh.rot) {
         hal_present(src->px, src->stride, d.x, d.y, d.w, d.h);
         return;

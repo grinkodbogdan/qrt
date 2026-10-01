@@ -303,6 +303,8 @@ device, first those with a QRT driver and then those still waiting for one.
 On the tablet, that second part is the to-do list.
 
 Built in:
+- **i915**: the Cherry Trail GPU's 3D engine puts the screen on the panel
+  (see Rendering)
 - **framebuffer**
 - **16550 UART**: interrupt-driven through the I/O APIC
 - **DesignWare I2C**
@@ -324,6 +326,7 @@ FreeBSD's.
 | | |
 |---|---|
 | Display | works (framebuffer, 1200×1920, rotation) |
+| GPU | Intel Gen8 3D engine copies and turns each frame (**new in 0.5.8, untested on hardware**; it tests itself at boot and falls back to the CPU) |
 | Touch | works: QRT's own Wacom driver; tested on the tablet in firmware mode. Native mode needs the same driver after the handover, which is **new in 0.5 and untested on hardware**. |
 | Storage | the boot stick is read into RAM at boot; writes go to RAM only |
 | Buttons | power, volume and Windows through GPIO (input bit and edge latch) and the ACPI fixed power button, both kernel modes. **Not working on the tablet up to 0.5.6; 0.5.7's extra sources are untested.** Button test shows what each source sees. |
@@ -351,7 +354,7 @@ Windows product key.
 
 ## Rendering
 
-Everything is drawn in software. Each change records a damage rectangle,
+Everything is drawn on the CPU. Each change records a damage rectangle,
 and only that area is redrawn and copied to the panel. Big redraws are cut
 into strips (4 per core), and every core claims strips from a shared
 counter. In native mode those cores were started by QRT. Under the firmware
@@ -371,9 +374,41 @@ the framebuffer in native mode, instead of through a staging copy. With
 the screen rotated in QEMU, a full frame went from 12.6 ms (10.7 ms of it
 for the rotation) to 6.2 ms (4.0 ms).
 
-The Atom has no GPU driver in QRT (the Intel Gen8 3D and blit engines need a
-large driver), so this, and redrawing only what changed, is where the speed
-comes from.
+### GPU acceleration (0.5.8)
+
+On the tablet in native mode, the GPU now does that last step. The driver
+(`src/drivers/i915/`) brings up the render engine of the Cherry Trail's
+Intel Gen8 graphics the way Linux's i915 does for a legacy render ring: it
+keeps the render power well awake, enters its buffers and the canvas pages
+in the global GTT, applies the Cherryview workarounds, starts the ring and
+runs Linux's "golden" render state once. Each frame is then one 3D draw,
+modelled on intel-vaapi-driver's Gen8 `put_surface`: the canvas is a texture,
+the framebuffer is the render target, and every damaged rectangle is a
+rectangle whose texture coordinates carry the rotation. The CPU only waits
+for the GPU to finish.
+
+What it does not do: the apps and the shell are still drawn by the CPU.
+The GPU takes the copy and the rotation, which was the largest part of a
+rotated frame.
+
+Safety, because this could not be tried on a real tablet before release
+(QEMU has no Intel GPU):
+- It only starts in native mode, and only on 8086:22b0–22b3.
+- At boot it turns a 64×64 test picture on the GPU and checks every pixel.
+  If the GPU does not see the CPU's writes, it retries with explicit cache
+  flushes. Any mismatch, and the CPU path is used.
+- Every GPU job has a 100 ms limit. If one runs over, the GPU is reset and
+  switched off for the rest of the session.
+- If a start ever hangs the tablet, the next boot notices (a flag in NVRAM
+  that is only cleared after 300 good frames) and leaves the GPU off.
+- **Settings → Startup → Graphics acceleration** turns it on or off.
+
+**System Monitor → Hardware → Graphics** shows its state and how long the
+GPU takes per frame; `bench` in the launcher compares it with the CPU path
+(turn acceleration off, run `bench` again). `make check` tests the parts
+that can be tested without the GPU: the batch's command lengths, the
+golden-state relocations, and that the texture coordinates sample exactly
+the pixels the CPU rotation copies, for all four rotations.
 
 ## Touchscreen
 
@@ -387,9 +422,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.5.7.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.5.8.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.5.7.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.5.8.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.
@@ -430,7 +465,7 @@ src/arch/x64/          native kernel: memory, CPU/IDT, APIC, I/O APIC + MSI, sch
                        SMP trampoline, processes, Linux system calls
 src/arch/x64/lsock.c   Linux sockets over the network stack
 src/drivers/           PCI, UART, DesignWare I2C, HID over I2C, touch service, GPIO buttons,
-                       e1000, iwm/ (Intel 8260 Wi-Fi), driver table
+                       e1000, iwm/ (Intel 8260 Wi-Fi), i915/ (Gen8 GPU), driver table
 src/net/               802.11 client + WPA2 (wlan.c), ARP/IP/ICMP/UDP/DHCP/DNS (net.c), TCP (tcp.c),
                        HTTP client (http.c), TLS 1.3 client (tls.c), crypto (crypto.c, crypto_tls.c)
 src/ui/                gfx (anti-aliased shapes, text), font atlases, shell (dock, launcher), on-screen keyboard

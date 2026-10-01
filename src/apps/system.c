@@ -1,5 +1,6 @@
 /* System Monitor: resources (CPU, memory, network, tasks), hardware, and the log. */
 #include "../ui/shell.h"
+#include "../drivers/i915/gpu.h"
 #include "../kernel/smp.h"
 #include "../kernel/vfs.h"
 #include "../kernel/dev.h"
@@ -103,6 +104,7 @@ static const char *friendly(const device_t *d) {
     if (!strcmp(n, "backlight")) return "Backlight";
     if (!strcmp(n, "i2c-hid")) return "Touchscreen";
     if (!strcmp(n, "framebuffer")) return "Display";
+    if (!strcmp(n, "i915")) return "Graphics";
     if (!strcmp(n, "e1000")) return "Ethernet";
     if (!strcmp(n, "uart16550")) return "Serial port";
     if (!strcmp(n, "dw-i2c") || !strcmp(n, "designware-i2c")) return "I2C bus";
@@ -158,6 +160,15 @@ static void draw(canvas_t *c, rect_t a) {
             fmt_bytes(b2, sizeof b2, k.vol[i].size);
             fmt(b, sizeof b, "%s, %s", k.vol[i].label[0] ? k.vol[i].label : "Volume", b2);
             kv(&f, k.vol[i].boot ? "Boot drive" : "Drive", b);
+        }
+        heading(&f, "Graphics");
+        kv(&f, "Acceleration", gpu_status());
+        if (gpu_active()) {
+            u32 frames, avg;
+            int coherent;
+            gpu_stats(&frames, &avg, &coherent);
+            fmt(b, sizeof b, "%u frames, %u \xc2\xb5s each on average", frames, avg);
+            kv(&f, "GPU work", b);
         }
         heading(&f, "Drivers");
         for (int i = 0; i < n_devs; i++) {
