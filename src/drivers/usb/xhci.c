@@ -15,7 +15,9 @@
  * turning interrupts off around ring and event-ring work is the lock.
  * Devices on root ports are addressed, their descriptors read and listed;
  * class drivers open endpoints through usb.h: boot-protocol HID keyboards
- * (here) and Bluetooth (src/drivers/bt).  Hubs come later.
+ * (here) and Bluetooth (src/drivers/bt).  USB 2 hubs are enumerated too
+ * (their ports are polled with GET_STATUS); USB 3 hubs show up as their
+ * USB 2 half on the tablet's USB 2 port.
  */
 #include "../../kernel/kernel.h"
 #include "xhci.h"
@@ -102,7 +104,15 @@ typedef struct {
 typedef struct { u8 addr, attr, iface; u16 mps; u8 ival; } epdesc_t;
 
 struct udev {
-    int used, slot, port, speed;
+    int used, slot, port, speed;           /* port: the root port the device's tree hangs from */
+    u32 route;                             /* route string: a hub port number per tier below the root */
+    int depth;                             /* 0: on a root port */
+    struct udev *parent;                   /* the hub it is plugged into (NULL: root port) */
+    int pport;                             /* the port on that hub */
+    int tt_slot, tt_port;                  /* full/low speed behind a high-speed hub: its transaction translator */
+    int hub_ports;                         /* a hub: number of downstream ports */
+    u32 hub_present;                       /* bit n: a device is attached to hub port n+1 */
+    int hub_ival;                          /* hubs: next status poll */
     u8 *out, *in;                          /* device context, input context */
     ring_t ep0;
     u8 *buf;                               /* DMA page for control data */
@@ -270,6 +280,14 @@ static int command(u64 ptr, u32 status, u32 flags, u32 *slot) {
 /* ---- contexts ------------------------------------------------------------------------ */
 static u32 *ictx(udev_t *d, int i) { return (u32 *)(d->in + (usize)i * x.csz); }    /* 0 = control, 1 = slot, 1+dci = endpoint */
 
+/* slot context dwords 0-2 for this device (route, speed, entries, root port, hub, TT) */
+static void slot_ctx(udev_t *d, int entries) {
+    u32 *c = ictx(d, 1);
+    c[0] = (d->route & 0xfffff) | ((u32)d->speed << 20) | ((u32)(d->hub_ports ? 1 : 0) << 26) | ((u32)entries << 27);
+    c[1] = ((u32)d->port << 16) | ((u32)d->hub_ports << 24);
+    c[2] = (u32)d->tt_slot | ((u32)d->tt_port << 8);
+}
+
 static void ep_ctx(u32 *c, int type, int mps, int interval, u64 ring, int avg) {
     c[0] = (u32)interval << 16;
     c[1] = (3u << 1) | ((u32)type << 3) | ((u32)mps << 16);              /* CErr 3 */
@@ -331,8 +349,7 @@ static int ep_open(udev_t *d, u8 addr, usb_in_cb cb, void *arg) {
     if (e->dci > d->max_dci) d->max_dci = e->dci;
     memset(d->in, 0, 4096);
     ictx(d, 0)[1] = 1u | (1u << e->dci);
-    ictx(d, 1)[0] = ((u32)d->speed << 20) | ((u32)d->max_dci << 27);
-    ictx(d, 1)[1] = (u32)d->port << 16;
+    slot_ctx(d, d->max_dci);
     ep_ctx(ictx(d, 1 + e->dci), xtype, e->mps, ival, phys(e->ring.trb), e->type == 3 ? e->mps : 1024);
     int cc = command(phys(d->in), 0, TRB_TYPE(T_CONFIG_EP) | ((u32)d->slot << 24), NULL);
     if (cc != CC_SUCCESS) { klog("usb: port %d: endpoint %02x not configured (cc %d)", d->port, addr, cc); return -1; }
@@ -424,6 +441,7 @@ static void kbd_report(void *arg, const u8 *r, int len) {
 /* ---- enumeration ---------------------------------------------------------------------------- */
 static const struct { u16 vid, pid; const char *name; } known[] = {
     { 0x8087, 0x0a2b, "Intel Wireless 8260 Bluetooth" },
+    { 0x0424, 0x2807, "Microchip USB hub (USB-C dock?)" },
     { 0x8087, 0x0aa7, "Intel Wireless 3168 Bluetooth" },
 };
 
@@ -433,6 +451,7 @@ static const char *class_name(u8 c) {
     case 0x07: return "printer"; case 0x08: return "storage"; case 0x09: return "hub";
     case 0x0a: return "CDC data"; case 0x0b: return "smart card"; case 0x0e: return "video";
     case 0xe0: return "wireless (Bluetooth)"; case 0xef: return "miscellaneous"; case 0xff: return "vendor";
+    case 0x11: return "USB-C dock: its display needs DP Alt Mode, which a micro-USB port cannot carry";
     }
     return "device";
 }
@@ -453,13 +472,14 @@ static void free_dev(udev_t *d) {
     d->used = 0;                                                       /* its DMA pages are kept for reuse */
 }
 
-static void attach(int p) {
+static void hub_setup(udev_t *d);
+
+/* Address and configure a device that has just been reset and enabled:
+ * on root port root (1-based) at the given speed, or behind hub parent's port. */
+static void enumerate(int root, int speed, udev_t *parent, int pport) {
     udev_t *d = NULL;
     for (int i = 0; i < MAX_DEV; i++) if (!x.dev[i].used) { d = &x.dev[i]; break; }
-    if (!d) return;
-    port_reset(p);
-    u32 v = rd(x.op, PORTSC(p));
-    if (!(v & PS_CCS) || !(v & PS_PED)) { klog("usb: port %d did not enable (%08x)", p + 1, v); return; }
+    if (!d) { klog("usb: too many devices"); return; }
     /* keep a slot's DMA pages and rings across re-attaches */
     udev_t keep = *d;
     memset(d, 0, sizeof *d);
@@ -470,19 +490,26 @@ static void attach(int p) {
     for (int i = 0; i < MAX_EP; i++) { d->ep[i].ring = keep.ep[i].ring; d->ep[i].buf = keep.ep[i].buf; }
     if (!d->out || !d->in || !d->buf || !ring_reset(&d->ep0)) return;
     memset(d->out, 0, 4096);
-    d->port = p + 1;
-    d->speed = PS_SPEED(v);
+    d->port = root;
+    d->speed = speed;
+    d->parent = parent;
+    d->pport = pport;
+    if (parent) {
+        d->depth = parent->depth + 1;
+        d->route = parent->route | ((u32)MIN(pport, 15) << (4 * parent->depth));
+        if (parent->speed == SPEED_HIGH && (speed == SPEED_FULL || speed == SPEED_LOW)) { d->tt_slot = parent->slot; d->tt_port = pport; }
+        else { d->tt_slot = parent->tt_slot; d->tt_port = parent->tt_port; }
+    }
     u32 slot = 0;
     int cc = command(0, 0, TRB_TYPE(T_ENABLE_SLOT), &slot);
-    if (cc != CC_SUCCESS || !slot || (int)slot > x.slots) { klog("usb: port %d: no slot (cc %d)", d->port, cc); return; }
+    if (cc != CC_SUCCESS || !slot || (int)slot > x.slots) { klog("usb: port %d: no slot (cc %d)", root, cc); return; }
     d->slot = (int)slot;
     d->used = 1;
     x.dcbaa[slot] = phys(d->out);
     d->mps0 = d->speed == SPEED_SUPER ? 512 : d->speed == SPEED_HIGH ? 64 : 8;
     memset(d->in, 0, 4096);
     ictx(d, 0)[1] = 3;                                                 /* add slot + EP0 */
-    ictx(d, 1)[0] = ((u32)d->speed << 20) | (1u << 27);                /* speed, 1 context entry */
-    ictx(d, 1)[1] = (u32)d->port << 16;                                /* root hub port */
+    slot_ctx(d, 1);
     ep_ctx(ictx(d, 2), 4, d->mps0, 0, phys(d->ep0.trb), 8);
     cc = command(phys(d->in), 0, TRB_TYPE(T_ADDRESS_DEV) | (slot << 24), NULL);
     if (cc != CC_SUCCESS) { klog("usb: port %d: address device failed (cc %d)", d->port, cc); free_dev(d); return; }
@@ -520,11 +547,13 @@ static void attach(int p) {
     }
     const char *nm = NULL;
     for (usize i = 0; i < ARRAY_LEN(known); i++) if (known[i].vid == d->vid && known[i].pid == d->pid) nm = known[i].name;
+    if (d->vid == 0x17e9) nm = "DisplayLink display adapter (closed protocol, not supported)";
     if (kbd_if >= 0 && !nm) nm = "USB keyboard";
     else if (!nm && d->iclass == 3 && d->iproto == 2) nm = "USB mouse";
     fmt(d->what, sizeof d->what, "%s", nm ? nm : class_name(d->iclass ? d->iclass : d->dclass));
     control(d, 0x00, 9, cfg[5], 0, NULL, 0);                           /* SET_CONFIGURATION */
-    klog("usb: port %d: %04x:%04x %s, %s speed, class %02x/%02x, %d endpoints", d->port, d->vid, d->pid, d->what,
+    if (d->dclass == 9) { hub_setup(d); return; }
+    klog("usb: port %d%s: %04x:%04x %s, %s speed, class %02x/%02x, %d endpoints", d->port, d->parent ? " (behind a hub)" : "", d->vid, d->pid, d->what,
          d->speed == SPEED_SUPER ? "super" : d->speed == SPEED_HIGH ? "high" : d->speed == SPEED_LOW ? "low" : "full",
          d->dclass, d->iclass, d->neps);
 
@@ -539,14 +568,94 @@ static void attach(int p) {
     if (d->dclass == 0xe0 || (d->iclass == 0xe0 && d->isub == 1 && d->iproto == 1)) bt_usb_attach(d);
 }
 
+static void attach(int p) {
+    port_reset(p);
+    u32 v = rd(x.op, PORTSC(p));
+    if (!(v & PS_CCS) || !(v & PS_PED)) { klog("usb: port %d did not enable (%08x)", p + 1, v); return; }
+    enumerate(p + 1, PS_SPEED(v), NULL, 0);
+}
+
+/* free a device and everything plugged into it */
+static void detach_tree(udev_t *d) {
+    for (int i = 0; i < MAX_DEV; i++) if (x.dev[i].used && x.dev[i].parent == d) detach_tree(&x.dev[i]);
+    klog("usb: port %d: %s unplugged", d->port, d->what);
+    free_dev(d);
+}
+
+/* ---- USB 2 hubs (USB 2.0 chapter 11) -------------------------------------------------------- */
+#define HUB_PORT_POWER   8
+#define HUB_PORT_RESET   4
+#define HUB_C_CONNECTION 16
+#define HUB_C_RESET      20
+
+static int hub_status(udev_t *h, int port, u16 *st, u16 *chg) {
+    u8 b[4];
+    if (control(h, 0xa3, 0, 0, (u16)port, b, 4)) return -1;            /* GET_STATUS (port) */
+    *st = (u16)(b[0] | b[1] << 8);
+    *chg = (u16)(b[2] | b[3] << 8);
+    return 0;
+}
+
+static void hub_setup(udev_t *h) {
+    u8 hd[16];
+    if (h->speed == SPEED_SUPER || control(h, 0xa0, 6, 0x2900, 0, hd, 9)) {   /* GET_DESCRIPTOR (hub) */
+        klog("usb: port %d: %s hub - not supported", h->port, h->speed == SPEED_SUPER ? "USB 3" : "unreadable");
+        strlcpy(h->what, "USB hub (not supported)", sizeof h->what);
+        return;
+    }
+    h->hub_ports = MIN(hd[2], 15);
+    /* tell the controller it is a hub: slot context Hub, Number of Ports (and TT think time) */
+    memset(h->in, 0, 4096);
+    ictx(h, 0)[1] = 1;
+    slot_ctx(h, MAX(h->max_dci, 1));
+    if (h->speed == SPEED_HIGH) ictx(h, 1)[2] |= (u32)((hd[3] >> 5) & 3) << 16;
+    int cc = command(phys(h->in), 0, TRB_TYPE(T_EVAL_CTX) | ((u32)h->slot << 24), NULL);
+    if (cc != CC_SUCCESS) cc = command(phys(h->in), 0, TRB_TYPE(T_CONFIG_EP) | ((u32)h->slot << 24), NULL);
+    fmt(h->what, sizeof h->what, "USB hub, %d ports", h->hub_ports);
+    klog("usb: port %d%s: %04x:%04x hub with %d ports, %s speed (context cc %d)", h->port, h->parent ? " (behind a hub)" : "",
+         h->vid, h->pid, h->hub_ports, h->speed == SPEED_HIGH ? "high" : "full", cc);
+    for (int i = 1; i <= h->hub_ports; i++) control(h, 0x23, 3, HUB_PORT_POWER, (u16)i, NULL, 0);   /* SET_FEATURE */
+    thread_sleep_ms(MAX(hd[5] * 2, 100));                             /* power-on to power-good */
+    h->hub_ival = 0;
+}
+
+static void hub_poll(udev_t *h) {
+    for (int port = 1; port <= h->hub_ports; port++) {
+        u16 st, chg;
+        if (hub_status(h, port, &st, &chg)) return;
+        if (chg & 1) control(h, 0x23, 1, HUB_C_CONNECTION, (u16)port, NULL, 0);   /* CLEAR_FEATURE */
+        int present = (h->hub_present >> (port - 1)) & 1;
+        if ((st & 1) && !present) {
+            thread_sleep_ms(100);                                      /* debounce */
+            control(h, 0x23, 3, HUB_PORT_RESET, (u16)port, NULL, 0);
+            int ok = 0;
+            for (int t = 0; t < 50 && !ok; t++) {
+                thread_sleep_ms(10);
+                if (hub_status(h, port, &st, &chg)) return;
+                ok = (chg & 0x10) && (st & 2);                         /* reset done, enabled */
+            }
+            control(h, 0x23, 1, HUB_C_RESET, (u16)port, NULL, 0);
+            if (!ok) { klog("usb: hub port %d did not enable", port); continue; }
+            thread_sleep_ms(10);
+            int speed = (st & 0x200) ? SPEED_LOW : (st & 0x400) ? SPEED_HIGH : SPEED_FULL;
+            h->hub_present |= 1u << (port - 1);
+            enumerate(h->port, speed, h, port);
+        } else if (!(st & 1) && present) {
+            h->hub_present &= ~(1u << (port - 1));
+            for (int i = 0; i < MAX_DEV; i++)
+                if (x.dev[i].used && x.dev[i].parent == h && x.dev[i].pport == port) detach_tree(&x.dev[i]);
+        }
+    }
+}
+
 static void scan_ports(void) {
     for (int p = 0; p < x.ports; p++) {
         u32 v = rd(x.op, PORTSC(p));
         if (v & PS_CSC) wr(x.op, PORTSC(p), (v & PS_KEEP) | PS_CSC);
         udev_t *d = NULL;
-        for (int i = 0; i < MAX_DEV; i++) if (x.dev[i].used && x.dev[i].port == p + 1) d = &x.dev[i];
+        for (int i = 0; i < MAX_DEV; i++) if (x.dev[i].used && x.dev[i].port == p + 1 && !x.dev[i].parent) d = &x.dev[i];
         if ((v & PS_CCS) && !d) attach(p);
-        else if (!(v & PS_CCS) && d) { klog("usb: port %d: %s unplugged", d->port, d->what); free_dev(d); }
+        else if (!(v & PS_CCS) && d) detach_tree(d);
     }
 }
 
@@ -651,6 +760,11 @@ int xhci_poll(event_t *out, int max) {
         fmt(x.status, sizeof x.status, "xHCI, %d ports, %d device%s", x.ports, c, c == 1 ? "" : "s");
     }
     u64 now = k_now_ms();
+    static u64 next_hub;
+    if (now >= next_hub) {
+        next_hub = now + 250;
+        for (int i = 0; i < MAX_DEV; i++) if (x.dev[i].used && x.dev[i].hub_ports) hub_poll(&x.dev[i]);
+    }
     if (x.rep_on && now >= x.rep_next && n < max) {                    /* key repeat */
         out[n++] = (event_t){ .type = EV_KEY, .scan = x.rep_scan, .ch = x.rep_ch };
         x.rep_next = now + 35;

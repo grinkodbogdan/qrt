@@ -17,7 +17,8 @@ exec qemu-system-x86_64 \
     -drive if=pflash,format=raw,readonly=on,file="$code" \
     -drive if=pflash,format=raw,file="$myvars" \
     -drive format=raw,file="$here/build/qrt.img" \
-    -device qemu-xhci -device usb-kbd -device usb-tablet \
+    -device qemu-xhci,id=xhci -device usb-tablet,bus=xhci.0,port=1 \
+    -device usb-hub,bus=xhci.0,port=2 -device usb-kbd,bus=xhci.0,port=2.1 \
     -device VGA,xres=1280,yres=800 \
     -rtc base=localtime \
     "$@"

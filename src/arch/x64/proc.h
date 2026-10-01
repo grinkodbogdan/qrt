@@ -12,7 +12,8 @@ typedef struct {
 } term_t;
 void term_append(term_t *t, const char *s, usize n);
 
-enum { F_NONE, F_FILE, F_DIR, F_TTY, F_NULL, F_SOCK };
+enum { F_NONE, F_FILE, F_DIR, F_TTY, F_NULL, F_SOCK, F_PIPE };
+struct upipe;
 typedef struct {
     int type;
     vnode_t *vn;
@@ -20,6 +21,8 @@ typedef struct {
     int flags;
     int dir_index;
     int sock;                     /* F_SOCK: index into lsock.c's table */
+    struct upipe *pipe;           /* F_PIPE: the pipe; flags & 1 = the write end */
+    int cloexec;                  /* FD_CLOEXEC: closed by execve */
 } ufile_t;
 
 #define MAX_FDS  32
@@ -28,7 +31,7 @@ typedef struct {
 typedef struct { u64 start, end; } vma_t;
 
 typedef struct proc {
-    int pid;
+    int pid, ppid;
     char name[32];
     char exe[128];
     u64 cr3;
@@ -48,6 +51,9 @@ typedef struct proc {
     int exit_code;
     u64 syscalls;
     volatile int killed;
+    volatile int exec_done;       /* vfork: the parent waits for exec or exit */
+    int reaped;                   /* wait4 collected it */
+    int sig;                      /* killed by this signal (0: exited) */
 } proc_t;
 
 #define USER_STACK_TOP   USER_TOP
@@ -68,4 +74,12 @@ int     proc_range_free(proc_t *p, u64 start, u64 end);
 void    proc_unmap(proc_t *p, u64 start, u64 end);  /* drop pages and VMAs in [start, end) */
 i64     proc_clone(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 ctid, u64 tls);
 void    proc_thread_exit(int code);              /* this thread only; the last one ends the process */
+i64     proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, char **envp, int envc);
+i64     proc_wait(proc_t *p, int pid, u64 ustatus, int options);
+i64     proc_signal(proc_t *p, int pid, int sig);
+proc_t *proc_by_pid(int pid);
+/* linux.c: file descriptors */
+void    fd_release(proc_t *p, int fd);           /* close, dropping socket/pipe references */
+void    fd_addref(proc_t *p, int fd);            /* a copy of the descriptor now exists (dup, fork) */
+void    fds_release_all(proc_t *p);
 void    proc_init(void);

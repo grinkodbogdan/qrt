@@ -29,6 +29,16 @@ extern int (*page_fault_hook)(frame_t *f);
 
 static int next_pid = 100;
 
+/* every process ever started, for wait4 / kill / getppid (proc_t's are never freed) */
+#define MAX_PROCS 1024
+static proc_t *procs[MAX_PROCS];
+static int nprocs;
+static void proc_register(proc_t *p) { if (nprocs < MAX_PROCS) procs[nprocs++] = p; }
+proc_t *proc_by_pid(int pid) {
+    for (int i = nprocs - 1; i >= 0; i--) if (procs[i]->pid == pid) return procs[i];
+    return NULL;
+}
+
 static void term_put(term_t *t, const char *s, usize n) {
     if (t->len + n + 1 > t->cap) {
         usize cap = MAX(t->cap * 2, t->len + n + 4096);
@@ -255,15 +265,17 @@ static u8 *read_file(const char *path, u64 *size) {
 }
 
 /* argv, envp and the auxiliary vector, laid out the way the Linux kernel does */
-static u64 build_stack(proc_t *p, int argc, const char *const *argv, u64 phdr, u16 phnum) {
-    static const char *envp[] = { "PATH=/bin:/usr/bin", "HOME=/", "TERM=dumb", "USER=root", "PWD=/",
-                                  "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu", NULL };
+static const char *const default_env[] = { "PATH=/bin:/usr/bin", "HOME=/", "TERM=dumb", "USER=root", "PWD=/",
+                                           "LD_LIBRARY_PATH=/lib:/usr/lib:/lib/x86_64-linux-gnu", NULL };
+
+static u64 build_stack(proc_t *p, int argc, const char *const *argv, const char *const *envp, u64 phdr, u16 phnum) {
+    if (!envp) envp = default_env;
     u64 sp = USER_STACK_TOP;
-    u64 strs[48], envs[12];
+    u64 strs[64], envs[64];
     int nenv = 0;
-    argc = MIN(argc, 40);
+    argc = MIN(argc, 64);
     for (int i = argc - 1; i >= 0; i--) { u64 n = strlen(argv[i]) + 1; sp -= n; put_user(p, sp, argv[i], n); strs[i] = sp; }
-    for (int i = 0; envp[i]; i++) { u64 n = strlen(envp[i]) + 1; sp -= n; put_user(p, sp, envp[i], n); envs[nenv++] = sp; }
+    for (int i = 0; envp[i] && nenv < 64; i++) { u64 n = strlen(envp[i]) + 1; sp -= n; put_user(p, sp, envp[i], n); envs[nenv++] = sp; }
     sp -= 8; put_user(p, sp, "x86_64", 7); u64 platform = sp;
     u64 execfn = strs[0];
     u8 rnd[16];
@@ -332,11 +344,12 @@ proc_t *proc_spawn(const char *path, int argc, const char *const *argv, term_t *
     p->brk_start = p->brk = (im.hi + PAGE - 1) & ~(PAGE - 1);
     proc_add_vma(p, p->brk_start, p->brk);
     p->mmap_next = USER_MMAP_BASE;
-    p->sp = build_stack(p, argc, argv, im.phdr, im.phnum);
+    p->sp = build_stack(p, argc, argv, NULL, im.phdr, im.phnum);
     p->fd[0] = (ufile_t){ F_NULL };                        /* stdin: empty */
     p->fd[1] = (ufile_t){ F_TTY };
     p->fd[2] = (ufile_t){ F_TTY };
     p->nthreads = 1;
+    proc_register(p);
     u64 fl = irq_save();                       /* the thread must not run before it knows its process */
     p->th = thread_create(p->name, user_thread, p, p->cr3);
     p->th->proc = p;
@@ -362,8 +375,54 @@ static void clone_thread(void *arg) {
     enter_user_frame(&fr);
 }
 
+#define CLONE_VFORK          0x00004000
+
+/* fork (and vfork, and clone without CLONE_THREAD): a new process with a copy
+ * of the address space and the descriptors; its thread resumes from a copy of
+ * the caller's frame with RAX = 0.  vfork's parent waits for exec or exit. */
+static i64 proc_fork(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 ctid, u64 tls) {
+    proc_t *c = kalloc(sizeof *c);
+    c->pid = next_pid++;
+    c->ppid = p->pid;
+    strlcpy(c->name, p->name, sizeof c->name);
+    strlcpy(c->exe, p->exe, sizeof c->exe);
+    strlcpy(c->cwd, p->cwd, sizeof c->cwd);
+    c->term = p->term;
+    c->entry = p->entry; c->start = p->start; c->interp_base = p->interp_base;
+    c->brk_start = p->brk_start; c->brk = p->brk; c->mmap_next = p->mmap_next;
+    memcpy(c->vma, p->vma, sizeof c->vma);
+    c->nvma = p->nvma;
+    c->cr3 = as_clone(p->cr3);
+    memcpy(c->fd, p->fd, sizeof c->fd);
+    for (int i = 0; i < MAX_FDS; i++) fd_addref(c, i);
+    frame_t *cf = kalloc(sizeof *cf);
+    *cf = *f;
+    cf->rax = 0;
+    if (newsp) cf->rsp = newsp;
+    if ((flags & CLONE_PARENT_SETTID) && proc_user_ok(p, ptid, 4)) *(i32 *)(usize)ptid = c->pid;
+    if ((flags & CLONE_CHILD_SETTID) && ctid) {             /* in the child's copy */
+        u64 pa = as_translate(c->cr3, ctid);
+        i32 v = c->pid;
+        if (pa) phys_write(pa, &v, 4);
+    }
+    c->nthreads = 1;
+    proc_register(c);
+    u64 fl = irq_save();
+    thread_t *t = thread_create(c->name, clone_thread, cf, c->cr3);
+    t->proc = c;
+    t->tid = c->pid;
+    t->fs_base = (flags & CLONE_SETTLS) ? tls : thread_current()->fs_base;
+    t->clear_tid = (flags & CLONE_CHILD_CLEARTID) ? ctid : 0;
+    c->th = t;
+    irq_restore(fl);
+    if (flags & CLONE_VFORK)
+        while (!c->exec_done && !c->exited && !p->killed) thread_sleep_ms(1);
+    return c->pid;
+}
+
 i64 proc_clone(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 ctid, u64 tls) {
-    if (!(flags & CLONE_VM) || !(flags & CLONE_THREAD)) return -38;     /* fork comes later: ENOSYS */
+    if (!(flags & CLONE_THREAD)) return proc_fork(p, f, flags, newsp, ptid, ctid, tls);
+    if (!(flags & CLONE_VM)) return -22;
     frame_t *cf = kalloc(sizeof *cf);
     *cf = *f;
     cf->rax = 0;                                           /* the child sees clone() return 0 */
@@ -406,7 +465,7 @@ void proc_thread_exit(int code) {
     release_tid(p, t);
     if (--p->nthreads > 0) thread_exit();
     sti();                                     /* socket cleanup takes the network lock */
-    lsock_exit(p);
+    fds_release_all(p);
     cli();
     teardown(p, p->killed ? (p->exit_code ? p->exit_code : 137) : code);
     thread_exit();
@@ -431,18 +490,23 @@ void proc_exit(int code) {
     }
     if (--p->nthreads > 0) thread_exit();
     sti();
-    lsock_exit(p);
+    fds_release_all(p);
     cli();
     teardown(p, code);
     thread_exit();
 }
 
 void proc_kill(proc_t *p) {
-    if (!p || p->exited) return;
+    if (!p) return;
+    for (int i = 0; i < nprocs; i++)                  /* its children first (pipelines under a shell) */
+        if (procs[i]->ppid == p->pid && procs[i] != p && !procs[i]->exited) proc_kill(procs[i]);
+    if (p->exited) return;
     u64 fl = irq_save();
-    if (!p->killed) term_append(p->term, "\n[stopping]\n", 13);
+    int by_signal = p->sig != 0;                     /* kill() from a program: no message */
+    if (!p->killed && !by_signal) term_append(p->term, "\n[stopping]\n", 13);
     p->killed = 1;
     p->exit_code = 137;
+    if (!p->sig) p->sig = 9;
     /* threads that are running user code (not this one: we are the shell)
      * stop now; those in a system call leave when it returns */
     thread_t *all[64];
@@ -457,12 +521,163 @@ void proc_kill(proc_t *p) {
     }
     if (!left && p->nthreads <= 0) {
         irq_restore(fl);
-        lsock_exit(p);                         /* nothing of it runs any more: its sockets are free to close */
+        fds_release_all(p);                         /* nothing of it runs any more: its sockets are free to close */
         fl = irq_save();
         as_destroy(p->cr3);
         p->exited = 1;
-        term_append(p->term, "\n[stopped]\n", 11);
+        if (!by_signal) term_append(p->term, "\n[stopped]\n", 11);
         klog("proc: %s (pid %d) stopped", p->name, p->pid);
     }
     irq_restore(fl);
+}
+
+/* ---- exec ---------------------------------------------------------------------------- */
+#define EXEC_MAX_ARGS 64
+
+/* Replace the program of the calling process.  argv/envp are kernel copies. */
+i64 proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, char **envp, int envc) {
+    char resolved[128];
+    if (!strcmp(path, "/proc/self/exe")) strlcpy(resolved, p->exe, sizeof resolved);
+    else strlcpy(resolved, path, sizeof resolved);
+    u64 size = 0;
+    u8 *img = read_file(resolved, &size);
+    if (!img) return -2;                                       /* ENOENT */
+    /* #! scripts: run the interpreter with the script's path */
+    char *sargv[EXEC_MAX_ARGS + 3];
+    char interp[96], iarg[64];
+    if (size > 2 && img[0] == '#' && img[1] == '!') {
+        usize i = 2, n = 0;
+        while (i < size && img[i] == ' ') i++;
+        while (i < size && img[i] != ' ' && img[i] != '\n' && n + 1 < sizeof interp) interp[n++] = (char)img[i++];
+        interp[n] = 0;
+        n = 0;
+        while (i < size && img[i] == ' ') i++;
+        while (i < size && img[i] != '\n' && img[i] != '\r' && n + 1 < sizeof iarg) iarg[n++] = (char)img[i++];
+        while (n && iarg[n - 1] == ' ') n--;
+        iarg[n] = 0;
+        kfree(img);
+        int k2 = 0;
+        sargv[k2++] = interp;
+        if (iarg[0]) sargv[k2++] = iarg;
+        sargv[k2++] = resolved;
+        for (int i2 = 1; i2 < argc && k2 < EXEC_MAX_ARGS + 2; i2++) sargv[k2++] = argv[i2];
+        sargv[k2] = NULL;
+        argv = sargv; argc = k2;
+        strlcpy(resolved, interp, sizeof resolved);
+        img = read_file(resolved, &size);
+        if (!img) return -2;
+    }
+    if (size < 4 || memcmp(img, "\x7f" "ELF", 4)) { kfree(img); return -8; }   /* ENOEXEC */
+
+    /* other threads end now (exec in a threaded program) */
+    thread_t *me = thread_current();
+    u64 fl = irq_save();
+    thread_t *all[64];
+    int nt = sched_threads(all, 64);
+    for (int i = 0; i < nt; i++)
+        if (all[i] != me && all[i]->proc == p && all[i]->state != T_DEAD) { all[i]->state = T_DEAD; p->nthreads--; }
+    irq_restore(fl);
+
+    /* build the new image beside the old one */
+    u64 old_cr3 = p->cr3;
+    vma_t *old_vma = kalloc(sizeof p->vma);
+    memcpy(old_vma, p->vma, sizeof p->vma);
+    int old_nvma = p->nvma;
+    u64 old_interp = p->interp_base;
+    p->cr3 = as_create();
+    p->nvma = 0;
+    p->interp_base = 0;
+    char err[96];
+    image_t im;
+    int ok = load_elf(p, img, size, 0, &im, err, sizeof err);
+    kfree(img);
+    if (ok && im.interp[0]) {
+        u64 isize = 0;
+        u8 *iimg = read_file(im.interp, &isize);
+        u64 span = iimg ? elf_span(iimg, isize) : 0;
+        u64 ibase = span ? proc_find_free(p, span) : 0;
+        image_t ii;
+        ok = iimg && ibase && load_elf(p, iimg, isize, ibase, &ii, err, sizeof err);
+        if (iimg) kfree(iimg);
+        if (ok) { p->interp_base = ibase; p->start = ii.entry; }
+    } else if (ok) p->start = im.entry;
+    if (!ok) {                                                 /* keep running the old program */
+        as_destroy(p->cr3);
+        p->cr3 = old_cr3;
+        memcpy(p->vma, old_vma, sizeof p->vma);
+        p->nvma = old_nvma;
+        p->interp_base = old_interp;
+        kfree(old_vma);
+        klog("proc: exec %s failed: %s", resolved, err);
+        return -8;
+    }
+    kfree(old_vma);
+    p->entry = im.entry;
+    p->brk_start = p->brk = (im.hi + PAGE - 1) & ~(PAGE - 1);
+    proc_add_vma(p, p->brk_start, p->brk);
+    p->mmap_next = USER_MMAP_BASE;
+    const char *const *ev = envc ? (const char *const *)envp : NULL;
+    p->sp = build_stack(p, argc, (const char *const *)argv, ev, im.phdr, im.phnum);
+
+    fl = irq_save();
+    me->cr3 = p->cr3;
+    write_cr3(p->cr3);
+    as_destroy(old_cr3);
+    me->fs_base = 0;
+    wrmsr(MSR_FS_BASE, 0);
+    me->clear_tid = 0;
+    irq_restore(fl);
+
+    for (int i = 0; i < MAX_FDS; i++) if (p->fd[i].type && p->fd[i].cloexec) fd_release(p, i);
+    const char *base = resolved;
+    for (const char *c = resolved; *c; c++) if (*c == '/') base = c + 1;
+    strlcpy(p->name, argc > 0 && argv[0][0] ? argv[0] : base, sizeof p->name);
+    strlcpy(p->exe, resolved, sizeof p->exe);
+    me->name = p->name;
+    p->exec_done = 1;
+
+    memset(f, 0, sizeof *f);                                   /* a fresh start: rip, rsp, nothing else */
+    f->rip = p->start;
+    f->rsp = p->sp;
+    f->cs = 0x2b; f->ss = 0x23;
+    f->rflags = 0x202;
+    return 0;
+}
+
+/* ---- wait4 / kill ------------------------------------------------------------------------ */
+i64 proc_wait(proc_t *p, int pid, u64 ustatus, int options) {
+    for (;;) {
+        int have = 0;
+        for (int i = 0; i < nprocs; i++) {
+            proc_t *c = procs[i];
+            if (c->ppid != p->pid || c->reaped || c == p) continue;
+            if (pid > 0 && c->pid != pid) continue;
+            have = 1;
+            if (!c->exited) continue;
+            c->reaped = 1;
+            if (ustatus && proc_user_ok(p, ustatus, 4))
+                *(i32 *)(usize)ustatus = c->sig ? c->sig : (c->exit_code & 0xff) << 8;
+            return c->pid;
+        }
+        if (!have) return -10;                                 /* ECHILD */
+        if (options & 1) return 0;                             /* WNOHANG */
+        if (p->killed) return -4;                              /* EINTR */
+        thread_sleep_ms(2);
+    }
+}
+
+/* no signal handlers yet: every catchable signal that would end a process ends it */
+i64 proc_signal(proc_t *p, int pid, int sig) {
+    int n = 0;
+    for (int i = 0; i < nprocs; i++) {
+        proc_t *t = procs[i];
+        if (t->exited) continue;
+        if (pid > 0 ? t->pid != pid : pid == -1 ? t == p : t->ppid != p->pid && t != p) continue;
+        n++;
+        if (!sig || sig == 17 || sig == 18 || sig == 23 || sig == 28) continue;   /* 0, CHLD, CONT, URG, WINCH */
+        t->sig = sig;
+        if (t == p) { p->exit_code = 128 + sig; proc_exit(128 + sig); }
+        proc_kill(t);
+    }
+    return n ? 0 : -3;                                         /* ESRCH */
 }

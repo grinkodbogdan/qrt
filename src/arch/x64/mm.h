@@ -31,6 +31,7 @@ void *mm_map_mmio(u64 base, u64 size);             /* device registers anywhere 
 
 /* user address spaces */
 u64   as_create(void);                                   /* returns CR3 */
+u64   as_clone(u64 cr3);                                 /* fork: a copy of the user pages */
 void  as_destroy(u64 cr3);
 int   as_map(u64 cr3, u64 va, u64 frame, int writable);  /* 4 KiB, user-accessible */
 u64   as_translate(u64 cr3, u64 va);                     /* physical address or 0 */

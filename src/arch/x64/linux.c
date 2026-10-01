@@ -98,7 +98,86 @@ static i64 do_open(proc_t *p, int dirfd, u64 upath, int flags) {
     int fd = alloc_fd(p, 0);
     if (fd < 0) return fd;
     p->fd[fd] = (ufile_t){ n->dir ? F_DIR : F_FILE, n, (flags & O_APPEND) ? vfs_size(n) : 0, flags, 0 };
+    p->fd[fd].cloexec = (flags & 02000000) != 0;
     return fd;
+}
+
+/* ---- pipes --------------------------------------------------------------------------- */
+#define PIPE_SIZE 65536
+typedef struct upipe { u8 *buf; u32 head, tail; int readers, writers; } upipe_t;
+enum { EPIPE = 32 };
+
+static upipe_t *pipe_new(void) {
+    upipe_t *pp = kalloc(sizeof *pp);
+    pp->buf = kalloc(PIPE_SIZE);
+    pp->readers = pp->writers = 1;
+    return pp;
+}
+
+static void pipe_unref(upipe_t *pp, int wr) {
+    u64 fl = irq_save();
+    if (wr) pp->writers--; else pp->readers--;
+    int gone = pp->readers <= 0 && pp->writers <= 0;
+    irq_restore(fl);
+    if (gone) { kfree(pp->buf); kfree(pp); }
+}
+
+static i64 pipe_read(proc_t *p, upipe_t *pp, u8 *dst, u64 len, int nonblock) {
+    for (;;) {
+        u64 fl = irq_save();
+        u32 avail = pp->head - pp->tail;
+        if (avail) {
+            u64 n = MIN(len, avail);
+            for (u64 i = 0; i < n; i++) dst[i] = pp->buf[(pp->tail + i) % PIPE_SIZE];
+            pp->tail += (u32)n;
+            irq_restore(fl);
+            return (i64)n;
+        }
+        int eof = pp->writers <= 0;
+        irq_restore(fl);
+        if (eof) return 0;
+        if (nonblock) return -EAGAIN;
+        if (p->killed) return -EINTR;
+        thread_sleep_ms(1);
+    }
+}
+
+static i64 pipe_write(proc_t *p, upipe_t *pp, const u8 *src, u64 len, int nonblock) {
+    u64 done = 0;
+    while (done < len) {
+        u64 fl = irq_save();
+        if (pp->readers <= 0) { irq_restore(fl); return done ? (i64)done : -EPIPE; }
+        u32 room = PIPE_SIZE - (pp->head - pp->tail);
+        u64 n = MIN(len - done, room);
+        for (u64 i = 0; i < n; i++) pp->buf[(pp->head + i) % PIPE_SIZE] = src[done + i];
+        pp->head += (u32)n;
+        irq_restore(fl);
+        done += n;
+        if (done < len) {
+            if (nonblock) return done ? (i64)done : -EAGAIN;
+            if (p->killed) return done ? (i64)done : -EINTR;
+            thread_sleep_ms(1);
+        }
+    }
+    return (i64)done;
+}
+
+/* ---- descriptor references (dup, fork, close, exit) ------------------------------------- */
+void fd_addref(proc_t *p, int fd) {
+    ufile_t *f = &p->fd[fd];
+    if (f->type == F_SOCK) lsock_dup(p, fd);
+    else if (f->type == F_PIPE) { u64 fl = irq_save(); if (f->flags & 1) f->pipe->writers++; else f->pipe->readers++; irq_restore(fl); }
+}
+
+void fd_release(proc_t *p, int fd) {
+    ufile_t *f = &p->fd[fd];
+    if (f->type == F_SOCK) { lsock_close(p, fd); return; }
+    if (f->type == F_PIPE) pipe_unref(f->pipe, f->flags & 1);
+    f->type = F_NONE;
+}
+
+void fds_release_all(proc_t *p) {
+    for (int fd = 0; fd < MAX_FDS; fd++) if (p->fd[fd].type) fd_release(p, fd);
 }
 
 static i64 do_write(proc_t *p, int fd, u64 buf, u64 len) {
@@ -115,6 +194,7 @@ static i64 do_write(proc_t *p, int fd, u64 buf, u64 len) {
     }
     case F_DIR: return -EISDIR;
     case F_SOCK: return lsock_sendto(p, fd, buf, len, 0, 0, 0);
+    case F_PIPE: return (f->flags & 1) ? pipe_write(p, f->pipe, (const u8 *)(usize)buf, len, f->flags & 04000) : -EBADF;
     default: return -EBADF;
     }
 }
@@ -132,6 +212,7 @@ static i64 do_read(proc_t *p, int fd, u64 buf, u64 len) {
     }
     case F_DIR: return -EISDIR;
     case F_SOCK: return lsock_recvfrom(p, fd, buf, len, 0, 0, 0);
+    case F_PIPE: return (f->flags & 1) ? -EBADF : pipe_read(p, f->pipe, (u8 *)(usize)buf, len, f->flags & 04000);
     default: return -EBADF;
     }
 }
@@ -151,6 +232,12 @@ static int fd_ready(proc_t *p, int fd, int events) {
         break;
     }
     case F_TTY: rev = events & POLLOUT; break;            /* no keyboard input for programs */
+    case F_PIPE: {
+        upipe_t *pp = p->fd[fd].pipe;
+        if (p->fd[fd].flags & 1) { if (pp->readers <= 0) rev |= POLLERR; else if (pp->head - pp->tail < PIPE_SIZE) rev |= events & POLLOUT; }
+        else { if (pp->head != pp->tail) rev |= events & POLLIN; if (pp->writers <= 0) rev |= POLLHUP; }
+        break;
+    }
     default: rev = events & (POLLIN | POLLOUT); break;
     }
     return rev;
@@ -409,6 +496,71 @@ static void log_unknown(u64 nr) {
     klog("linux: unimplemented system call %llu", nr);
 }
 
+/* ---- execve --------------------------------------------------------------------------- */
+/* copy a NULL-terminated array of user strings into one kernel buffer */
+static int copy_strv(proc_t *p, u64 uv, char **out, int max, char *buf, usize cap, usize *used) {
+    int n = 0;
+    if (!uv) { out[0] = NULL; return 0; }
+    for (;; n++) {
+        if (!UOK(uv + (u64)n * 8, 8)) return -EFAULT;
+        u64 s1 = ((u64 *)(usize)uv)[n];
+        if (!s1) break;
+        if (n >= max) return -7;                                /* E2BIG */
+        char *dst = buf + *used;
+        if (get_path(p, s1, dst, MIN(cap - *used, 4096)) < 0) return -EFAULT;
+        out[n] = dst;
+        *used += strlen(dst) + 1;
+        if (*used + 16 >= cap) return -7;
+    }
+    out[n] = NULL;
+    return n;
+}
+
+/* a command QRT does not ship as a file (/bin/ls...) is a busybox applet */
+static int applet_path(const char *path, char *out, usize cap) {
+    const char *base = strrchr(path, '/');
+    if (!base || !vfs_lookup("/bin/busybox")) return 0;
+    if (strncmp(path, "/bin/", 5) && strncmp(path, "/usr/bin/", 9) && strncmp(path, "/sbin/", 6) && strncmp(path, "/usr/sbin/", 10)) return 0;
+    if (base == path + strlen(path) - 1) return 0;
+    strlcpy(out, "/bin/busybox", cap);
+    return 1;
+}
+
+static i64 exec_common(proc_t *p, frame_t *f, const char *full, u64 uargv, u64 uenvp) {
+    char *argv[66], *envp[66];
+    usize cap = 32768, used = 0;
+    char *buf = kalloc(cap);
+    int argc = copy_strv(p, uargv, argv, 64, buf, cap, &used);
+    int envc = argc < 0 ? argc : copy_strv(p, uenvp, envp, 64, buf, cap, &used);
+    if (argc < 0 || envc < 0) { kfree(buf); return argc < 0 ? argc : envc; }
+    if (!argc) { argv[0] = (char *)full; argv[1] = NULL; argc = 1; }
+    char path[160];
+    strlcpy(path, full, sizeof path);
+    if (!vfs_lookup(path) && strcmp(path, "/proc/self/exe") && !applet_path(full, path, sizeof path)) { kfree(buf); return -ENOENT; }
+    vnode_t *vn = vfs_lookup(path);
+    if (vn && vn->dir) { kfree(buf); return -13; }               /* EACCES */
+    i64 r = proc_exec(p, f, path, argv, argc, envp, envc);
+    kfree(buf);
+    return r;
+}
+
+static i64 do_execve(proc_t *p, frame_t *f, u64 upath, u64 uargv, u64 uenvp) {
+    char path[160], full[256];
+    int e = get_path(p, upath, path, sizeof path);
+    if (e) return e;
+    abs_path(p, AT_FDCWD, path, full, sizeof full);
+    return exec_common(p, f, full, uargv, uenvp);
+}
+
+static i64 do_execve_at(proc_t *p, frame_t *f, int dirfd, u64 upath, u64 uargv, u64 uenvp) {
+    char path[160], full[256];
+    int e = get_path(p, upath, path, sizeof path);
+    if (e) return e;
+    if (!path[0] && dirfd >= 0 && dirfd < MAX_FDS && p->fd[dirfd].vn) vfs_path(p->fd[dirfd].vn, full, sizeof full);
+    else abs_path(p, dirfd, path, full, sizeof full);
+    return exec_common(p, f, full, uargv, uenvp);
+}
+
 /* ---- dispatch ----------------------------------------------------------------------- */
 void syscall_dispatch(frame_t *f) {
     proc_t *p = proc_current();
@@ -424,7 +576,7 @@ void syscall_dispatch(frame_t *f) {
     case 257: r = do_open(p, (int)a0, a1, (int)a2); break;
     case 3:
         if ((int)a0 >= 0 && (int)a0 < MAX_FDS && p->fd[a0].type) {
-            if (p->fd[a0].type == F_SOCK) lsock_close(p, (int)a0); else p->fd[a0].type = F_NONE;
+            fd_release(p, (int)a0);
             r = 0;
         } else r = -EBADF;
         break;
@@ -474,9 +626,10 @@ void syscall_dispatch(frame_t *f) {
         if ((int)a0 < 0 || (int)a0 >= MAX_FDS || !p->fd[a0].type) { r = -EBADF; break; }
         if (!UOK(a1, sizeof(lstat_t))) { r = -EFAULT; break; }
         fill_stat((lstat_t *)(usize)a1, p->fd[a0].vn, p->fd[a0].type == F_TTY);
+        if (p->fd[a0].type == F_PIPE) ((lstat_t *)(usize)a1)->st_mode = 0010600;
         r = 0; break;
     case 8: {                                           /* lseek */
-        if ((int)a0 < 0 || (int)a0 >= MAX_FDS || p->fd[a0].type != F_FILE) { r = p->fd[a0 & 31].type == F_TTY ? -ESPIPE : -EBADF; break; }
+        if ((int)a0 < 0 || (int)a0 >= MAX_FDS || p->fd[a0].type != F_FILE) { r = p->fd[a0 & 31].type == F_TTY || p->fd[a0 & 31].type == F_PIPE ? -ESPIPE : -EBADF; break; }
         ufile_t *uf = &p->fd[a0];
         i64 base = a2 == 0 ? 0 : a2 == 1 ? (i64)uf->off : (i64)vfs_size(uf->vn);
         i64 no = base + (i64)a1;
@@ -525,7 +678,9 @@ void syscall_dispatch(frame_t *f) {
         break;
     case 72:                                            /* fcntl */
         if ((int)a0 < 0 || (int)a0 >= MAX_FDS || !p->fd[a0].type) { r = -EBADF; break; }
-        if (a1 == 0 || a1 == 1030) { int fd = alloc_fd(p, (int)a2); if (fd >= 0) { p->fd[fd] = p->fd[a0]; if (p->fd[fd].type == F_SOCK) lsock_dup(p, fd); } r = fd; }
+        if (a1 == 0 || a1 == 1030) { int fd = alloc_fd(p, (int)a2); if (fd >= 0) { p->fd[fd] = p->fd[a0]; fd_addref(p, fd); p->fd[fd].cloexec = a1 == 1030; } r = fd; }
+        else if (a1 == 1) r = p->fd[a0].cloexec;           /* F_GETFD */
+        else if (a1 == 2) { p->fd[a0].cloexec = (int)(a2 & 1); r = 0; }   /* F_SETFD */
         else if (a1 == 3) r = p->fd[a0].type == F_SOCK ? 2 | (p->fd[a0].flags & 04000) : (p->fd[a0].flags & O_ACCMODE ? p->fd[a0].flags : 2);
         else if (a1 == 4) {                             /* F_SETFL: O_NONBLOCK on sockets */
             p->fd[a0].flags = (p->fd[a0].flags & ~04000) | ((int)a2 & 04000);
@@ -536,16 +691,19 @@ void syscall_dispatch(frame_t *f) {
         break;
     case 32: {
         int fd = alloc_fd(p, 0);
-        if (fd >= 0 && (int)a0 >= 0 && (int)a0 < MAX_FDS) { p->fd[fd] = p->fd[a0]; if (p->fd[fd].type == F_SOCK) lsock_dup(p, fd); }
+        if (fd >= 0 && (int)a0 >= 0 && (int)a0 < MAX_FDS && p->fd[a0].type) { p->fd[fd] = p->fd[a0]; fd_addref(p, fd); p->fd[fd].cloexec = 0; }
+        else if (fd >= 0) fd = -EBADF;
         r = fd;
         break;
     }
     case 33: case 292:
         if ((int)a0 < 0 || (int)a0 >= MAX_FDS || (int)a1 < 0 || (int)a1 >= MAX_FDS) { r = -EBADF; break; }
+        if (!p->fd[a0].type) { r = -EBADF; break; }
         if (a0 != a1) {
-            if (p->fd[a1].type == F_SOCK) lsock_close(p, (int)a1);
+            if (p->fd[a1].type) fd_release(p, (int)a1);
             p->fd[a1] = p->fd[a0];
-            if (p->fd[a1].type == F_SOCK) lsock_dup(p, (int)a1);
+            fd_addref(p, (int)a1);
+            p->fd[a1].cloexec = nr == 292 && (a2 & 02000000);
         }
         r = (i64)a1; break;
     case 21: case 269: case 439: {                      /* access, faccessat, faccessat2 */
@@ -596,7 +754,6 @@ void syscall_dispatch(frame_t *f) {
     case 39: r = p->pid; break;
     case 186: r = me->tid; break;                       /* gettid */
     case 200: case 234: r = 0; break;                   /* tkill, tgkill: no signals yet */
-    case 110: r = 1; break;
     case 102: case 104: case 107: case 108: r = 0; break;       /* root */
     case 95: r = 022; break;                                    /* umask */
     case 97: case 302: {                                        /* getrlimit / prlimit64 */
@@ -660,8 +817,32 @@ void syscall_dispatch(frame_t *f) {
     case 202: r = do_futex(p, a0, (int)a1, (u32)a2, a3, a4, (u32)a5); break;
     case 56: r = proc_clone(p, f, a0, a1, a2, a3, a4); break;   /* clone: threads */
     case 435: r = -ENOSYS; break;                               /* clone3: glibc falls back to clone */
-    case 57: case 58: case 59: r = -ENOSYS; break;              /* fork/vfork/execve: not yet */
-    case 61: r = -ECHILD; break;                                /* wait4 */
+    case 57: r = proc_clone(p, f, 17, 0, 0, 0, 0); break;       /* fork */
+    case 58: r = proc_clone(p, f, 0x4000 | 17, 0, 0, 0, 0); break;   /* vfork */
+    case 59: r = do_execve(p, f, a0, a1, a2); break;
+    case 322: r = do_execve_at(p, f, (int)a0, a1, a2, a3); break;   /* execveat */
+    case 61: r = proc_wait(p, (int)a0, a1, (int)a2); break;    /* wait4 */
+    case 22: case 293: {                                        /* pipe, pipe2 */
+        if (!UOK(a0, 8)) { r = -EFAULT; break; }
+        int rfd = alloc_fd(p, 0);
+        if (rfd < 0) { r = rfd; break; }
+        p->fd[rfd].type = F_PIPE;                               /* reserve it */
+        int wfd = alloc_fd(p, 0);
+        if (wfd < 0) { p->fd[rfd].type = F_NONE; r = wfd; break; }
+        upipe_t *pp = pipe_new();
+        int fl = nr == 293 ? (int)a1 : 0;
+        p->fd[rfd] = (ufile_t){ F_PIPE, NULL, 0, (fl & 04000), 0 };
+        p->fd[wfd] = (ufile_t){ F_PIPE, NULL, 0, (fl & 04000) | 1, 0 };
+        p->fd[rfd].pipe = p->fd[wfd].pipe = pp;
+        p->fd[rfd].cloexec = p->fd[wfd].cloexec = (fl & 02000000) != 0;
+        ((i32 *)(usize)a0)[0] = rfd;
+        ((i32 *)(usize)a0)[1] = wfd;
+        r = 0; break;
+    }
+    case 62: r = proc_signal(p, (int)a0, (int)a1); break;      /* kill */
+    case 110: r = p->ppid; break;                               /* getppid */
+    case 109: case 112: r = nr == 112 ? p->pid : 0; break;      /* setpgid, setsid */
+    case 111: case 121: case 124: r = p->pid; break;            /* getpgrp, getpgid, getsid */
     case 60: me->in_sys = 0; proc_thread_exit((int)(a0 & 0xff)); break;   /* exit: this thread */
     case 231: me->in_sys = 0; proc_exit((int)(a0 & 0xff)); break;         /* exit_group */
     default: log_unknown(nr); break;

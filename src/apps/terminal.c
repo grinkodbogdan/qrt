@@ -132,13 +132,22 @@ static void show_ifconfig(void) {
 #endif
 
 static void run(const char *cmd) {
-    char buf[128];
+    char buf[256];
     strlcpy(buf, cmd, sizeof buf);                 /* the event handler already echoed it after the prompt */
     st.scroll = 0;
 #if defined(__x86_64__)
     if ((st.proc && !st.proc->exited) || st.ping.active) { out("[a program is still running - stop it first]\n"); return; }
     const char *argv[24];
     int argc = 0;
+    /* shell syntax (pipes, redirection, ; && $ * ...): let busybox sh run the line */
+    for (const char *c = buf; *c; c++)
+        if (strchr("|;&<>$`*?'\\(", *c)) {
+            const char *sh[] = { "sh", "-c", buf };
+            char err[96];
+            st.proc = proc_spawn("/bin/busybox", 3, sh, &st.term, err, sizeof err);
+            if (!st.proc) { char m[128]; fmt(m, sizeof m, "%s\n", err); out(m); }
+            return;
+        }
     for (char *p = buf; *p && argc < 23;) {
         while (*p == ' ') p++;
         if (!*p) break;
@@ -160,7 +169,7 @@ static void run(const char *cmd) {
     if (!strcmp(argv[0], "help")) {
         out("Runs static Linux x86-64 programs through QRT's Linux system-call layer.\n"
             "Programs live in /bin; any other name is tried as a busybox applet.\n"
-            "No pipes, redirection or fork yet. 'clear' empties the screen.\n"
+            "Pipes, redirection and ; run through busybox sh. 'clear' empties the screen.\n"
             "Built in: ping [-c N] HOST, ifconfig, wifi. Network programs: wget, nslookup.\n");
         return;
     }

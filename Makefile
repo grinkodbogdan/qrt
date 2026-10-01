@@ -75,7 +75,7 @@ build/BOOTX64.EFI: $(X64_OBJ)
 # Linux programs shipped in /bin (run by the native kernel's Linux layer)
 BUSYBOX ?= /bin/busybox
 ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
-          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/lib64/ld-linux-x86-64.so.2
+          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/lib64/ld-linux-x86-64.so.2
 
 # Dynamically linked programs and the host's glibc / libstdc++ they run with
 # (ld.so in /lib64, the libraries in /lib/x86_64-linux-gnu, as on Debian/Ubuntu)
@@ -93,6 +93,10 @@ build/rootfs/bin/dynhello: tests/linux/dynhello.c
 build/rootfs/bin/threads: tests/linux/threads.c
 	@mkdir -p $(dir $@)
 	$(HOSTCC) -O2 -s -o $@ $< -lpthread
+
+build/rootfs/bin/procs: tests/linux/procs.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -s -o $@ $<
 
 build/rootfs/bin/cxx: tests/linux/cxx.cpp
 	@mkdir -p $(dir $@)

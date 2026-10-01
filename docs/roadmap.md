@@ -15,7 +15,7 @@ QRT supplying the system calls and a display server.
 | Milestone | What it brings | State |
 |---|---|---|
 | 1. Dynamic programs and threads | `PT_INTERP` + ld.so, file-backed `mmap`/`MAP_FIXED`, `munmap` that frees ranges, `clone` threads, `futex` | **done in 0.6.0** |
-| 2. Processes | `fork`/`vfork` (copy of the address space), `execve`, `wait4`, pipes, `dup2`, signals (`rt_sigaction`, delivery on return to user, `kill`), so shells and pipelines work | next |
+| 2. Processes | `fork`/`vfork` (copy of the address space), `execve`, `wait4`, pipes, `dup2`, `kill`; shells and pipelines work | **done in 0.6.3** (signal handlers still to come) |
 | 3. Memory | page protections (`mprotect`, W^X for the JS JIT), a user address space larger than 1 GiB (Firefox reserves several GiB), shared memory (`memfd_create`, `MAP_SHARED`, `/dev/shm`) | |
 | 4. Event loops | `epoll`, `eventfd`, `timerfd`, `signalfd`, Unix sockets with `SCM_RIGHTS` (Firefox's processes talk over them), `socketpair`, `listen`/`accept` | |
 | 5. Files | a writable file system that survives reboots (native eMMC/SD driver), `/proc/self/maps`, `/sys` entries glibc and GTK read, fonts and fontconfig files | |
@@ -65,9 +65,10 @@ the internal xHCI controller (PCI `8086:22b5`). The Broadcom ids in the DSDT
 | Milestone | State |
 |---|---|
 | xHCI host controller driver, enumeration of root-port devices, boot keyboards | **0.6.1**; on the tablet it found a hub (0424:2807) on port 1 and the Bluetooth controller (8087:0a2b) on port 4 |
-| USB hubs, mass storage (sticks) | |
-| Bluetooth over USB (HCI on the control, interrupt and bulk endpoints), Intel's firmware download (`ibt-11-5.sfi`, `.ddc`) | **0.6.2** (tested against a simulated bootloader) |
-| HCI: inquiry and LE scan, the list of nearby devices in the Bluetooth app | **0.6.2** |
+| USB 2 hubs | **0.6.3** (QEMU-tested) |
+| USB mass storage (sticks) | |
+| Bluetooth over USB (HCI on the control, interrupt and bulk endpoints), Intel's firmware download (`ibt-11-5.sfi`, `.ddc`) | **0.6.2**, works on the tablet |
+| HCI: inquiry and LE scan, the list of nearby devices in the Bluetooth app | **0.6.2**, works on the tablet |
 | L2CAP, pairing (Secure Simple Pairing), HID keyboards and mice | |
 | A2DP audio (needs the audio work in section 3 and an SBC encoder) | |
 

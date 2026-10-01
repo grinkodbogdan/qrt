@@ -206,9 +206,17 @@ The Terminal also has a few built-ins:
 - `clear`
 - `help`
 
+Since 0.6.3 there are **processes**: `fork`, `vfork`, `clone` without
+`CLONE_THREAD`, `execve` (with `#!` scripts; names in `/bin` that are not
+files run as busybox applets), `wait4`, `pipe`/`pipe2`, `dup`/`dup2`/`dup3`,
+`FD_CLOEXEC`, `kill` and `getppid`. A command line with shell syntax (`|`,
+`>`, `;`, `&&`, `$`, `*` and so on) runs through busybox `sh -c`, so
+`ls /bin | wc -l` or `cat /proc/cpuinfo > /tmp/cpu; wc -l /tmp/cpu` work.
+`procs` tests fork, pipes, exec, `posix_spawn`, `popen` and `kill`.
+
 Not supported yet (see [docs/roadmap.md](docs/roadmap.md)):
-- `fork`/`exec` (so there are no pipelines or shells)
-- signals (busybox `ping` sends only one packet: use the built-in `ping`)
+- signal handlers: a signal that would end a program ends it; handlers are
+  never called (busybox `ping` sends only one packet: use the built-in `ping`)
 - memory protection (`mprotect` is accepted but pages stay writable)
 - listening sockets, Unix sockets, `epoll`, `eventfd`
 - more than 1 GiB of address space per process
@@ -361,8 +369,8 @@ FreeBSD's.
 | Backlight | LPSS PWM #1, native mode: brightness and sleep (**new in 0.5.5.3, untested on hardware**). QRT only takes control if the firmware left that PWM running. |
 | Sleep | backlight off and a slower frame loop; not ACPI suspend |
 | Audio | no sound yet: 0.6.1 identifies the codec over I2C2 - an RT5670/RT5672 on the tablet (System Monitor → Hardware → Sound); the volume keys drive a mock volume control |
-| USB | 0.6.1: QRT's own xHCI driver in native mode: devices on the root ports are listed under System Monitor → Hardware → USB, USB keyboards work (tested in QEMU, **untested on the tablet**); hubs not yet |
-| Bluetooth | 0.6.2: the Intel 8260's Bluetooth (USB 8087:0a2b, root port 4): firmware download as Linux's btusb/btintel do it, then scanning for classic and LE devices in the **Bluetooth** app (**untested on the tablet**; tested against a simulated controller); no pairing yet |
+| USB | 0.6.1: QRT's own xHCI driver in native mode: devices on the root ports and behind USB 2 hubs (0.6.3) are listed under System Monitor → Hardware → USB; USB keyboards work, also behind a hub (tested in QEMU). A USB-C dock's HDMI output cannot work: DP Alt Mode needs a USB-C port, and the 5855 has micro-USB 2.0, which carries no video. QRT names such docks (USB billboard class) in the device list. |
+| Bluetooth | 0.6.2: the Intel 8260's Bluetooth (USB 8087:0a2b, root port 4): firmware download as Linux's btusb/btintel do it, then scanning for classic and LE devices in the **Bluetooth** app (works on the tablet: it finds devices); no pairing yet |
 | Camera, sensors, battery | no drivers yet (they need ACPI/PMIC support first; see docs/drivers.md) |
 | USB keyboard | both modes (native: QRT's xHCI driver, 0.6.1) |
 
@@ -466,9 +474,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.6.2.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.6.3.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.6.2.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.6.3.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

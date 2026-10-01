@@ -284,6 +284,29 @@ u64 as_create(void) {
 
 static u64 *user_pd(u64 cr3) { return tbl(tbl(tbl(cr3)[0])[0]); }
 
+u64 as_clone(u64 src) {
+    u64 dst = as_create();
+    u64 *spd = user_pd(src), *dpd = user_pd(dst);
+    for (int i = 0; i < 512; i++) {
+        if (!(spd[i] & PTE_P)) continue;
+        u64 *spt = tbl(spd[i]);
+        u64 dpt = pmm_alloc(1);
+        dpd[i] = dpt | PTE_P | PTE_W | PTE_U;
+        for (int j = 0; j < 512; j++) {
+            if (!(spt[j] & PTE_P)) continue;
+            u64 f = pmm_alloc(0);
+            /* user frames are low: copy them with the kernel's tables loaded */
+            u64 fl = irq_save(), cr3 = read_cr3();
+            if (cr3 != kpml4_phys) write_cr3(kpml4_phys);
+            memcpy((void *)(usize)f, (void *)(usize)(spt[j] & PTE_ADDR), PAGE);
+            if (cr3 != kpml4_phys) write_cr3(cr3);
+            irq_restore(fl);
+            tbl(dpt)[j] = f | (spt[j] & (PTE_P | PTE_W | PTE_U));
+        }
+    }
+    return dst;
+}
+
 int as_map(u64 cr3, u64 va, u64 frame, int writable) {
     if (va >= USER_TOP) return -1;
     u64 *pd = user_pd(cr3);

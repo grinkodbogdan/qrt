@@ -246,17 +246,17 @@ def default_script(q, shots):
     shots.append(q.shot("05-terminal-net"))
     # dynamically linked glibc programs: ld.so + libc/libm/libstdc++, threads (clone + futex)
     if ARCH == "x64":
-        for cmd, wait in [("clear", 1), ("dynhello", 6), ("threads", 15), ("cxx", 10)]:
+        for cmd, wait in [("clear", 1), ("dynhello", 6), ("threads", 15), ("cxx", 10), ("procs", 15), ("ls /bin | wc -l", 6)]:
             q.keys(*[c if c != " " else "spc" for c in cmd], settle=0.2)
             q.keys("ret", settle=wait)
         shots.append(q.shot("05-terminal-dynamic"))
         slog = open(os.path.join(ROOT, "build", f"serial-{ARCH}.log"), errors="replace").read()
-        for prog in ["dynhello", "threads", "cxx"]:
+        for prog in ["dynhello", "threads", "cxx", "procs"]:
             if f"proc: {prog} (pid" not in slog or not any(f"proc: {prog} (pid" in l and "exited with 0," in l for l in slog.splitlines()):
                 lines = [l for l in slog.splitlines() if prog in l or "linux:" in l][-6:]
                 print(f"FAIL: {prog} did not exit cleanly\n  " + "\n  ".join(lines))
                 sys.exit(1)
-        print("linux: dynhello, threads and cxx ran and exited with 0")
+        print("linux: dynhello, threads, cxx and procs (fork/exec/pipes) ran and exited with 0")
         # the USB keyboard through QRT's own xHCI driver: type "hello" + Enter
         for k in ["h", "e", "l", "l", "o", "ret"]:
             q.cmd("send-key", keys=[{"type": "qcode", "data": k}])
