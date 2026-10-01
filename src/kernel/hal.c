@@ -3,6 +3,7 @@
  */
 #include "kernel.h"
 #include "../drivers/buttons.h"
+#include "../drivers/usb/xhci.h"
 #include "../drivers/touch.h"
 #include "../drivers/uart.h"
 #if defined(__x86_64__)
@@ -252,6 +253,7 @@ int hal_poll(event_t *out, int max) {
 
     if (k.native) {
         n += buttons_poll(out + n, max - n);
+        n += xhci_poll(out + n, max - n);
         return n + serial_keys(out + n, max - n);
     }
     n += buttons_poll(out + n, max - n);                 /* firmware mode reads the pads too */

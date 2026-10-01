@@ -13,6 +13,8 @@
 #include "e1000.h"
 #include "iwm/iwm.h"
 #include "i915/gpu.h"
+#include "usb/xhci.h"
+#include "audio.h"
 #if defined(__x86_64__)
 #include "../arch/x64/irq.h"
 #endif
@@ -48,6 +50,34 @@ static int gpu_dev_probe(device_t *d) {
     return 0;
 }
 static const driver_t drv_gpu = { "i915", gpu_pci, NULL, NULL, gpu_dev_probe, gpu_dev_status };
+
+/* ---- USB 3 host controller (xHCI): root-port devices, keyboards ------------------ */
+static const pci_match_t xhci_pci[] = { { PCI_ANY_ID, PCI_ANY_ID, 0x0c, 0x03 }, { 0 } };
+static void xhci_dev_status(device_t *d) { xhci_status(d->status, sizeof d->status); }
+static int xhci_dev_probe(device_t *d) {
+    if (d->pci->prog_if != 0x30) return DEV_NOT_MINE;                 /* UHCI/OHCI/EHCI: not ours */
+    if (!k.native) { strlcpy(d->status, "the firmware's USB driver runs it", sizeof d->status); return 0; }
+    xhci_probe(d->pci);
+    xhci_dev_status(d);
+    return 0;
+}
+static const driver_t drv_xhci = { "xhci", xhci_pci, NULL, NULL, xhci_dev_probe, xhci_dev_status };
+
+/* ---- sound: the Realtek codec (identified in audio.c) and Intel's SST DSP ---------- */
+static const char *const codec_acpi[] = { "10EC5672", "10EC5670", "10EC5640", NULL };
+static const pci_match_t sst_pci[] = { { 0x8086, 0x22a8, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x0f28, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
+static int codec_owner;
+static void codec_status(device_t *d) {
+    if (d->bus == BUS_PCI) strlcpy(d->status, "Intel SST audio DSP: firmware loading not written yet", sizeof d->status);
+    else if (d->priv) strlcpy(d->status, audio_status(), sizeof d->status);
+    else strlcpy(d->status, "another entry for the same codec slot", sizeof d->status);
+}
+static int codec_probe(device_t *d) {
+    if (d->bus == BUS_ACPI && !codec_owner) { codec_owner = 1; d->priv = d; }
+    codec_status(d);
+    return 0;
+}
+static const driver_t drv_audio = { "audio", sst_pci, codec_acpi, NULL, codec_probe, codec_status };
 
 /* ---- framebuffer --------------------------------------------------------- */
 static const pci_match_t fb_pci[] = { { PCI_ANY_ID, PCI_ANY_ID, 0x03, PCI_ANY_CLS }, { 0 } };
@@ -154,4 +184,4 @@ static int e1000_dev_probe(device_t *d) {
 }
 static const driver_t drv_e1000 = { "e1000", e1000_pci, NULL, NULL, e1000_dev_probe, e1000_dev_status };
 
-const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_iwm, &drv_e1000, &drv_chipset, NULL };
+const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_iwm, &drv_e1000, &drv_xhci, &drv_audio, &drv_chipset, NULL };

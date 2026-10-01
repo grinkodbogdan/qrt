@@ -238,6 +238,26 @@ void mm_init(const mm_boot_t *b, const u64 *reserve, int nreserve) {
 /* ---- user address spaces --------------------------------------------------- */
 static u64 *tbl(u64 e) { return (u64 *)(usize)(e & PTE_ADDR); }
 
+/* Map device registers that lie outside the identity map (64-bit BARs are
+ * often placed far above RAM, e.g. at 512 GiB by OVMF): identity-mapped,
+ * uncached, 2 MiB pages, in the kernel's tables.  Only kernel threads use
+ * these addresses. */
+void *mm_map_mmio(u64 base, u64 size) {
+    if (!kpml4_phys || !size) return NULL;
+    if (base + size <= max_phys) { mm_uncached(base, size); return (void *)(usize)base; }
+    u64 *pml4 = tbl(kpml4_phys);
+    for (u64 a = base & ~((2ull << 20) - 1); a < base + size; a += 2ull << 20) {
+        u64 *e4 = &pml4[(a >> 39) & 511];
+        if (!(*e4 & PTE_P)) *e4 = pmm_alloc(1) | PTE_P | PTE_W;
+        u64 *e3 = &tbl(*e4)[(a >> 30) & 511];
+        if (!(*e3 & PTE_P)) *e3 = pmm_alloc(1) | PTE_P | PTE_W;
+        tbl(*e3)[(a >> 21) & 511] = a | PTE_P | PTE_W | PTE_PS | PTE_PCD | PTE_PWT;
+    }
+    write_cr3(read_cr3());
+    return (void *)(usize)base;
+}
+
+
 /* Map a device's registers uncached (PAT entry 3) in the kernel's identity
  * map.  The firmware's MTRRs normally make MMIO uncached anyway; this makes
  * it independent of them.  Whole 2 MiB pages are changed. */

@@ -30,6 +30,8 @@ The drivers built in today (`src/drivers/builtin.c`):
 | Driver | Matches | What it does |
 |---|---|---|
 | `i915` | Cherry Trail graphics `8086:22b0–22b3`, native mode | Starts the Gen8 render engine (forcewake, GGTT, PPAT, workarounds, legacy ring, golden state, self-test) and presents frames with a 3D draw (`src/drivers/i915/gpu.c`). Code and data from Linux's i915 and intel-vaapi-driver (MIT). |
+| `xhci` | PCI class 0c/03, prog-if 0x30, native mode | USB 3 host controller (`src/drivers/usb/xhci.c`): BIOS hand-off, Intel port routing, command/event rings, root-port enumeration, boot-protocol keyboards. Reference: xHCI 1.1 and OpenBSD's xhci(4). |
+| `audio` | `10EC5672`/`10EC5670`/`10EC5640`, PCI `8086:22a8` | Reads the Realtek codec's id registers over I2C2 (`src/drivers/audio.c`, after Linux's rt5670/rt5640); lists the SST DSP. |
 | `framebuffer` | PCI class 03 | Takes over the linear framebuffer the firmware set up and marks it write-combining. |
 | `uart16550` | `com1`, `PNP0501` | Kernel log and test input. IRQ 4 goes through the I/O APIC, and received bytes are buffered by the interrupt handler. |
 | `dw-i2c` | Intel LPSS I2C, Bay Trail `8086:0f41–0f47`, Cherry Trail `8086:22c1–22c7` | The DesignWare I2C controller (`dwi2c.c`). |

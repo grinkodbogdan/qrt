@@ -27,6 +27,7 @@ u64   kernel_cr3(void);
 void  phys_write(u64 pa, const void *src, usize len);  /* works for frames under the user window */
 u64   mm_max_phys(void);
 void  mm_uncached(u64 base, u64 size);              /* device registers: uncached in the identity map */
+void *mm_map_mmio(u64 base, u64 size);             /* device registers anywhere (high 64-bit BARs too) */
 
 /* user address spaces */
 u64   as_create(void);                                   /* returns CR3 */

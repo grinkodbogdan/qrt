@@ -337,9 +337,11 @@ proc_t *proc_spawn(const char *path, int argc, const char *const *argv, term_t *
     p->fd[1] = (ufile_t){ F_TTY };
     p->fd[2] = (ufile_t){ F_TTY };
     p->nthreads = 1;
+    u64 fl = irq_save();                       /* the thread must not run before it knows its process */
     p->th = thread_create(p->name, user_thread, p, p->cr3);
     p->th->proc = p;
     p->th->tid = p->pid;
+    irq_restore(fl);
     return p;
 }
 

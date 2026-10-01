@@ -528,9 +528,8 @@ static int bring_up(void) {
     u64 bar0 = pci_bar(d->bus, d->dev, d->fn, 0);
     g.gmadr = pci_bar(d->bus, d->dev, d->fn, 2);
     if (!bar0 || (bar0 & 0xffffff)) { fail("unexpected register BAR"); return 0; }
-    if (bar0 + (16u << 20) > mm_max_phys()) { fail("registers outside the identity map"); return 0; }
-    mm_uncached(bar0, 16u << 20);
-    g.mmio = (volatile u8 *)(usize)bar0;
+    g.mmio = mm_map_mmio(bar0, 16u << 20);
+    if (!g.mmio) { fail("registers could not be mapped"); return 0; }
     g.gsm = (volatile u64 *)(usize)(bar0 + (8u << 20));               /* upper half of the 16 MiB BAR */
 
     u16 gmch = pci_read16(d->bus, d->dev, d->fn, 0x50);              /* SNB_GMCH_CTRL */

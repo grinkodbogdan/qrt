@@ -257,6 +257,17 @@ def default_script(q, shots):
                 print(f"FAIL: {prog} did not exit cleanly\n  " + "\n  ".join(lines))
                 sys.exit(1)
         print("linux: dynhello, threads and cxx ran and exited with 0")
+        # the USB keyboard through QRT's own xHCI driver: type "hello" + Enter
+        for k in ["h", "e", "l", "l", "o", "ret"]:
+            q.cmd("send-key", keys=[{"type": "qcode", "data": k}])
+            time.sleep(0.15)
+        time.sleep(4)
+        slog = open(os.path.join(ROOT, "build", f"serial-{ARCH}.log"), errors="replace").read()
+        if slog.count("proc: hello (pid") < 2:
+            print("FAIL: typing on the USB keyboard did not run hello\n  " + "\n  ".join(l for l in slog.splitlines() if "usb:" in l))
+            sys.exit(1)
+        shots.append(q.shot("05-terminal-usbkbd"))
+        print("usb: the USB keyboard typed a command")
     # Sketch from the dock: draw a stroke, change ink, draw another
     dock_tap("sketch")
     q.drag([(200 + i * 40, 400 + (i % 5) * 30) for i in range(20)])

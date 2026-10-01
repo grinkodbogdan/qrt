@@ -49,7 +49,8 @@ is set up register by register over I2C.
 
 | Milestone | State |
 |---|---|
-| Find the fitted codec; codec power-up, headphone and speaker paths and volume over the existing DesignWare I2C driver (the volume keys already drive a mock control) | next |
+| Find the fitted codec: its id registers over I2C2 (as Linux's rt5670.c/rt5640.c do) | **0.6.1**, result shown in System Monitor |
+| Codec power-up, headphone and speaker paths and volume over the DesignWare I2C driver (the volume keys already drive a mock control) | next |
 | SST DSP: load the firmware into its memory, the IPC mailbox, start an SSP (I2S) port to the codec | |
 | PCM playback: a ring buffer the DSP reads by DMA, a beep from the shell, then sounds | |
 | `/dev/snd` (ALSA PCM ioctls) for Linux programs, which Firefox needs for sound | |
@@ -63,7 +64,8 @@ the internal xHCI controller (PCI `8086:22b5`). The Broadcom ids in the DSDT
 
 | Milestone | State |
 |---|---|
-| xHCI host controller driver and USB enumeration (also brings USB keyboards and sticks in native mode) | |
+| xHCI host controller driver, enumeration of root-port devices, boot keyboards | **0.6.1** (QEMU-tested; the tablet's USB device list will show the Bluetooth device's id) |
+| USB hubs, mass storage (sticks) | |
 | Bluetooth over USB (HCI on the control and interrupt endpoints), Intel's firmware download (`ibt-11-5.sfi`) | |
 | HCI: inquiry (scan), the list of nearby devices in a Bluetooth panel in Settings | |
 | L2CAP, pairing (Secure Simple Pairing), HID keyboards and mice | |

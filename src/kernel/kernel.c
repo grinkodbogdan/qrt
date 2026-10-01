@@ -1,5 +1,6 @@
 /* kernel.c - Tessera entry point and boot sequence. */
 #include "kernel.h"
+#include "../drivers/audio.h"
 #include "dev.h"
 #include "smp.h"
 #include "vfs.h"
@@ -102,6 +103,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     pci_init();
     vfs_load_boot_volume();
 
+    audio_probe();                            /* while the firmware's PCI access still works */
 #if defined(__x86_64__)
     if (native_wanted()) {
         klog("boot: handing over from the firmware to the native kernel");

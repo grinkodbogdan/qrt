@@ -1,6 +1,8 @@
 /* System Monitor: resources (CPU, memory, network, tasks), hardware, and the log. */
 #include "../ui/shell.h"
 #include "../drivers/i915/gpu.h"
+#include "../drivers/usb/xhci.h"
+#include "../drivers/audio.h"
 #include "../kernel/smp.h"
 #include "../kernel/vfs.h"
 #include "../kernel/dev.h"
@@ -105,6 +107,8 @@ static const char *friendly(const device_t *d) {
     if (!strcmp(n, "i2c-hid")) return "Touchscreen";
     if (!strcmp(n, "framebuffer")) return "Display";
     if (!strcmp(n, "i915")) return "Graphics";
+    if (!strcmp(n, "xhci")) return "USB";
+    if (!strcmp(n, "audio")) return "Sound";
     if (!strcmp(n, "e1000")) return "Ethernet";
     if (!strcmp(n, "uart16550")) return "Serial port";
     if (!strcmp(n, "dw-i2c") || !strcmp(n, "designware-i2c")) return "I2C bus";
@@ -161,6 +165,8 @@ static void draw(canvas_t *c, rect_t a) {
             fmt(b, sizeof b, "%s, %s", k.vol[i].label[0] ? k.vol[i].label : "Volume", b2);
             kv(&f, k.vol[i].boot ? "Boot drive" : "Drive", b);
         }
+        heading(&f, "Sound");
+        kv(&f, "Codec", audio_status());
         heading(&f, "Graphics");
         kv(&f, "Acceleration", gpu_status());
         if (gpu_active()) {
@@ -169,6 +175,18 @@ static void draw(canvas_t *c, rect_t a) {
             gpu_stats(&frames, &avg, &coherent);
             fmt(b, sizeof b, "%u frames, %u \xc2\xb5s each on average", frames, avg);
             kv(&f, "GPU work", b);
+        }
+        {
+            char ul[8][96];
+            int nu = xhci_devices(ul, 8);
+            if (nu) {
+                heading(&f, "USB");
+                for (int i = 0; i < nu; i++) {
+                    char key[16];
+                    fmt(key, sizeof key, "Device %d", i + 1);
+                    kv(&f, key, ul[i]);
+                }
+            }
         }
         heading(&f, "Drivers");
         for (int i = 0; i < n_devs; i++) {

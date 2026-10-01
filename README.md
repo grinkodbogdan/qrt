@@ -334,6 +334,10 @@ Built in:
 - **gpio-buttons**: the Venue's power, volume and Windows buttons
 - **backlight**: the panel backlight through LPSS PWM #1
 - **iwm**: Intel Wireless 8260 (Wi-Fi)
+- **xhci**: USB 3 host controller; devices on root ports, boot-protocol
+  keyboards (written from the xHCI specification, with OpenBSD's xhci(4)
+  as the reference)
+- **audio**: identifies the Realtek codec; the Intel SST DSP is listed
 - **e1000**: Intel 8254x/82574 Ethernet. This is QEMU's NIC; it is here so
   the network stack can be tested.
 - **chipset**: devices the kernel handles itself
@@ -355,9 +359,10 @@ FreeBSD's.
 | Wi-Fi | Intel 8260 driver, WPA2-Personal: **works** (scanning, connecting, DHCP) |
 | Backlight | LPSS PWM #1, native mode: brightness and sleep (**new in 0.5.5.3, untested on hardware**). QRT only takes control if the firmware left that PWM running. |
 | Sleep | backlight off and a slower frame loop; not ACPI suspend |
-| Audio | no driver: the volume keys drive a mock volume control |
+| Audio | no sound yet: 0.6.1 identifies the Realtek codec over I2C2 (System Monitor → Hardware → Sound); the volume keys drive a mock volume control |
+| USB | 0.6.1: QRT's own xHCI driver in native mode: devices on the root ports are listed under System Monitor → Hardware → USB, USB keyboards work (tested in QEMU, **untested on the tablet**); hubs not yet |
 | Bluetooth, camera, sensors, battery | no drivers yet (they need ACPI/PMIC support first; see docs/drivers.md) |
-| USB keyboard | firmware mode only |
+| USB keyboard | both modes (native: QRT's xHCI driver, 0.6.1) |
 
 ## Hardware report
 
@@ -459,9 +464,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.6.0.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.6.1.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.6.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.6.1.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.
