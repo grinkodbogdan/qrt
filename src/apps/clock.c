@@ -32,7 +32,7 @@ static void draw(canvas_t *c, rect_t a) {
     layout(a, &cx, &cy, &R, &dig, &b1, &b2);
 
     gfx_circle(c, cx, cy + dp(6), R + dp(4), RGBA(0, 0, 0, 60));
-    gfx_circle(c, cx, cy, R, RGBA(0x1c, 0x18, 0x2c, 220));
+    gfx_circle(c, cx, cy, R, RGB(0x30, 0x30, 0x30));
     gfx_ring(c, cx, cy, R, dp(2), RGBA(255, 255, 255, 40));
     for (int i = 0; i < 60; i++) {
         float ang = i * (2 * PI_F / 60), s = fsin(ang), co = fcos(ang);
@@ -47,16 +47,16 @@ static void draw(canvas_t *c, rect_t a) {
     gfx_line(c, cx - fsin(as) * R * 0.15f, cy + fcos(as) * R * 0.15f,
              cx + fsin(as) * R * 0.85f, cy - fcos(as) * R * 0.85f, dp(2), ui.accent);
     gfx_circle(c, cx, cy, dp(7), ui.accent);
-    gfx_circle(c, cx, cy, dp(3), RGB(0x1c, 0x18, 0x2c));
+    gfx_circle(c, cx, cy, dp(3), RGB(0x30, 0x30, 0x30));
 
     char buf[48];
     fmt(buf, sizeof buf, "%02d:%02d:%02d", t.Hour, t.Minute, t.Second);
     gfx_text(c, ui.display, dig.x, dig.y, buf, ui.text);
-    fmt(buf, sizeof buf, "%04d-%02d-%02d  \xc2\xb7  UEFI real-time clock", t.Year, t.Month, t.Day);
+    fmt(buf, sizeof buf, "%04d-%02d-%02d", t.Year, t.Month, t.Day);
     gfx_text_fit(c, ui.small, dig.x, dig.y + ui.display->line, dig.w, buf, ui.text2);
 
     u64 e = elapsed();
-    ui_section(c, dig.x, dig.y + dp(104), "STOPWATCH");
+    ui_section(c, dig.x, dig.y + dp(104), "Stopwatch");
     fmt(buf, sizeof buf, "%02llu:%02llu.%02llu", e / 60000, e / 1000 % 60, e / 10 % 100);
     gfx_text(c, ui.h1, dig.x, dig.y + dp(104) + ui.small->line, buf, st.running ? ui.accent : ui.text);
     ui_button(c, b1, st.running ? "Pause" : "Start", ui.accent, RGB(255, 255, 255));

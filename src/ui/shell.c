@@ -12,18 +12,19 @@
 #include "../kernel/smp.h"
 #include "osk.h"
 #include "../net/netstack.h"
+#include "../net/wlan.h"
 #include "../drivers/backlight.h"
 #include "../drivers/buttons.h"
 
 ui_t ui;
 
 const u32 accent_palette[N_ACCENTS] = {
-    RGB(0xff, 0x4f, 0xa3), RGB(0x7c, 0x6c, 0xff), RGB(0x2e, 0xc4, 0xb6),
-    RGB(0xff, 0x8a, 0x4c), RGB(0x4d, 0xa3, 0xff), RGB(0xa6, 0xe2, 0x2e),
+    RGB(0x35, 0x84, 0xe4), RGB(0x21, 0x90, 0xa4), RGB(0x3a, 0x94, 0x4a),
+    RGB(0xed, 0x5b, 0x00), RGB(0xe6, 0x2d, 0x42), RGB(0x91, 0x41, 0xac),
 };
-const char *accent_names[N_ACCENTS] = { "Fuchsia", "Iris", "Lagoon", "Ember", "Sky", "Lime" };
+const char *accent_names[N_ACCENTS] = { "Blue", "Teal", "Green", "Orange", "Red", "Purple" };
 
-static const app_t *apps[] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_sketch, &app_settings, &app_system, &app_clock, &app_life, &app_lab };
+static const app_t *apps[] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_settings, &app_system, &app_clock, &app_sketch };
 #define N_APPS ((int)ARRAY_LEN(apps))
 
 typedef enum { VIEW_HOME, VIEW_APP } view_t;
@@ -44,6 +45,10 @@ static struct {
     u64 last_input_ms, now_ms;
     int sleep_after;              /* seconds without input before sleeping; 0 = never (QrtSleepAfter) */
     int volume, volume_saved;     /* mock audio: 0..100 (QrtVolume) */
+    int overview;                 /* the grid of open apps */
+    canvas_t thumbs[16];          /* a picture of each open app, taken when it was left */
+    int ov_card, ov_dy, ov_dragging, ov_y0, ov_x0;
+    int home_y0, home_tracking;
     u64 osd_until;
     int osd_shown;
     u32 running;                  /* bit i: apps[i] was opened */
@@ -97,25 +102,27 @@ int scroll_event(scroll_t *s, const event_t *e, rect_t area, int step) {
     return s->off != old;
 }
 
+/* Widgets in the style of GNOME's libadwaita (dark): flat, small radii. */
 void ui_card(canvas_t *c, rect_t r, int radius, int hi) {
-    gfx_shadow(c, r, radius, dp(14), RGBA(0, 0, 0, 70));
+    radius = MIN(radius, dp(12));
     gfx_rrect(c, r, radius, hi ? ui.card_hi : ui.card);
     gfx_rrect_outline(c, r, radius, 1, ui.stroke);
 }
 
 void ui_button(canvas_t *c, rect_t r, const char *label, u32 fill, u32 fg) {
-    gfx_rrect(c, r, r.h / 2, fill);
+    gfx_rrect(c, r, MIN(r.h / 2, dp(8)), fill);
     gfx_text_center(c, ui.label, r, label, fg);
 }
 
 void ui_chip(canvas_t *c, rect_t r, const char *label, int selected) {
-    if (selected) gfx_rrect(c, r, r.h / 2, ui.accent);
-    else { gfx_rrect(c, r, r.h / 2, RGBA(255, 255, 255, 22)); gfx_rrect_outline(c, r, r.h / 2, 1, ui.stroke); }
+    int rad = MIN(r.h / 2, dp(8));
+    if (selected) gfx_rrect(c, r, rad, ui.accent);
+    else gfx_rrect(c, r, rad, RGBA(255, 255, 255, 20));
     gfx_text_center(c, ui.label, r, label, selected ? RGB(255, 255, 255) : ui.text);
 }
 
 void ui_section(canvas_t *c, int x, int y, const char *title) {
-    gfx_text(c, ui.small, x, y, title, ui.text3);
+    gfx_text(c, ui.small, x, y, title, ui.text2);
 }
 
 void ui_kv(canvas_t *c, rect_t r, const char *key, const char *value) {
@@ -140,12 +147,14 @@ static void ui_metrics(void) {
     ui.display = font_pick(F_LIGHT, dp(56));
     ui.huge    = font_pick(F_LIGHT, dp(ui.landscape ? 96 : 120));
     ui.accent  = accent_palette[sh.accent_idx];
-    ui.text    = RGB(0xf5, 0xf3, 0xfa);
-    ui.text2   = RGBA(0xf5, 0xf3, 0xfa, 170);
-    ui.text3   = RGBA(0xf5, 0xf3, 0xfa, 110);
-    ui.card    = RGBA(0x1c, 0x18, 0x2c, 170);
-    ui.card_hi = RGBA(0x3a, 0x33, 0x55, 200);
-    ui.stroke  = RGBA(255, 255, 255, 30);
+    ui.text    = RGB(0xff, 0xff, 0xff);
+    ui.text2   = RGBA(0xff, 0xff, 0xff, 175);
+    ui.text3   = RGBA(0xff, 0xff, 0xff, 115);
+    ui.card    = RGBA(255, 255, 255, 14);
+    ui.card_hi = RGBA(255, 255, 255, 26);
+    ui.stroke  = RGBA(255, 255, 255, 22);
+    ui.window  = RGB(0x24, 0x24, 0x24);
+    ui.header  = RGB(0x30, 0x30, 0x30);
     ui.bg_top    = RGB(0x14, 0x0f, 0x26);
     ui.bg_bottom = RGB(0x06, 0x0b, 0x19);
 }
@@ -295,20 +304,53 @@ static const char *month_name(int m) {
     return (m >= 1 && m <= 12) ? n[m - 1] : "";
 }
 
-static void draw_status(canvas_t *c, const EFI_TIME *t) {
-    int h = dp(32), pad = dp(20);
-    char buf[48];
-    const font_t *f = ui.small;
-    int y = (h - f->line) / 2 + dp(2);
-    gfx_text(c, ui.label->size <= f->size ? ui.label : font_pick(F_SEMIBOLD, dp(13)), pad, y, "QRT", ui.text);
-    if (sh.view == VIEW_APP) {
-        clock_text(buf, sizeof buf, t);
-        gfx_text_center(c, font_pick(F_SEMIBOLD, dp(13)), (rect_t){ 0, 0, ui.W, h + dp(4) }, buf, ui.text);
+/* The top bar: the date and time in the middle, network and volume at the right. */
+static void net_icon(canvas_t *c, float x, float cy, float s, u32 fg) {
+    int kind = netstack_kind();
+    if (kind == 1) {                                   /* wired: three linked boxes */
+        gfx_rrect(c, (rect_t){ (int)(x + s * 0.3f), (int)(cy - s * 0.5f), (int)(s * 0.4f), (int)(s * 0.3f) }, dp(1), fg);
+        gfx_rrect(c, (rect_t){ (int)x, (int)(cy + s * 0.2f), (int)(s * 0.35f), (int)(s * 0.3f) }, dp(1), fg);
+        gfx_rrect(c, (rect_t){ (int)(x + s * 0.65f), (int)(cy + s * 0.2f), (int)(s * 0.35f), (int)(s * 0.3f) }, dp(1), fg);
+        gfx_line(c, x + s * 0.5f, cy - s * 0.2f, x + s * 0.5f, cy, dp(1.5f), fg);
+        gfx_line(c, x + s * 0.17f, cy, x + s * 0.83f, cy, dp(1.5f), fg);
+        gfx_line(c, x + s * 0.17f, cy, x + s * 0.17f, cy + s * 0.2f, dp(1.5f), fg);
+        gfx_line(c, x + s * 0.83f, cy, x + s * 0.83f, cy + s * 0.2f, dp(1.5f), fg);
+        return;
     }
-    const char *dev = k.is_venue ? "Venue 8 Pro" : (k.sys_product[0] ? k.sys_product : "UEFI PC");
-    fmt(buf, sizeof buf, "%s  \xc2\xb7  %s", dev, QRT_ARCH);
-    int w = text_width(f, buf);
-    gfx_text(c, f, ui.W - pad - w, y, buf, ui.text2);
+    /* Wi-Fi: a fan of arcs; dim when not connected; crossed out when off */
+    u32 col = kind == 2 ? fg : ALPHA(fg, 90);
+    float cx = x + s * 0.5f, by = cy + s * 0.45f;
+    gfx_circle(c, cx, by - dp(1), dp(1.8f), col);
+    for (int k2 = 1; k2 <= 3; k2++) {
+        float rr = s * 0.28f * k2;
+        float px = cx + rr * fcos(-2.4f), py = by + rr * fsin(-2.4f);
+        for (int i = 1; i <= 8; i++) {
+            float a = -2.4f + 1.65f * i / 8;
+            float qx = cx + rr * fcos(a), qy = by + rr * fsin(a);
+            gfx_line(c, px, py, qx, qy, dp(1.8f), col);
+            px = qx; py = qy;
+        }
+    }
+    if (kind == 0) gfx_line(c, x + s * 0.1f, cy - s * 0.45f, x + s * 0.9f, cy + s * 0.45f, dp(1.8f), fg);
+}
+
+static void speaker_icon(canvas_t *c, float x, float cy, float s, int muted, int level, u32 fg);
+
+static void draw_status(canvas_t *c, const EFI_TIME *t) {
+    int h = dp(32);
+    gfx_fill(c, (rect_t){ 0, 0, ui.W, h }, RGBA(0, 0, 0, 225));
+    char buf[48], clk[16];
+    static const char *wd[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    static const char *mo[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    /* day of the week (Sakamoto) */
+    static const int tt[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    int yy = t->Year - (t->Month < 3), dow = (yy + yy / 4 - yy / 100 + yy / 400 + tt[(t->Month + 11) % 12] + t->Day) % 7;
+    clock_text(clk, sizeof clk, t);
+    fmt(buf, sizeof buf, "%s %d %s  %s", wd[dow], t->Day, mo[(t->Month + 11) % 12], clk);
+    gfx_text_center(c, font_pick(F_SEMIBOLD, dp(13)), (rect_t){ 0, 0, ui.W, h }, buf, ui.text);
+    float s = dp(16), cy = h / 2.0f, x = ui.W - dp(16) - s;
+    speaker_icon(c, x, cy, s, sh.volume == 0, sh.volume, ui.text);
+    net_icon(c, x - dp(14) - s, cy, s, ui.text);
 }
 
 /* ---- geometry ----------------------------------------------------------------
@@ -437,8 +479,11 @@ void shell_set_dock_edge(int edge) {
 int shell_dock_edge(void) { return sh.dock_edge; }
 
 static void app_icon(canvas_t *c, const app_t *a, float cx, float cy, float r) {
-    gfx_circle(c, cx, cy, r, a->color);
-    a->icon(c, cx, cy, r * 0.62f, RGB(255, 255, 255));
+    rect_t sq = { (int)(cx - r), (int)(cy - r), (int)(2 * r), (int)(2 * r) };
+    gfx_rrect(c, sq, (int)(r * 0.42f), a->color);
+    gfx_rrect(c, (rect_t){ sq.x, sq.y, sq.w, sq.h / 2 }, (int)(r * 0.42f), RGBA(255, 255, 255, 22));   /* soft top light */
+    gfx_fill(c, (rect_t){ sq.x + (int)(r * 0.42f), sq.y + sq.h / 2 - 1, sq.w - 2 * (int)(r * 0.42f), 1 }, RGBA(255, 255, 255, 0));
+    a->icon(c, cx, cy, r * 0.6f, RGB(255, 255, 255));
 }
 
 static void draw_dock(canvas_t *c) {
@@ -446,7 +491,7 @@ static void draw_dock(canvas_t *c) {
     int edge = dock_shape(), vert = dock_vertical(edge), rad = dp(22);
     int lifted = sh.dock_drag == 2 || sh.animating;
     if (lifted) gfx_shadow(c, d, rad, dp(18), RGBA(0, 0, 0, 120));
-    gfx_rrect(c, d, rad, RGBA(8, 6, 18, lifted ? 215 : 185));
+    gfx_rrect(c, d, rad, RGBA(24, 24, 24, lifted ? 235 : 215));
     gfx_rrect_outline(c, d, rad, 1, lifted ? ALPHA(ui.accent, 160) : ui.stroke);
     int items[16], n = dock_items(items);
     rect_t lr = dock_launcher_rect();
@@ -482,48 +527,33 @@ static void draw_home(canvas_t *c, const EFI_TIME *t) {
     int pad = area.x + dp(28);
     char buf[64];
     int y = area.y + (ui.landscape ? dp(28) : dp(48));
-    int colw = area.w - 2 * dp(28);
 
     clock_text(buf, sizeof buf, t);
     gfx_text(c, ui.huge, pad - dp(4), y, buf, ui.text);
     y += ui.huge->line;
     fmt(buf, sizeof buf, "%s, %d %s", weekday(t), t->Day, month_name(t->Month));
-    gfx_text(c, ui.title, pad, y, buf, ui.text);
-    y += ui.title->line + dp(6);
-    const char *greet = t->Hour < 5 ? "Up late" : t->Hour < 12 ? "Good morning" : t->Hour < 18 ? "Good afternoon" : "Good evening";
-    fmt(buf, sizeof buf, k.native ? "%s. Running on the Tessera kernel." : "%s. Everything runs on your firmware.", greet);
-    gfx_text_fit(c, ui.body, pad, y, colw, buf, ui.text2);
-    y += ui.body->line + dp(24);
-
-    char ram[24], line[96];
-    fmt_bytes(ram, sizeof ram, k.ram_bytes);
-    fmt(line, sizeof line, "%s  \xc2\xb7  %s RAM", k.cpu, ram);
-    gfx_text_fit(c, ui.small, pad, y, colw, line, ui.text3);
-    const char *net = shell_net_status();
-    if (net) gfx_text_fit(c, ui.small, pad, y + ui.small->line, colw, net, ui.text3);
-
-    const char *hint = "The dots in the dock show every app. Drag the dock to move it to another edge.";
-    gfx_text_fit(c, ui.small, pad, area.y + area.h - dp(24) - ui.small->line, colw, hint, ui.text3);
+    gfx_text(c, ui.title, pad, y, buf, ui.text2);
 }
 
 /* ---- launcher: every app, plus search over apps and actions ------------------ */
 typedef struct { const char *title, *sub; int app; int action; } suggestion_t;
 enum { ACT_NONE, ACT_SHUTDOWN, ACT_REBOOT, ACT_FIRMWARE, ACT_ROTATE, ACT_ACCENT,
-       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET, ACT_BENCH, ACT_SMP, ACT_KEYBOARD };
+       ACT_TOUCH_SWAP, ACT_TOUCH_FLIPX, ACT_TOUCH_FLIPY, ACT_TOUCH_RESET, ACT_BENCH, ACT_SMP, ACT_KEYBOARD, ACT_OVERVIEW };
 
+/* only listed when searched for ("bench" and the multicore switch stay reachable by name) */
 static const suggestion_t actions[] = {
-    { "Rotate screen", "Turn the canvas 90\xc2\xb0", -1, ACT_ROTATE },
-    { "Next accent colour", "Cycle the theme", -1, ACT_ACCENT },
-    { "Restart", "Cold reset through UEFI", -1, ACT_REBOOT },
-    { "Shut down", "Power off through UEFI", -1, ACT_SHUTDOWN },
-    { "Firmware setup", "Reboot into the BIOS/UEFI menu", -1, ACT_FIRMWARE },
-    { "Graphics benchmark", "Time full and partial redraws (bench)", -1, ACT_BENCH },
-    { "Multicore rendering on/off", "Draw with the other CPU cores", -1, ACT_SMP },
+    { "Open apps", "Show and close open apps", -1, ACT_OVERVIEW },
+    { "Rotate screen", "Turn the screen 90\xc2\xb0", -1, ACT_ROTATE },
+    { "Restart", "Restart the tablet", -1, ACT_REBOOT },
+    { "Shut down", "Turn the tablet off", -1, ACT_SHUTDOWN },
+    { "Firmware setup", "Restart into the firmware menu", -1, ACT_FIRMWARE },
     { "On-screen keyboard", "Show or hide the keyboard", -1, ACT_KEYBOARD },
     { "Touch: swap axes", "Fix a touchscreen mounted sideways", -1, ACT_TOUCH_SWAP },
     { "Touch: flip X", "Mirror touch left-right", -1, ACT_TOUCH_FLIPX },
     { "Touch: flip Y", "Mirror touch top-bottom", -1, ACT_TOUCH_FLIPY },
-    { "Touch: reset", "Use the firmware's mapping as-is", -1, ACT_TOUCH_RESET },
+    { "Touch: reset", "Use the firmware's mapping", -1, ACT_TOUCH_RESET },
+    { "Graphics benchmark", "Time the screen redraw", -1, ACT_BENCH },
+    { "Multicore drawing on/off", "Draw with every CPU core", -1, ACT_SMP },
 };
 
 static int match_apps(int *out) {
@@ -561,7 +591,7 @@ static rect_t action_row(int napps, int i) {
 
 static void draw_launcher(canvas_t *c) {
     rect_t a = content_rect();
-    gfx_fill(c, a, RGBA(6, 4, 14, 215));
+    gfx_fill(c, a, RGBA(0, 0, 0, 200));
     rect_t f = search_rect();
     gfx_rrect(c, f, f.h / 2, RGBA(0xf5, 0xf3, 0xfa, 235));
     float cx = f.x + dp(26), cy = f.y + f.h / 2.0f;
@@ -575,7 +605,6 @@ static void draw_launcher(canvas_t *c) {
     int ia[32], na = match_apps(ia), ix[32], nx = match_actions(ix);
     rect_t w = work_rect();
     gfx_clip(c, w);
-    ui_section(c, grid_cell(0).x + dp(12), f.y + f.h + dp(14), sh.query[0] ? "APPS" : "ALL APPS");
     for (int i = 0; i < na; i++) {
         rect_t r = grid_cell(i);
         if (sh.launch_pressed == i) gfx_rrect(c, (rect_t){ r.x + dp(6), r.y, r.w - dp(12), r.h - dp(6) }, dp(18), RGBA(255, 255, 255, 30));
@@ -614,28 +643,180 @@ static void draw_power(canvas_t *c) {
 }
 
 /* ---- app chrome ----------------------------------------------------------------- */
+static void open_app(int i);
+
+/* An app is a window: a header bar (title, minimise, close) over the app's area. */
+#define HEADER_H dp(48)
+static rect_t header_rect(void) { rect_t c = content_rect(); return (rect_t){ c.x, c.y, c.w, HEADER_H }; }
 static rect_t app_area(void) {
     rect_t w = work_rect();
-    int top = content_rect().y + dp(64);
-    return (rect_t){ w.x, top, w.w, w.y + w.h - top - dp(10) };
+    int top = content_rect().y + HEADER_H;
+    return (rect_t){ w.x, top, w.w, w.y + w.h - top };
 }
 rect_t shell_app_area(void) { return app_area(); }
-static rect_t back_rect(void) { rect_t c = content_rect(); return (rect_t){ c.x + dp(14), c.y + dp(8), dp(48), dp(48) }; }
+static rect_t close_rect(void) { rect_t h = header_rect(); int b = dp(34); return (rect_t){ h.x + h.w - dp(10) - b, h.y + (h.h - b) / 2, b, b }; }
+static rect_t min_rect(void) { rect_t cl = close_rect(); return (rect_t){ cl.x - dp(10) - cl.w, cl.y, cl.w, cl.h }; }
 
 static void draw_app(canvas_t *c) {
-    rect_t b = back_rect();
-    gfx_circle(c, b.x + b.w / 2.0f, b.y + b.h / 2.0f, b.w / 2.0f, RGBA(255, 255, 255, 26));
-    float cx = b.x + b.w / 2.0f, cy = b.y + b.h / 2.0f, a = dp(8);
-    gfx_line(c, cx - a, cy, cx + a, cy, dp(2.4f), ui.text);
-    gfx_line(c, cx - a, cy, cx - a * 0.2f, cy - a * 0.8f, dp(2.4f), ui.text);
-    gfx_line(c, cx - a, cy, cx - a * 0.2f, cy + a * 0.8f, dp(2.4f), ui.text);
-    gfx_circle(c, b.x + b.w + dp(22), cy, dp(6), sh.app->color);
-    gfx_text(c, ui.title, b.x + b.w + dp(36), (int)cy - ui.title->line / 2, sh.app->name, ui.text);
+    rect_t win = content_rect(), hb = header_rect();
+    gfx_fill(c, win, ui.window);
+    gfx_fill(c, hb, ui.header);
+    gfx_fill(c, (rect_t){ hb.x, hb.y + hb.h - 1, hb.w, 1 }, RGBA(0, 0, 0, 140));
+    gfx_text_center(c, font_pick(F_SEMIBOLD, dp(15)), hb, sh.app->name, ui.text);
+    rect_t cl = close_rect(), mn = min_rect();
+    float s = dp(5.5f), cx = cl.x + cl.w / 2.0f, cy = cl.y + cl.h / 2.0f;
+    gfx_circle(c, cx, cy, cl.w / 2.0f, RGBA(255, 255, 255, 22));
+    gfx_line(c, cx - s, cy - s, cx + s, cy + s, dp(2), ui.text);
+    gfx_line(c, cx - s, cy + s, cx + s, cy - s, dp(2), ui.text);
+    cx = mn.x + mn.w / 2.0f;
+    gfx_circle(c, cx, cy, mn.w / 2.0f, RGBA(255, 255, 255, 22));
+    gfx_line(c, cx - s, cy + s * 0.6f, cx + s, cy + s * 0.6f, dp(2), ui.text);
 
     rect_t area = app_area();
     gfx_clip(c, area);
     sh.app->draw(c, area);
     gfx_unclip(c);
+}
+
+/* ---- open apps: thumbnails, closing, the overview grid ------------------------------ */
+static int cur_index(void) { for (int i = 0; i < N_APPS; i++) if (apps[i] == sh.app) return i; return -1; }
+
+/* a small picture of the app window, from the frame last shown */
+static void capture_thumb(void) {
+    int i = cur_index();
+    if (i < 0 || sh.view != VIEW_APP) return;
+    rect_t w = content_rect();
+    int f = MAX(2, (w.w + dp(260) - 1) / dp(260));
+    int tw = w.w / f, th = w.h / f;
+    if (tw < 8 || th < 8) return;
+    canvas_t *t = &sh.thumbs[i];
+    if (t->px && (t->w != tw || t->h != th)) canvas_free(t);
+    if (!t->px) *t = canvas_new(tw, th);
+    for (int y = 0; y < th; y++)
+        for (int x = 0; x < tw; x++) {
+            u32 rs = 0, gs = 0, bs = 0;
+            for (int yy = 0; yy < f; yy++) {
+                const u32 *row = sh.scene.px + (usize)(w.y + y * f + yy) * sh.scene.stride + w.x + x * f;
+                for (int xx = 0; xx < f; xx++) { u32 p2 = row[xx]; rs += (p2 >> 16) & 255; gs += (p2 >> 8) & 255; bs += p2 & 255; }
+            }
+            u32 n = (u32)(f * f);
+            t->px[(usize)y * t->stride + x] = 0xff000000u | (rs / n) << 16 | (gs / n) << 8 | (bs / n);
+        }
+}
+
+static void close_app(int i) {
+    if (i < 0) return;
+    sh.running &= ~(1u << i);
+    if (sh.thumbs[i].px) canvas_free(&sh.thumbs[i]);
+    if (apps[i]->close) apps[i]->close();
+    if (sh.app == apps[i]) { sh.view = VIEW_HOME; sh.app = NULL; osk_hide(); }
+    sh.dirty = 1;
+}
+
+static void open_overview(void) {
+    capture_thumb();
+    sh.overview = 1;
+    sh.launcher_open = 0;
+    sh.ov_card = -1;
+    osk_hide();
+    sh.dirty = 1;
+}
+
+static int running_list(int *out) { int n = 0; for (int i = 0; i < N_APPS; i++) if (sh.running & (1u << i)) out[n++] = i; return n; }
+
+/* the grid of windows: as few columns as still fit every window on the screen */
+static rect_t ov_card_rect(int k2, int n) {
+    rect_t a = content_rect();
+    int gap = dp(24), top = a.y + dp(64), avail = a.y + a.h - dp(48) - top;
+    int cols = ui.landscape ? 3 : 2, cw = 0, ch = 0;
+    if (n <= 2 && ui.landscape) cols = MAX(n, 2);
+    for (; cols <= 6; cols++) {
+        cw = (a.w - gap * (cols + 1)) / cols;
+        ch = cw * a.h / MAX(1, a.w) + dp(40);
+        int rows = (n + cols - 1) / cols;
+        if (rows * ch + (rows - 1) * gap <= avail) break;
+    }
+    return (rect_t){ a.x + gap + (k2 % cols) * (cw + gap), top + (k2 / cols) * (ch + gap), cw, ch };
+}
+static rect_t ov_close_rect(rect_t card) { int b = dp(30); return (rect_t){ card.x + card.w - b - dp(2), card.y + dp(2), b, b }; }
+
+static void draw_overview(canvas_t *c) {
+    rect_t a = content_rect();
+    gfx_fill(c, a, RGBA(0, 0, 0, 170));
+    int list[16], n = running_list(list);
+    gfx_text(c, ui.title, a.x + dp(24), a.y + dp(20), "Open apps", ui.text);
+    if (!n) { gfx_text_center(c, ui.body, a, "No apps are open", ui.text2); return; }
+    for (int k2 = 0; k2 < n; k2++) {
+        int i = list[k2];
+        rect_t r = ov_card_rect(k2, n);
+        int dy = k2 == sh.ov_card && sh.ov_dragging ? sh.ov_dy : 0;
+        r.y += dy;
+        u32 fade = (u32)CLAMP(255 + dy * 255 / dp(260), 60, 255);
+        /* title row */
+        app_icon(c, apps[i], r.x + dp(14), r.y + dp(16), dp(12));
+        gfx_text_fit(c, ui.label, r.x + dp(34), r.y + dp(16) - ui.label->line / 2, r.w - dp(74), apps[i]->name, ALPHA(ui.text, fade));
+        rect_t cb = ov_close_rect(r);
+        gfx_circle(c, cb.x + cb.w / 2.0f, cb.y + cb.h / 2.0f, cb.w / 2.0f, RGBA(255, 255, 255, 40));
+        float s = dp(4.5f), cx = cb.x + cb.w / 2.0f, cy = cb.y + cb.h / 2.0f;
+        gfx_line(c, cx - s, cy - s, cx + s, cy + s, dp(2), ui.text);
+        gfx_line(c, cx - s, cy + s, cx + s, cy - s, dp(2), ui.text);
+        /* the window picture */
+        rect_t pic = { r.x, r.y + dp(36), r.w, r.h - dp(36) };
+        canvas_t *t = &sh.thumbs[i];
+        if (t->px && t->w > 0) {
+            /* nearest-neighbour fit of the thumbnail into the card */
+            rect_t cl = rect_intersect(c->clip, pic);
+            for (int y = cl.y; y < cl.y + cl.h; y++) {
+                const u32 *srow = t->px + (usize)((y - pic.y) * t->h / pic.h) * t->stride;
+                u32 *drow = c->px + (usize)y * c->stride;
+                for (int x = cl.x; x < cl.x + cl.w; x++) drow[x] = srow[(x - pic.x) * t->w / pic.w];
+            }
+            gfx_rrect_outline(c, pic, dp(10), 1, ui.stroke);
+        } else {
+            gfx_rrect(c, pic, dp(10), ui.window);
+            app_icon(c, apps[i], pic.x + pic.w / 2.0f, pic.y + pic.h / 2.0f, dp(28));
+        }
+        if (k2 == sh.ov_card && !sh.ov_dragging) gfx_rrect_outline(c, pic, dp(10), dp(3), ui.accent);
+    }
+    gfx_text_center(c, ui.small, (rect_t){ a.x, a.y + a.h - dp(40), a.w, dp(24) }, "Swipe a window up to close it", ui.text3);
+}
+
+static void overview_pointer(const event_t *e) {
+    int list[16], n = running_list(list), hit = -1;
+    for (int k2 = 0; k2 < n; k2++) if (in_rect(ov_card_rect(k2, n), e->x, e->y)) hit = k2;
+    switch (e->type) {
+    case EV_DOWN:
+        sh.ov_card = hit; sh.ov_dragging = 0; sh.ov_dy = 0; sh.ov_y0 = e->y; sh.ov_x0 = e->x;
+        sh.dirty = 1;
+        break;
+    case EV_MOVE:
+        if (sh.ov_card >= 0 && (sh.ov_dragging || sh.ov_y0 - e->y > dp(12))) {
+            sh.ov_dragging = 1;
+            sh.ov_dy = MIN(0, e->y - sh.ov_y0);
+            sh.dirty = 1;
+        }
+        break;
+    case EV_UP: {
+        int card = sh.ov_card;
+        sh.ov_card = -1;
+        sh.dirty = 1;
+        if (card >= 0 && sh.ov_dragging) {
+            sh.ov_dragging = 0;
+            if (-sh.ov_dy > dp(110)) close_app(list[card]);
+            return;
+        }
+        if (ABS_I(e->x - sh.ov_x0) > dp(12) || ABS_I(e->y - sh.ov_y0) > dp(12)) return;
+        if (card >= 0 && card == hit) {
+            if (in_rect(ov_close_rect(ov_card_rect(card, n)), e->x, e->y)) { close_app(list[card]); return; }
+            sh.overview = 0;
+            open_app(list[card]);
+            return;
+        }
+        if (hit < 0) sh.overview = 0;                  /* empty space: back to the home screen */
+        break;
+    }
+    default: break;
+    }
 }
 
 /* ---- compose ---------------------------------------------------------------- */
@@ -655,13 +836,14 @@ static void compose_rect(rect_t d) {
     canvas_t c = sh.scene;
     gfx_limit(&c, d);
     d = c.limit;
-    const canvas_t *wall = !sh.locked && (sh.view == VIEW_APP || sh.launcher_open) ? &sh.wall_dim : &sh.wall;
+    const canvas_t *wall = !sh.locked && (sh.view == VIEW_APP || sh.launcher_open || sh.overview) ? &sh.wall_dim : &sh.wall;
     for (int y = d.y; y < d.y + d.h; y++)
         memcpy(c.px + (usize)y * c.stride + d.x, wall->px + (usize)y * wall->stride + d.x, (usize)d.w * 4);
     draw_status(&c, &frame_time);
     if (sh.locked) draw_lock(&c, &frame_time);
     else {
-        if (sh.view == VIEW_HOME) draw_home(&c, &frame_time);
+        if (sh.overview) draw_overview(&c);
+        else if (sh.view == VIEW_HOME) draw_home(&c, &frame_time);
         else draw_app(&c);
         if (sh.launcher_open) draw_launcher(&c);
         osk_draw(&c, content_rect());
@@ -694,6 +876,8 @@ static void compose(rect_t d) {
 
 /* ---- navigation ---------------------------------------------------------------- */
 static void open_app(int i) {
+    if (sh.view == VIEW_APP && sh.app != apps[i]) capture_thumb();
+    sh.overview = 0;
     sh.app = apps[i];
     sh.view = VIEW_APP;
     sh.launcher_open = 0;
@@ -705,6 +889,8 @@ static void open_app(int i) {
 }
 
 void shell_go_home(void) {
+    capture_thumb();
+    sh.overview = 0;
     sh.view = VIEW_HOME;
     sh.app = NULL;
     sh.launcher_open = 0;
@@ -739,6 +925,7 @@ static void run_action(int act) {
     case ACT_BENCH: sh.bench_pending = 1; break;
     case ACT_SMP: smp_set_enabled(!smp_enabled()); break;
     case ACT_KEYBOARD: sh.keyboard_pending = 1; break;
+    case ACT_OVERVIEW: open_overview(); break;
     }
 }
 
@@ -971,8 +1158,7 @@ static void draw_lock(canvas_t *c, const EFI_TIME *t) {
     fmt(buf, sizeof buf, "%s, %d %s", weekday(t), t->Day, month_name(t->Month));
     gfx_text_center(c, ui.title, (rect_t){ 0, y, ui.W, ui.title->line }, buf, ui.text);
     y += ui.title->line + dp(10);
-    const char *net = shell_net_status();
-    if (net) gfx_text_center(c, ui.small, (rect_t){ 0, y, ui.W, ui.small->line }, net, ui.text2);
+    (void)y;
     rect_t h = lock_hint_rect();
     float cx = ui.W / 2.0f, cy = h.y + dp(28);
     u32 col = sh.lock_armed ? ui.accent : ui.text2;
@@ -1021,6 +1207,7 @@ static void key_event(const event_t *e) {
     if (sh.power_open) { if (e->scan == SCAN_ESC) { sh.power_open = 0; sh.dirty = 1; } return; }
     if (sh.locked) { if (e->ch == '\r' || e->ch == ' ') unlock(); return; }   /* a keyboard unlocks with Enter */
     if (sh.launcher_open) { launcher_key(e); return; }
+    if (sh.overview) { if (e->scan == SCAN_ESC) { sh.overview = 0; sh.dirty = 1; } return; }
     if (sh.view == VIEW_HOME) {
         /* typing on the home screen searches */
         if (e->ch >= 32 && e->ch < 127) { open_launcher(1); launcher_key(e); }
@@ -1076,12 +1263,17 @@ static void dispatch(event_t e) {
     default: return;
     }
     if (sh.launcher_open) { launcher_pointer(&e); return; }
-    if (sh.view == VIEW_HOME) return;
-    if (e.type == EV_DOWN && in_rect(back_rect(), e.x, e.y)) {
-        shell_go_home();
-        sh.owner = OWN_NONE;
+    if (sh.overview) { overview_pointer(&e); return; }
+    if (sh.view == VIEW_HOME) {
+        /* swipe up on the home screen: the open apps */
+        if (e.type == EV_DOWN) { sh.home_tracking = 1; sh.home_y0 = e.y; }
+        else if (e.type == EV_MOVE && sh.home_tracking && sh.home_y0 - e.y > dp(90)) { sh.home_tracking = 0; open_overview(); sh.owner = OWN_NONE; }
+        else if (e.type == EV_UP) sh.home_tracking = 0;
         return;
     }
+    if (e.type == EV_DOWN && in_rect(close_rect(), e.x, e.y)) { close_app(cur_index()); sh.owner = OWN_NONE; return; }
+    if (e.type == EV_DOWN && in_rect(min_rect(), e.x, e.y)) { shell_go_home(); sh.owner = OWN_NONE; return; }
+    if (e.type == EV_DOWN && in_rect(header_rect(), e.x, e.y)) return;
     sh.app_damaged = 0;
     if (sh.app->event && sh.app->event(&e, app_area()) && !sh.app_damaged) shell_damage(app_area());
 }
@@ -1099,13 +1291,6 @@ static void splash(float t) {
     gfx_circle(c, cx, cy, dp(12) * t, ui.accent);
     rect_t word = { 0, (int)cy + dp(110), ui.W, ui.h1->line };
     gfx_text_center(c, ui.h1, word, "QRT", ALPHA(ui.text, (u32)(255 * t)));
-    rect_t sub = { 0, word.y + word.h, ui.W, ui.body->line };
-    gfx_text_center(c, ui.body, sub, "Tessera kernel", ui.text2);
-    int y = ui.H - dp(24) - ui.small->line * 8;
-    int total = 0;
-    while (klog_line(total)) total++;
-    for (int i = MAX(0, total - 8); i < total; i++, y += ui.small->line)
-        gfx_text_fit(c, ui.small, dp(24), y, ui.W - dp(48), klog_line(i), ui.text3);
     present(c, full_rect());
 }
 
@@ -1170,6 +1355,7 @@ static void run_benchmark(void) {
         multi_us ? single_us / multi_us : 0, multi_us ? single_us * 10 / multi_us % 10 : 0);
     for (int i = 0; i < 4; i++) klog("bench: %s", shell_stats.bench[i]);
     for (int i = 0; i < N_APPS; i++) if (apps[i] == &app_system) open_app(i);
+    if (sh.app == &app_system) app_system.event(&(event_t){ .type = EV_KEY, .scan = 0x7f01 }, app_area());   /* show the Hardware tab */
     sh.dirty = 1;
 }
 

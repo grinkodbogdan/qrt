@@ -31,3 +31,9 @@ void netstack_poll(void) {
 
 /* the home screen's network line */
 const char *shell_net_status(void) { return net_status(); }
+
+int netstack_kind(void) {
+    netif_t *n = net_primary();
+    if (n && n->ip) return strcmp(n->name, "Wi-Fi") ? 1 : 2;
+    return wlan_state() != WL_OFF ? 3 : 0;
+}

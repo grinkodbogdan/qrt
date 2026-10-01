@@ -74,6 +74,9 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     /* The firmware arms a 5-minute watchdog for boot loaders. We are the OS. */
     k.bs->SetWatchdogTimer(0, 0, 0, NULL);
 
+    /* the boot log goes to the serial port and the log ring, not the screen:
+     * black text on black until the shell's first frame */
+    st->ConOut->SetAttribute(st->ConOut, 0x00);
     st->ConOut->ClearScreen(st->ConOut);
     klog("QRT %s (%s) - Tessera kernel", QRT_VERSION, QRT_ARCH);
     calibrate_clock();

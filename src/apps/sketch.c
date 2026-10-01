@@ -29,7 +29,7 @@ static rect_t size_rect(rect_t a, int i) {
 }
 static rect_t clear_rect(rect_t a) { rect_t t = toolbar(a); return (rect_t){ t.x + t.w - dp(96), t.y + dp(8), dp(96), dp(40) }; }
 
-#define PAPER RGB(0x12, 0x10, 0x1c)
+#define PAPER RGB(0x1e, 0x1e, 0x1e)
 
 static void on_open(void) {
     int side = MAX(ui.W, ui.H);
@@ -112,4 +112,4 @@ clear:
     return 1;
 }
 
-const app_t app_sketch = { "Sketch", "Draw with a finger", RGB(0xff, 0x4f, 0xa3), icon, on_open, draw, event, NULL };
+const app_t app_sketch = { "Drawing", "Draw and sketch", RGB(0xd5, 0x61, 0x99), icon, on_open, draw, event, NULL };

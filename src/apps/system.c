@@ -1,17 +1,24 @@
-/* System: what Tessera found on this machine, plus the kernel log. */
+/* System Monitor: resources (CPU, memory, network, tasks), hardware, and the log. */
 #include "../ui/shell.h"
 #include "../kernel/smp.h"
 #include "../kernel/vfs.h"
 #include "../kernel/dev.h"
+#include "../net/net.h"
 #if defined(__x86_64__)
 #include "../arch/x64/sched.h"
 #include "../arch/x64/irq.h"
 #endif
 
 /* sampled on the boot core in tick(); draw() may run on any core */
-static struct { int busy_pct, threads; u64 mem_total, mem_free; char thread_list[160], irqs[128]; } ks;
+static struct {
+    int busy_pct, threads; u64 mem_total, mem_free; char thread_list[160], irqs[128];
+    u8 cpu_hist[60]; int n_hist;                 /* CPU busy %, one sample a second */
+    char names[16][24];
+} ks;
 
-static struct { scroll_t sc; } st;
+static struct { scroll_t sc; tap_t tap; int tab; } st;
+enum { TAB_RES, TAB_HW, TAB_LOG };
+static const char *tabs[] = { "Resources", "Hardware", "Log" };
 
 static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
     rect_t chip = { (int)(cx - r * 0.6f), (int)(cy - r * 0.6f), (int)(r * 1.2f), (int)(r * 1.2f) };
@@ -28,149 +35,166 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
 
 typedef struct { canvas_t *c; rect_t col; int y; } flow_t;
 
-static void heading(flow_t *f, const char *t) {
-    f->y += dp(14);
-    ui_section(f->c, f->col.x, f->y, t);
-    f->y += ui.small->line + dp(4);
+static rect_t tab_rect(rect_t a, int i) {
+    int w = dp(120), x0 = a.x + (a.w - 3 * w) / 2;
+    return (rect_t){ x0 + i * w, a.y + dp(12), w, dp(36) };
+}
+static rect_t body_rect(rect_t a) {
+    int w = MIN(a.w - dp(48), dp(760)), y = a.y + dp(60);
+    return (rect_t){ a.x + (a.w - w) / 2, y, w, a.y + a.h - y };
 }
 
+#define ROW dp(44)
+static void heading(flow_t *f, const char *t) {
+    f->y += dp(18);
+    gfx_text(f->c, ui.label, f->col.x + dp(4), f->y, t, ui.text);
+    f->y += ui.label->line + dp(8);
+}
+/* a row inside a rounded group: key on the left, value on the right */
 static void kv(flow_t *f, const char *key, const char *val) {
-    rect_t r = { f->col.x, f->y, f->col.w, ui.body->line };
-    if (f->y + r.h > f->c->clip.y && f->y < f->c->clip.y + f->c->clip.h) ui_kv(f->c, r, key, val);
-    f->y += ui.body->line + dp(2);
+    rect_t r = { f->col.x, f->y, f->col.w, ROW };
+    if (r.y + r.h > f->c->clip.y && r.y < f->c->clip.y + f->c->clip.h) {
+        gfx_fill(f->c, r, RGBA(255, 255, 255, 12));
+        gfx_fill(f->c, (rect_t){ r.x, r.y + r.h - 1, r.w, 1 }, RGBA(0, 0, 0, 70));
+        int ty = r.y + (ROW - ui.body->line) / 2;
+        gfx_text_fit(f->c, ui.body, r.x + dp(16), ty, r.w * 2 / 5, key, ui.text);
+        int vw = MIN(text_width(ui.body, val), r.w * 3 / 5 - dp(24));
+        gfx_text_fit(f->c, ui.body, r.x + r.w - dp(16) - vw, ty, r.w * 3 / 5 - dp(24), val, ui.text2);
+    }
+    f->y += ROW;
+}
+
+static void meter(flow_t *f, const char *label, const char *val, int pct) {
+    rect_t r = { f->col.x, f->y, f->col.w, dp(64) };
+    gfx_rrect(f->c, r, dp(12), RGBA(255, 255, 255, 12));
+    gfx_text(f->c, ui.body, r.x + dp(16), r.y + dp(10), label, ui.text);
+    int vw = text_width(ui.body, val);
+    gfx_text(f->c, ui.body, r.x + r.w - dp(16) - vw, r.y + dp(10), val, ui.text2);
+    rect_t bar = { r.x + dp(16), r.y + dp(42), r.w - dp(32), dp(8) };
+    gfx_rrect(f->c, bar, dp(4), RGBA(255, 255, 255, 30));
+    if (pct > 0) gfx_rrect(f->c, (rect_t){ bar.x, bar.y, MAX(dp(8), bar.w * pct / 100), bar.h }, dp(4), ui.accent);
+    f->y += r.h + dp(10);
+}
+
+/* the CPU graph: the last minute, one bar a second */
+static void cpu_graph(flow_t *f) {
+    rect_t r = { f->col.x, f->y, f->col.w, dp(150) };
+    gfx_rrect(f->c, r, dp(12), RGBA(255, 255, 255, 12));
+    char v[32];
+    fmt(v, sizeof v, "%d%%", ks.busy_pct);
+    gfx_text(f->c, ui.body, r.x + dp(16), r.y + dp(10), "Processor", ui.text);
+    gfx_text(f->c, ui.body, r.x + r.w - dp(16) - text_width(ui.body, v), r.y + dp(10), v, ui.text2);
+    rect_t g = { r.x + dp(16), r.y + dp(42), r.w - dp(32), r.h - dp(56) };
+    for (int i = 1; i < 4; i++) gfx_fill(f->c, (rect_t){ g.x, g.y + g.h * i / 4, g.w, 1 }, RGBA(255, 255, 255, 18));
+    float bw = (float)g.w / 60;
+    for (int i = 0; i < ks.n_hist; i++) {
+        int h = MAX(1, g.h * ks.cpu_hist[i] / 100);
+        int x = g.x + (int)((60 - ks.n_hist + i) * bw);
+        gfx_fill(f->c, (rect_t){ x, g.y + g.h - h, MAX(1, (int)bw - 1), h }, ALPHA(ui.accent, 200));
+    }
+    f->y += r.h + dp(10);
+}
+
+static const char *friendly(const device_t *d) {
+    const char *n = d->drv ? d->drv->name : "";
+    if (!strcmp(n, "iwm (Wi-Fi)")) return "Wi-Fi adapter";
+    if (!strcmp(n, "gpio-buttons")) return "Buttons";
+    if (!strcmp(n, "backlight")) return "Backlight";
+    if (!strcmp(n, "i2c-hid")) return "Touchscreen";
+    if (!strcmp(n, "framebuffer")) return "Display";
+    if (!strcmp(n, "e1000")) return "Ethernet";
+    if (!strcmp(n, "uart16550")) return "Serial port";
+    if (!strcmp(n, "dw-i2c") || !strcmp(n, "designware-i2c")) return "I2C bus";
+    return n;
 }
 
 static void draw(canvas_t *c, rect_t a) {
-    rect_t card = { a.x + dp(16), a.y, a.w - dp(32), a.h - dp(8) };
-    ui_card(c, card, dp(22), 0);
-    rect_t inner = { card.x + dp(22), card.y + dp(10), card.w - dp(44), card.h - dp(20) };
-    gfx_clip(c, inner);
-    flow_t f = { c, inner, inner.y - st.sc.off };
-    char b[128], b2[32];
-
-    if (k.is_venue) {
-        f.y += dp(10);
-        gfx_rrect(c, (rect_t){ inner.x, f.y, inner.w, dp(44) }, dp(12), ALPHA(ui.accent, 60));
-        gfx_text(c, ui.label, inner.x + dp(14), f.y + (dp(44) - ui.label->line) / 2, "Dell Venue 8 Pro detected", ui.text);
-        f.y += dp(48);
+    for (int i = 0; i < 3; i++) {
+        rect_t t = tab_rect(a, i);
+        gfx_rrect(c, t, dp(8), i == st.tab ? RGBA(255, 255, 255, 36) : RGBA(255, 255, 255, 0));
+        gfx_text_center(c, i == st.tab ? ui.label : ui.body, t, tabs[i], i == st.tab ? ui.text : ui.text2);
     }
-    heading(&f, "GRAPHICS");
-    fmt(b, sizeof b, "%u.%u ms draw + %u.%u ms present, %u%% of screen",
-        shell_stats.compose_us / 1000, shell_stats.compose_us / 100 % 10,
-        shell_stats.present_us / 1000, shell_stats.present_us / 100 % 10, shell_stats.area_permille / 10);
-    kv(&f, "Last frame", b);
-    if (shell_stats.bench[0][0]) {
-        kv(&f, "Benchmark", shell_stats.bench[0]);
-        kv(&f, "", shell_stats.bench[1]);
-        kv(&f, "", shell_stats.bench[2]);
-        kv(&f, "", shell_stats.bench[3]);
-    } else kv(&f, "Benchmark", "search \"bench\" in the launcher");
+    rect_t body = body_rect(a);
+    rect_t old = c->clip;
+    gfx_clip(c, body);
+    flow_t f = { c, body, body.y - st.sc.off };
+    char b[160], b2[32];
 
-    heading(&f, "KERNEL");
-    kv(&f, "Mode", k.native ? "native: firmware exited, QRT owns the machine" : "firmware-hosted (UEFI boot services running)");
-    if (k.native) {
-        fmt(b, sizeof b, "%d threads, CPU %d%% busy", ks.threads, ks.busy_pct);
-        kv(&f, "Scheduler", b);
-        kv(&f, "Threads", ks.thread_list);
+    if (st.tab == TAB_RES) {
+        f.y += dp(4);
+        cpu_graph(&f);
+        u64 total = k.native ? ks.mem_total : k.ram_bytes, used = k.native ? ks.mem_total - ks.mem_free : 0;
         char t1[24], t2[24];
-        fmt_bytes(t1, sizeof t1, ks.mem_total);
-        fmt_bytes(t2, sizeof t2, ks.mem_free);
-        fmt(b, sizeof b, "%s managed, %s free (own page allocator + heap)", t1, t2);
-        kv(&f, "Memory", b);
-        fmt(b, sizeof b, "%d (boot core + %d started by QRT)", smp_workers() + 1, smp_workers());
-        kv(&f, "CPU cores", b);
-        kv(&f, "Timer", "local APIC, 1000 Hz; the CPU halts when idle");
-    }
-
-    if (k.native) kv(&f, "Interrupts", ks.irqs);
-
-    fmt(b, sizeof b, "DEVICES (%d, %d WITH A QRT DRIVER)", n_devs, dev_bound());
-    heading(&f, b);
-    if (!pci_ndevs) kv(&f, "PCI", "no ECAM (MCFG) table");
-    /* bound devices first, then the to-do list */
-    for (int pass = 0; pass < 2; pass++)
+        fmt_bytes(t1, sizeof t1, used);
+        fmt_bytes(t2, sizeof t2, total);
+        fmt(b, sizeof b, "%s of %s", t1, t2);
+        meter(&f, "Memory", k.native ? b : t2, total ? (int)(used * 100 / total) : 0);
+        heading(&f, "Network");
+        const char *ns = net_status();
+        kv(&f, "Connection", ns ? ns : "Offline");
+        heading(&f, "System");
+        u64 up = k_now_ms() / 1000;
+        fmt(b, sizeof b, "%llu:%02llu:%02llu", up / 3600, up / 60 % 60, up % 60);
+        kv(&f, "Uptime", b);
+        fmt(b, sizeof b, "%d", smp_workers() + 1);
+        kv(&f, "Processor cores", b);
+        if (k.native) {
+            heading(&f, "Tasks");
+            for (int i = 0; i < ks.threads && i < 16; i++) kv(&f, ks.names[i], "running");
+        }
+    } else if (st.tab == TAB_HW) {
+        f.y += dp(4);
+        heading(&f, "Device");
+        kv(&f, "Model", k.sys_product[0] ? k.sys_product : "Unknown");
+        kv(&f, "Manufacturer", k.sys_vendor[0] ? k.sys_vendor : "Unknown");
+        kv(&f, "Processor", k.cpu);
+        fmt_bytes(b2, sizeof b2, k.ram_bytes);
+        kv(&f, "Memory", b2);
+        fmt(b, sizeof b, "%u \xc3\x97 %u", k.fb_w, k.fb_h);
+        kv(&f, "Display", b);
+        kv(&f, "Firmware", k.bios_version[0] ? k.bios_version : k.fw_vendor);
+        for (int i = 0; i < k.n_vol; i++) {
+            fmt_bytes(b2, sizeof b2, k.vol[i].size);
+            fmt(b, sizeof b, "%s, %s", k.vol[i].label[0] ? k.vol[i].label : "Volume", b2);
+            kv(&f, k.vol[i].boot ? "Boot drive" : "Drive", b);
+        }
+        heading(&f, "Drivers");
         for (int i = 0; i < n_devs; i++) {
             device_t *d = &devs[i];
-            int bound = d->drv && !d->failed;
-            if (bound != !pass) continue;
-            char key[32];
-            fmt(key, sizeof key, "%s %s", d->bus == BUS_PCI ? "pci" : d->bus == BUS_ACPI ? "acpi" : "isa", d->name);
-            if (bound) fmt(b, sizeof b, "%s: %s", d->drv->name, d->status);
-            else if (d->failed) fmt(b, sizeof b, "%s failed: %s", d->drv->name, d->status);
-            else if (d->pci) fmt(b, sizeof b, "%s %04x:%04x - no driver yet", d->what, d->pci->vendor, d->pci->device);
-            else fmt(b, sizeof b, "%s - no driver yet", d->what ? d->what : "unknown device");
-            kv(&f, key, b);
+            if (!d->drv || d->failed || !strcmp(d->drv->name, "chipset")) continue;
+            kv(&f, friendly(d), d->status);
         }
-    if (k.native) kv(&f, "Files", "RAM copy of the boot stick (vfs); native storage pending");
-
-    heading(&f, "DEVICE");
-    kv(&f, "Manufacturer", k.sys_vendor[0] ? k.sys_vendor : "unknown");
-    kv(&f, "Model", k.sys_product[0] ? k.sys_product : "unknown");
-    kv(&f, "BIOS", k.bios_version[0] ? k.bios_version : "unknown");
-    kv(&f, "ACPI OEM", k.acpi_oem[0] ? k.acpi_oem : "none");
-
-    heading(&f, "PROCESSOR & MEMORY");
-    kv(&f, "CPU", k.cpu);
-    fmt(b, sizeof b, "%d worker cores for drawing%s", smp_workers(), smp_enabled() ? "" : " (multicore off)");
-    kv(&f, "Cores", b);
-    fmt_bytes(b2, sizeof b2, k.ram_bytes);
-    kv(&f, "RAM", b2);
-    fmt(b, sizeof b, "%llu MHz (TSC)", k.tsc_per_ms / 1000);
-    kv(&f, "Clock", b);
-
-    heading(&f, k.native ? "FIRMWARE (BOOT ONLY; RUNTIME: CLOCK, SETTINGS, RESET)" : "FIRMWARE (THE DRIVER LAYER)");
-    kv(&f, "Vendor", k.fw_vendor);
-    fmt(b, sizeof b, "UEFI %u.%u%s, %s", k.uefi_revision >> 16, (k.uefi_revision & 0xffff) / 10,
-        (k.uefi_revision & 0xffff) % 10 ? "x" : "", sizeof(void *) == 8 ? "64-bit" : "32-bit");
-    kv(&f, "Interface", b);
-    fmt(b, sizeof b, "%d handles, %d controllers bound", k.handles, k.drivers_connected);
-    kv(&f, "Drivers", b);
-
-    heading(&f, "DISPLAY & INPUT");
-    fmt(b, sizeof b, "%u \xc3\x97 %u via GOP, rotation %d\xc2\xb0", k.fb_w, k.fb_h, shell_rotation() * 90);
-    kv(&f, "Panel", b);
-    int s100 = (int)(ui.s * 100 + 0.5f);
-    fmt(b, sizeof b, "%d.%02dx  \xc2\xb7  %d \xc3\x97 %d dp", s100 / 100, s100 % 100, (int)(ui.W / ui.s), (int)(ui.H / ui.s));
-    kv(&f, "UI scale", b);
-    fmt(b, sizeof b, "%d touch, %d pointer", k.n_abs, k.n_rel);
-    kv(&f, "Pointers", b);
-    kv(&f, "Keys", k.native ? "serial console (USB keyboard driver pending)" : "Console input (keyboard, hardware buttons)");
-
-    heading(&f, "STORAGE");
-    for (int i = 0; i < k.n_blk; i++) {
-        if (k.blk[i].partition) continue;
-        fmt_bytes(b2, sizeof b2, k.blk[i].bytes);
-        fmt(b, sizeof b, "%s%s%s", b2, k.blk[i].removable ? ", removable" : ", built-in", k.blk[i].read_only ? ", read-only" : "");
-        kv(&f, "Disk", b);
+        if (shell_stats.bench[0][0]) {
+            heading(&f, "Graphics benchmark");
+            for (int i = 0; i < 4; i++) kv(&f, i == 0 ? "Full screen" : i == 1 ? "Small area" : i == 2 ? "Copy" : "Cores", shell_stats.bench[i]);
+        }
+        heading(&f, "Software");
+        kv(&f, "Operating system", "QRT " QRT_VERSION);
+        kv(&f, "Kernel", k.native ? "Tessera (native)" : "Tessera (on the firmware)");
+        kv(&f, "Architecture", QRT_ARCH);
+    } else {
+        const font_t *m = font_pick(F_MONO, dp(12));
+        rect_t box = { body.x, f.y + dp(4), body.w, 0 };
+        int n = 0;
+        while (klog_line(n)) n++;
+        box.h = n * m->line + dp(20);
+        gfx_rrect(c, box, dp(12), RGB(0x1d, 0x1d, 0x20));
+        int y = box.y + dp(10);
+        for (int i = 0; i < n; i++, y += m->line)
+            if (y + m->line > body.y && y < body.y + body.h) gfx_text_fit(c, m, box.x + dp(12), y, box.w - dp(24), klog_line(i), RGB(0xde, 0xdd, 0xda));
+        f.y = box.y + box.h;
     }
-    for (int i = 0; i < k.n_vol; i++) {
-        fmt_bytes(b2, sizeof b2, k.vol[i].size);
-        fmt(b, sizeof b, "%s  %s%s", k.vol[i].label, b2, k.vol[i].boot ? "  (boot)" : "");
-        kv(&f, "Volume", b);
-    }
-
-    heading(&f, "BUILD");
-    kv(&f, "System", "QRT " QRT_VERSION " / Tessera");
-    kv(&f, "Architecture", QRT_ARCH);
-    u64 up = k_now_ms() / 1000;
-    fmt(b, sizeof b, "%lluh %02llum %02llus", up / 3600, up / 60 % 60, up % 60);
-    kv(&f, "Uptime", b);
-    fmt(b, sizeof b, "%llu ms to first frame", k.boot_ms);
-    kv(&f, "Boot", b);
-
-    heading(&f, "BOOT LOG");
-    for (int i = 0; klog_line(i); i++) {
-        if (f.y + ui.small->line > inner.y && f.y < inner.y + inner.h)
-            gfx_text_fit(c, ui.small, inner.x, f.y, inner.w, klog_line(i), ui.text2);
-        f.y += ui.small->line;
-    }
-    f.y += dp(16);
-    st.sc.max = f.y + st.sc.off - inner.y - inner.h;
-    gfx_unclip(c);
-    gfx_clip(c, a);
+    f.y += dp(24);
+    st.sc.max = MAX(0, f.y + st.sc.off - body.y - body.h);
+    c->clip = old;
 }
 
-static int event(const event_t *e, rect_t a) { return scroll_event(&st.sc, e, a, dp(48)); }
+static int event(const event_t *e, rect_t a) {
+    if (e->type == EV_KEY && e->scan == 0x7f01) { st.tab = TAB_HW; st.sc.off = 0; return 1; }   /* from the shell after "bench" */
+    if (tap_track(&st.tap, e, dp(12)))
+        for (int i = 0; i < 3; i++) if (in_rect(tab_rect(a, i), e->x, e->y)) { st.tab = i; st.sc.off = 0; return 1; }
+    return scroll_event(&st.sc, e, body_rect(a), dp(48));
+}
 
 
 static int tick(u64 now) {
@@ -187,8 +211,10 @@ static int tick(u64 now) {
         ks.threads = sched_threads(th, 16);
         usize o = 0;
         ks.thread_list[0] = 0;
-        for (int i = 0; i < ks.threads; i++)
+        for (int i = 0; i < ks.threads; i++) {
             o += fmt(ks.thread_list + o, sizeof ks.thread_list - o, "%s%s", i ? ", " : "", th[i]->name);
+            if (i < 16) strlcpy(ks.names[i], th[i]->name, sizeof ks.names[i]);
+        }
         ks.mem_total = pmm_total_bytes();
         ks.mem_free = pmm_free_bytes();
         const irq_line_t *l;
@@ -198,8 +224,10 @@ static int tick(u64 now) {
             o += fmt(ks.irqs + o, sizeof ks.irqs - o, "; %s vector 0x%x: %llu", l[i].owner, l[i].vector, l[i].count);
     }
 #endif
+    if (ks.n_hist == 60) { memmove(ks.cpu_hist, ks.cpu_hist + 1, 59); ks.n_hist--; }
+    ks.cpu_hist[ks.n_hist++] = (u8)CLAMP(ks.busy_pct, 0, 100);
     dev_refresh();
     return 1;   /* uptime */
 }
 
-const app_t app_system = { "System", "Hardware & drivers", RGB(0x7c, 0x6c, 0xff), icon, NULL, draw, event, tick };
+const app_t app_system = { "System Monitor", "Processor, memory and hardware", RGB(0x3a, 0x94, 0x4a), icon, NULL, draw, event, tick };

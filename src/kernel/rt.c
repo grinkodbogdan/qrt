@@ -274,6 +274,7 @@ void panic(const char *msg) {
     if (k.native) native_panic(msg, NULL);
 #endif
     k.graphics_up = 0;
+    if (k.st && k.st->ConOut) k.st->ConOut->SetAttribute(k.st->ConOut, 0x0f);   /* visible again */
     klog("*** QRT kernel panic: %s", msg);
     for (;;) k.bs->Stall(1000000);
 }

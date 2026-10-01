@@ -1,26 +1,23 @@
-Welcome to QRT.
-
-This file lives on the EFI System Partition of the boot stick. On a 64-bit
-tablet QRT copies the stick into memory at boot, exits the firmware and
-serves this file from its own file system; on 32-bit firmware the Tessera
-kernel reads it through the firmware's FAT driver.
+Welcome to QRT
 
 Getting around
-  * The dock holds your pinned and open apps; the dots at its end open
-    the launcher, which lists every app and has a search.  Drag the dock
-    to move it: it sticks to the nearest screen edge.
+  * The dock holds your pinned and open apps. The dots at its end open the
+    list of all apps, with a search. Drag the dock to any edge of the screen.
+  * Swipe up on the home screen to see your open apps. Tap one to switch to
+    it; tap its x, or swipe it up, to close it.
+  * Every app window has minimise and close buttons at the top right.
   * Tap a text field to bring up the on-screen keyboard.
-  * Power button: lock (again: sleep; hold for a second: power menu).
-    Volume keys: volume.  Windows button: the launcher.
-  * The lock screen unlocks with a swipe up.  Settings -> Sleep after sets
-    how long QRT waits before it locks and turns the screen off.
 
-Things to try
-  * Wi-Fi    - switch it on, pick a network, type the password
-  * Browser  - web pages as text over http:// and https:// (TLS 1.3;
-               certificates are not checked yet: no passwords)
-  * Terminal - run Linux programs: busybox, ls -l /, uname -a, hello;
-               with Wi-Fi up: ping -c 3 1.1.1.1, nslookup example.com
-  * Sketch   - draw with your finger to check the touchscreen
-  * System   - see what the kernel found, which devices have drivers
-  * Settings - accent colour, rotation, native or firmware kernel mode
+Buttons
+  * Power: lock the screen. Again: sleep. Hold for a second: power menu.
+  * Volume up and down: volume.
+  * Windows button: the list of all apps.
+
+Apps
+  * Files          - browse the boot drive
+  * Terminal       - a command line for Linux programs (busybox, ls, wget...)
+  * Browser        - web pages over http:// and https://
+  * Wi-Fi          - connect to a wireless network
+  * Settings       - accent colour, rotation, sleep, brightness, volume
+  * System Monitor - processor, memory, network and hardware
+  * Clock, Drawing

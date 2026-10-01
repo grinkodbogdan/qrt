@@ -517,20 +517,19 @@ int wlan_state(void) { return w.state; }
 
 const char *wlan_state_text(void) {
     switch (w.state) {
-    case WL_OFF: return "Wi-Fi is off";
-    case WL_STARTING: return "starting the radio...";
-    case WL_IDLE: return "not connected";
-    case WL_SCANNING: return "looking for networks...";
-    case WL_AUTH: case WL_ASSOC: fmt(w.state_text, sizeof w.state_text, "connecting to %s...", w.cur.ssid); return w.state_text;
-    case WL_HANDSHAKE: fmt(w.state_text, sizeof w.state_text, "checking the password for %s...", w.cur.ssid); return w.state_text;
+    case WL_OFF: return "Off";
+    case WL_STARTING: return "Turning on...";
+    case WL_IDLE: return "Not connected";
+    case WL_SCANNING: return "Searching...";
+    case WL_AUTH: case WL_ASSOC: fmt(w.state_text, sizeof w.state_text, "Connecting to %s...", w.cur.ssid); return w.state_text;
+    case WL_HANDSHAKE: fmt(w.state_text, sizeof w.state_text, "Checking the password for %s...", w.cur.ssid); return w.state_text;
     case WL_CONNECTED: {
         static char b[96];
-        char a[16];
-        if (w.nif.ip) { ip_to_str(w.nif.ip, a, sizeof a); fmt(b, sizeof b, "connected to %s \xc2\xb7 %s", w.cur.ssid, a); }
-        else fmt(b, sizeof b, "connected to %s \xc2\xb7 getting an address...", w.cur.ssid);
+        if (w.nif.ip) fmt(b, sizeof b, "Connected to %s", w.cur.ssid);
+        else fmt(b, sizeof b, "Connected to %s, getting an address...", w.cur.ssid);
         return b;
     }
-    case WL_FAILED: return w.state_text[0] ? w.state_text : "connection failed";
+    case WL_FAILED: return w.state_text[0] ? w.state_text : "Connection failed";
     }
     return "";
 }

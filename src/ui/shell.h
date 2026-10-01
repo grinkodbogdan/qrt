@@ -10,6 +10,7 @@ typedef struct {
     const font_t *small, *body, *label, *title, *h1, *display, *huge;
     u32 accent;
     u32 text, text2, text3, card, card_hi, stroke, bg_top, bg_bottom;
+    u32 window, header;   /* app window background and its header bar */
 } ui_t;
 
 extern ui_t ui;
@@ -24,6 +25,7 @@ typedef struct app {
     void (*draw)(canvas_t *c, rect_t area);
     int  (*event)(const event_t *e, rect_t area);   /* logical coords; 1 = redraw */
     int  (*tick)(u64 now_ms);                      /* called ~60 Hz while open; 1 = redraw */
+    void (*close)(void);                           /* optional: the user closed the app */
 } app_t;
 
 extern const app_t app_clock, app_sketch, app_files, app_system, app_settings, app_life, app_lab, app_terminal, app_wifi, app_browser;

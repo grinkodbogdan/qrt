@@ -1,7 +1,7 @@
 # QRT
 
 A small custom operating system for the **Dell Venue 8 Pro**, with a touch-first
-UI inspired by Fuchsia's Armadillo/Ermine shells. Its kernel, **Tessera**, is
+desktop styled after GNOME (libadwaita, dark). Its kernel, **Tessera**, is
 written from scratch. It is not Linux, but it can run Linux programs.
 
 <p>
@@ -11,6 +11,7 @@ written from scratch. It is not Linux, but it can run Linux programs.
 
 | | |
 |---|---|
+| ![open apps](docs/screenshots/overview.png) | ![settings](docs/screenshots/settings.png) |
 | ![launcher](docs/screenshots/launcher.png) | ![keyboard](docs/screenshots/keyboard.png) |
 | ![terminal](docs/screenshots/terminal.png) | ![network](docs/screenshots/terminal-net.png) |
 | ![wifi](docs/screenshots/wifi.png) | ![system](docs/screenshots/system.png) |
@@ -20,8 +21,24 @@ written from scratch. It is not Linux, but it can run Linux programs.
 
 ## The shell
 
+- **Look.** Dark, flat and in GNOME's colours.
+  - A black top bar shows the date and time in the middle and network and
+    volume icons at the right.
+  - Every app is a window: a header bar with its title, a minimise button
+    and a close button.
+  - Settings, Wi-Fi, Files and System Monitor follow GNOME's layouts:
+    grouped rows, switches and sliders.
+- **Open apps.** Swipe up on the home screen. Every open app appears as a
+  picture of its window, taken when you last left it.
+  - Tap a window to switch to it.
+  - Tap its × or swipe it up to close it.
+  - Tap the empty space to go back.
+  - The launcher's search finds this view too ("Open apps").
+- **Closing apps.** The × in a window's header bar closes the app; the –
+  minimises it to the home screen. A closed app leaves the dock unless it
+  is pinned. The Terminal ends its program and starts a fresh session.
 - **Dock.** A rounded panel floating along one edge holds pinned apps
-  (Files, Terminal, Browser, Wi-Fi, Sketch, Settings) and any others you
+  (Files, Terminal, Browser, Wi-Fi, Drawing, Settings) and any others you
   open. A dot marks running apps. Tapping the app in front minimises it.
   - Drag the dock to move it. It stays under your finger at the spot you
     picked it up, and takes the shape it will have on the nearest edge.
@@ -30,15 +47,15 @@ written from scratch. It is not Linux, but it can run Linux programs.
     screen, which keeps dragging smooth on the tablet.
   - The edge is saved in NVRAM, so the dock stays there after a reboot.
 - **Launcher.** The 3×3 dots at the end of the dock open a grid of every
-  app. Its search field also finds actions, such as rotate, restart,
-  benchmark and the touch fixes. Typing anywhere on the home screen opens
+  app. Its search field also finds actions, such as open apps, rotate,
+  restart and the touch fixes. Typing anywhere on the home screen opens
   it.
 - **On-screen keyboard.** Tapping a text field brings it up: the launcher
   search, the Terminal command line, a Wi-Fi password, or the browser's
   address bar and form fields. It has letters,
   digits and two symbol pages, shift and caps lock, a repeating backspace,
   and cursor keys.
-- **Hardware buttons** (Venue 8 Pro 5855, native mode):
+- **Hardware buttons** (Venue 8 Pro 5855, both kernel modes):
   - **power**: locks the screen. Pressed on the lock screen, the tablet
     sleeps; pressed while asleep, it wakes. Held for a second, it opens the
     power menu (sleep, restart, shut down, firmware setup).
@@ -49,10 +66,13 @@ written from scratch. It is not Linux, but it can run Linux programs.
     all apps).
 
   QRT reads these straight from the Cherry Trail GPIO pads the DSDT names.
+  At start-up it switches each pad to GPIO-input mode, as Linux's
+  pinctrl-cherryview does. Until 0.5.6 it only read the pads, and only in
+  native mode: the likely reason the buttons did nothing on the tablet.
   In QEMU, keys on the serial console stand in for them: F9 and F10 for
   volume, F11 for power, F12 for power held, F8 for Windows.
-- **Lock screen and sleep.** The lock screen shows the time, the date and
-  the network. Swipe up to unlock (or press Enter on a keyboard).
+- **Lock screen and sleep.** The lock screen shows the time and the date.
+  Swipe up to unlock (or press Enter on a keyboard).
   - After a period without a touch or a button press, QRT locks and
     sleeps. Set the period in **Settings → Sleep after**: never, 30 s,
     1, 2 (the default), 5 or 10 minutes. On the lock screen it sleeps
@@ -61,11 +81,14 @@ written from scratch. It is not Linux, but it can run Linux programs.
     the screen is black) and the frame loop slows down. Wi-Fi stays
     connected.
   - Only the power or Windows button wakes the tablet; touch does not.
-    In firmware mode, where QRT has no button driver, a touch wakes it.
+    On machines without these buttons, a touch wakes it.
   - This is not ACPI suspend: QRT cannot enter S0ix/S3 yet, so the
     tablet still draws more power asleep than it would under Windows.
-- **Brightness.** **Settings → Brightness** sets the backlight. It drives
-  the SoC's PWM controller, which the DSDT links to the panel.
+- **Brightness.** **Settings → Power → Screen brightness** sets the
+  backlight. It drives the SoC's PWM controller, which the DSDT links to
+  the panel.
+- **No boot text.** The boot log goes to the serial port and to **System
+  Monitor → Log**, not to the screen.
 
 ## The kernel: Tessera
 
@@ -255,7 +278,7 @@ Not supported yet:
 
 `src/kernel/dev.h` is the driver model. Buses enumerate devices from PCI
 (ECAM), ACPI (the `_HID`s in the DSDT/SSDTs) and fixed platform devices.
-Drivers declare id tables and a `probe()`. **System → Devices** lists every
+Drivers declare id tables and a `probe()`. **System Monitor → Hardware** lists every
 device, first those with a QRT driver and then those still waiting for one.
 On the tablet, that second part is the to-do list.
 
@@ -283,7 +306,7 @@ FreeBSD's.
 | Display | works (framebuffer, 1200×1920, rotation) |
 | Touch | works: QRT's own Wacom driver; tested on the tablet in firmware mode. Native mode needs the same driver after the handover, which is **new in 0.5 and untested on hardware**. |
 | Storage | the boot stick is read into RAM at boot; writes go to RAM only |
-| Buttons | power, volume and Windows through GPIO, native mode. Power long-press, volume repeat and the Windows button are **new in 0.5.5.3, untested on hardware**. |
+| Buttons | power, volume and Windows through GPIO, both kernel modes. 0.5.6 sets the pads to GPIO input first; earlier versions did not, and the buttons did nothing on the tablet (**the fix is untested on hardware**). |
 | Wi-Fi | Intel 8260 driver, WPA2-Personal: **works** (scanning, connecting, DHCP) |
 | Backlight | LPSS PWM #1, native mode: brightness and sleep (**new in 0.5.5.3, untested on hardware**). QRT only takes control if the firmware left that PWM running. |
 | Sleep | backlight off and a slower frame loop; not ACPI suspend |
@@ -316,16 +339,13 @@ they come from UEFI's MP Services.
 
 In QEMU with 4 cores, a full 1280×800 redraw drops from 74 ms on one core to
 24 ms. Type `bench` in the launcher's search field to measure; the result
-appears in **System → Graphics**.
+appears in **System Monitor → Hardware**.
 
-## Touch Lab
+## Touchscreen
 
-**Touch Lab** runs the native touchscreen stack by hand:
-- **Probe** reads the chip's HID descriptors.
-- **Go native** takes touch over from the firmware.
-- **Save report** writes `\qrt\hwdump\touch.txt`.
-
-The stack is `src/drivers/dwi2c.c`, `i2chid.c`, `hidparse.c` and `touch.c`.
+The touchscreen stack is `src/drivers/dwi2c.c`, `i2chid.c`, `hidparse.c` and
+`touch.c`. Its diagnostic app (Touch Lab, `src/apps/lab.c`) and the Life demo
+are no longer in the app list since 0.5.6.
 `make check` runs the HID parser's host tests against the Venue's real Wacom
 descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
@@ -333,9 +353,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.5.5.3.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.5.6.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.5.5.3.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.5.6.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.
@@ -380,7 +400,8 @@ src/drivers/           PCI, UART, DesignWare I2C, HID over I2C, touch service, G
 src/net/               802.11 client + WPA2 (wlan.c), ARP/IP/ICMP/UDP/DHCP/DNS (net.c), TCP (tcp.c),
                        HTTP client (http.c), TLS 1.3 client (tls.c), crypto (crypto.c, crypto_tls.c)
 src/ui/                gfx (anti-aliased shapes, text), font atlases, shell (dock, launcher), on-screen keyboard
-src/apps/              Files, Terminal, Browser (+ html.c), Wi-Fi, Sketch, Settings, System, Clock, Life, Touch Lab
+src/apps/              Files, Terminal, Browser (+ html.c), Wi-Fi, Settings, System Monitor, Clock, Drawing
+                       (Touch Lab and Life are built but not listed)
 firmware/              Intel 8260 firmware (Intel redistributable licence)
 tests/                 HID parser, crypto vectors, WPA2 client (simulated AP), HTTP, HTML, TLS, Linux test program
 tools/                 mkfont.py, mkimage.sh, run-qemu.sh, qemu-test.py, gen_isr.py

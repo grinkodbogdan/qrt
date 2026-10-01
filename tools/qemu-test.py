@@ -206,8 +206,8 @@ def default_script(q, shots):
     """Walk the shell and every app with touch, the on-screen keyboard and the
     serial keyboard.  Coordinates are for the 1280x800 landscape layout the
     QEMU VGA device reports (UI scale 1.18: the dock floats at x 1181-1271,
-    hanging from y 47; the keyboard is centred in the 1172 px content area)."""
-    back = (45, 76)
+    hanging from y 47; the keyboard is centred in the 1172 px content area;
+    app windows have a 57 px header bar from y 38, the app area from y 95)."""
     # pinned apps; the launcher button follows them while only they are in the dock
     dock = {"files": 94, "terminal": 170, "browser": 246, "wifi": 322, "sketch": 398, "settings": 474, "launcher": 564}
 
@@ -229,7 +229,7 @@ def default_script(q, shots):
     shots.append(q.shot("03-launcher-search"))
     q.tap(904, 752, settle=1.5)            # Enter -> Terminal
     # Terminal: type "ls /bin" on the on-screen keyboard, then run programs over serial
-    q.tap(500, 243)                        # input field -> keyboard
+    q.tap(500, 400)                        # the console -> keyboard
     for x, y in [(939, 627), (320, 627), (585, 752), (375, 752), (674, 690), (806, 563), (761, 690)]:
         q.tap(x, y, settle=0.3)            # l s space / b i n
     q.tap(904, 752, settle=5)              # Enter
@@ -247,16 +247,17 @@ def default_script(q, shots):
     # Sketch from the dock: draw a stroke, change ink, draw another
     dock_tap("sketch")
     q.drag([(200 + i * 40, 400 + (i % 5) * 30) for i in range(20)])
-    q.tap(90, 124)                         # second ink swatch
+    q.tap(98, 109)                         # second ink swatch
     q.drag([(300 + i * 30, 600 - i * 12) for i in range(25)])
     shots.append(q.shot("06-sketch"))
     # Files from the dock: the volume, the qrt folder, welcome.txt
     dock_tap("files")
-    q.tap(400, 200)                        # row 0: the QRT volume
-    # firmware volume: "..", EFI, qrt; native RAM root: "..", bin, dev, EFI, etc, proc, qrt, tmp
-    q.tap(400, 626 if ARCH == "x64" else 350)
+    row = lambda i: 151 + i * 61 + 30      # list rows: 61 px from y 151
+    q.tap(400, row(0))                     # the QRT volume
+    # firmware volume: "..", EFI, lib, qrt; native RAM root: "..", bin, dev, EFI, etc, lib, proc, qrt, tmp
+    q.tap(400, row(7) if ARCH == "x64" else row(3))
     shots.append(q.shot("07-files-dir"))
-    q.tap(400, 350)                        # rows: "..", hwdump, welcome.txt
+    q.tap(400, row(2))                     # rows: "..", hwdump, welcome.txt
     shots.append(q.shot("07-files-text"))
     q.keys("backspace")
     # Browser: start page, then the host's test pages over http and https (x64: native network)
@@ -264,12 +265,12 @@ def default_script(q, shots):
     shots.append(q.shot("19-browser-home"))
     if ARCH == "x64":
         def open_url(u, wait=6):
-            q.tap(600, 141, settle=0.8)                  # address bar -> keyboard
+            q.tap(600, 123, settle=0.8)                  # address bar -> keyboard
             q.keys(*[c for c in u], settle=0.2)
             q.keys("ret", settle=wait)
         open_url("10.0.2.2:18080/")
         shots.append(q.shot("19-browser-http"))
-        q.tap(80, 232, settle=5)                        # "Next page (a link)": chunked reply
+        q.tap(80, 214, settle=5)                        # "Next page (a link)": chunked reply
         shots.append(q.shot("19-browser-link"))
         open_url("https://10.0.2.2:18443/", wait=10)
         shots.append(q.shot("19-browser-https"))
@@ -280,16 +281,21 @@ def default_script(q, shots):
     # Wi-Fi (no Intel 8260 in QEMU: the app must say so cleanly)
     dock_tap("wifi")
     shots.append(q.shot("08-wifi"))
-    # System, Clock, Life, Touch Lab through the launcher search
-    launch("system")
+    # System Monitor (and its Hardware tab), Clock through the launcher search
+    launch("monitor")
     shots.append(q.shot("09-system"))
+    q.tap(586, 125, settle=1.5)            # Hardware tab
+    shots.append(q.shot("09-system-hw"))
     launch("clock")
     shots.append(q.shot("10-clock"))
-    launch("life", settle=3.0)
-    shots.append(q.shot("11-life"))
-    launch("touch")
-    q.tap(640, 141, settle=2)              # probe (no LPSS I2C in QEMU: must refuse cleanly)
-    shots.append(q.shot("12-touchlab"))
+    # open apps: swipe up on the home screen, close one with its x, one by swiping it up
+    q.keys("esc", settle=1.0)
+    q.drag([(500, 650)] + [(500, 650 - i * 30) for i in range(1, 10)], settle=1.5)
+    shots.append(q.shot("11-overview"))
+    q.tap(361, 132, settle=1.0)            # x on the first window (Terminal)
+    q.drag([(205, 260)] + [(205, 260 - i * 25) for i in range(1, 10)], settle=1.2)   # swipe the new first window up
+    shots.append(q.shot("12-overview-closed"))
+    q.tap(600, 760, settle=1.0)            # empty space: back home
     # hardware buttons: volume = mock audio indicator, Windows = launcher,
     # power = lock (again: sleep, again: wake), power held = power menu
     q.keys("esc", settle=0.8)
@@ -326,13 +332,13 @@ def default_script(q, shots):
     q.drag([(600, 600)] + [(600, 600 - i * 40) for i in range(1, 10)], settle=1.0)
     shots.append(q.shot("14-settings-more"))
     q.drag([(600, 200)] + [(600, 200 + i * 60) for i in range(1, 10)], settle=1.0)
-    q.tap(456, 305)                        # rotation 90 deg -> 800x1280 portrait canvas
+    q.tap(744, 257)                        # rotation 90 deg -> 800x1280 portrait canvas
     time.sleep(2)
     shots.append(q.shot("15-settings-portrait"))
     q.keys("esc", settle=2)
     shots.append(q.shot("16-home-portrait"))
-    q.keys("l", "i", "f", "e", "ret", settle=2)
-    shots.append(q.shot("17-life-portrait"))
+    q.keys("c", "l", "o", "c", "k", "ret", settle=2)
+    shots.append(q.shot("17-clock-portrait"))
 
 
 if __name__ == "__main__":

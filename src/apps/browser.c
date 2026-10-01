@@ -347,7 +347,7 @@ static void draw_status(canvas_t *c, rect_t a) {
 
 static void draw_page(canvas_t *c, rect_t a) {
     rect_t pr = page_rect(a);
-    gfx_rrect(c, pr, dp(18), RGBA(10, 8, 20, 170));
+    gfx_rrect(c, pr, dp(12), RGB(0x1e, 0x1e, 0x1e));
     rect_t old = c->clip;
     gfx_clip(c, pr);
     int top = B.sc.off, bottom = top + pr.h;

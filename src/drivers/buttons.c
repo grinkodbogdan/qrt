@@ -16,10 +16,13 @@
  * the input level (Linux pinctrl-cherryview.c documents the layout: pads in
  * families of 15, 0x400 apart, 8 bytes each, from offset 0x4400).
  *
- * The driver only reads the pads.  It samples every line at start-up and
- * treats a change from that resting level as a press, so it does not depend
- * on the (undocumented) polarity; a key held during boot starts QRT in
- * firmware mode anyway.  Polled from the input path at the frame rate, with
+ * At start-up the driver puts each pad in GPIO-input mode, as Linux does
+ * when gpio-keys requests the line (pinctrl-cherryview.c,
+ * chv_gpio_request_enable + direction input): the firmware may leave a pad
+ * in its native function, where the input bit does not follow the button.
+ * It then samples every line and treats a change from that resting level as
+ * a press, so it does not depend on the polarity.  It runs in both kernel
+ * modes: the firmware does not read these pads after boot.  Polled from the input path at the frame rate, with
  * two-sample debouncing.
  *
  * Events: volume keys fire on press and repeat while held; the Windows
@@ -27,6 +30,7 @@
  * second, or SCAN_POWER_LONG once it has been held for a second.
  */
 #include "buttons.h"
+#include "touch.h"
 
 static const u64 community[] = { 0xfed80000, 0xfed88000, 0xfed90000, 0xfed98000 };   /* SW, N, E, SE */
 
@@ -49,20 +53,40 @@ static int active;
 
 int buttons_active(void) { return active; }
 
+/* PADCTRL0/1 (Linux: CHV_PADCTRL0_*, CHV_PADCTRL1_*) */
+#define PAD_GPIOEN      (1u << 15)
+#define PAD_CFG_SHIFT   8
+#define PAD_CFG_MASK    (7u << PAD_CFG_SHIFT)
+#define PAD_CFG_GPO     1u
+#define PAD_CFG_GPI     2u
+#define PAD_CFG_HIZ     3u
+#define PAD_RXSTATE     1u
+#define PAD_TXSTATE     2u
+#define PAD1_CFGLOCK    (1u << 31)
+
 static volatile u32 *padctrl0(int comm, int pin) {
     return (volatile u32 *)(usize)(community[comm] + 0x4400 + 0x400 * (u64)(pin / 15) + 8 * (u64)(pin % 15));
 }
 
-static int level(int i) { return (int)(*padctrl0(btn[i].comm, btn[i].pin) & 1); }
+static int level(int i) { return (int)(*padctrl0(btn[i].comm, btn[i].pin) & PAD_RXSTATE); }
 
 int buttons_init(void) {
-    if (!k.native || !k.is_venue) return 0;
-    /* a missing community reads as all ones */
-    for (usize c = 0; c < ARRAY_LEN(community); c++)
-        if (*(volatile u32 *)(usize)(community[c] + 0x4400) == 0xffffffffu) { klog("buttons: GPIO community %u absent", (u32)c); return 0; }
+    if (active) return 1;
+    if (!venue_gnvs()) return 0;                      /* only on the 5855's firmware (Cherry Trail pads) */
+    for (int i = 0; i < N_BTN; i++) {
+        volatile u32 *c0 = padctrl0(btn[i].comm, btn[i].pin), *c1 = c0 + 1;
+        u32 v = *c0, v1 = *c1;
+        if (v == 0xffffffffu) { klog("buttons: GPO%d is not answering", btn[i].comm); return 0; }
+        u32 cfg = (v & PAD_CFG_MASK) >> PAD_CFG_SHIFT;
+        if (!(v1 & PAD1_CFGLOCK) && (!(v & PAD_GPIOEN) || cfg == PAD_CFG_GPO || cfg == PAD_CFG_HIZ)) {
+            *c0 = (v & ~PAD_CFG_MASK) | PAD_GPIOEN | (PAD_CFG_GPI << PAD_CFG_SHIFT);
+            klog("buttons: %s pad switched to GPIO input (PADCTRL0 %08x -> %08x)", btn[i].name, v, *c0);
+        }
+    }
+    hal_delay_us(2000);                               /* let the input settle */
     for (int i = 0; i < N_BTN; i++) {
         u32 v = *padctrl0(btn[i].comm, btn[i].pin);
-        btn[i].idle = btn[i].last = btn[i].stable = (int)(v & 1);
+        btn[i].idle = btn[i].last = btn[i].stable = (int)(v & PAD_RXSTATE);
         klog("buttons: %s = GPO%d pin 0x%x, PADCTRL0 %08x, resting level %d", btn[i].name, btn[i].comm, btn[i].pin, v, btn[i].idle);
     }
     active = 1;
@@ -106,8 +130,8 @@ int buttons_poll(event_t *out, int max) {
 }
 
 void buttons_status(char *buf, usize cap) {
-    if (!active) { strlcpy(buf, "not active (native mode on the Venue 8 Pro 5855 only)", cap); return; }
+    if (!active) { strlcpy(buf, "not active (Venue 8 Pro 5855 only)", cap); return; }
     usize o = 0;
     for (int i = 0; i < N_BTN; i++)
-        o += fmt(buf + o, cap - o, "%s%s %d", i ? ", " : "polled GPIO; presses: ", btn[i].name, btn[i].presses);
+        o += fmt(buf + o, cap - o, "%s%s %s, %d", i ? "; " : "", btn[i].name, level(i) != btn[i].idle ? "down" : "up", btn[i].presses);
 }

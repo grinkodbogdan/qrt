@@ -254,6 +254,7 @@ int hal_poll(event_t *out, int max) {
         n += buttons_poll(out + n, max - n);
         return n + serial_keys(out + n, max - n);
     }
+    n += buttons_poll(out + n, max - n);                 /* firmware mode reads the pads too */
     EFI_INPUT_KEY key;
     while (n < max && !EFI_ERROR(k.st->ConIn->ReadKeyStroke(k.st->ConIn, &key))) {
         if (inject_key(key.UnicodeChar, &out[n])) {

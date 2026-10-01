@@ -161,37 +161,50 @@ static void open_file(const entry_t *e) {
 static void on_open(void) { st.pressed = -1; }
 
 /* --- drawing --- */
-static rect_t list_rect(rect_t a) { return (rect_t){ a.x + dp(16), a.y + dp(44), a.w - dp(32), a.h - dp(52) }; }
-static int row_h(void) { return dp(60); }
+static rect_t list_rect(rect_t a) { return (rect_t){ a.x, a.y + dp(56), a.w, a.h - dp(56) }; }
+static int row_h(void) { return dp(52); }
 
 static void breadcrumb(char *buf, usize cap) {
-    if (st.vol < 0) { strlcpy(buf, "All volumes", cap); return; }
+    if (st.vol < 0) { strlcpy(buf, "Drives", cap); return; }
     char p[256];
     str16_to_utf8(p, sizeof p, st.path);
     if (k.native) { for (char *c = p; *c; c++) if (*c == '\\') *c = '/'; }
-    fmt(buf, cap, "%s  %s", k.vol[st.vol].label, p[0] ? p : k.native ? "/" : "\\");
+    for (char *c = p; *c; c++) if (*c == '\\') *c = '/';
+    fmt(buf, cap, "%s%s", k.vol[st.vol].label, p[0] && strcmp(p, "/") ? p : "");
 }
 
+/* a list row as in GNOME Files: glyph, name, and the size or kind at the right */
 static void draw_row(canvas_t *c, rect_t r, const char *title, const char *sub, int dir, int pressed) {
-    if (pressed) gfx_rrect(c, r, dp(14), RGBA(255, 255, 255, 26));
-    float cx = r.x + dp(26), cy = r.y + r.h / 2.0f;
-    gfx_circle(c, cx, cy, dp(17), dir ? ALPHA(app_files.color, 200) : RGBA(255, 255, 255, 26));
-    if (dir) icon(c, cx, cy, dp(10), RGB(255, 255, 255));
-    else {
-        rect_t pg = { (int)cx - dp(6), (int)cy - dp(8), dp(12), dp(16) };
-        gfx_rrect_outline(c, pg, dp(2), dp(2), ui.text2);
+    if (pressed) gfx_fill(c, r, RGBA(255, 255, 255, 22));
+    gfx_fill(c, (rect_t){ r.x + dp(16), r.y + r.h - 1, r.w - dp(32), 1 }, RGBA(255, 255, 255, 14));
+    float cx = r.x + dp(36), cy = r.y + r.h / 2.0f;
+    if (dir) {                                             /* a folder: tab and body */
+        gfx_rrect(c, (rect_t){ (int)cx - dp(12), (int)cy - dp(9), dp(10), dp(6) }, dp(2), RGB(0x35, 0x84, 0xe4));
+        gfx_rrect(c, (rect_t){ (int)cx - dp(12), (int)cy - dp(6), dp(24), dp(16) }, dp(3), RGB(0x62, 0xa0, 0xea));
+    } else {                                               /* a page with a folded corner */
+        rect_t pg = { (int)cx - dp(9), (int)cy - dp(11), dp(18), dp(22) };
+        gfx_rrect(c, pg, dp(3), RGB(0xde, 0xdd, 0xda));
+        gfx_line(c, pg.x + dp(4), pg.y + dp(9), pg.x + pg.w - dp(4), pg.y + dp(9), dp(1.2f), RGB(0x9a, 0x99, 0x96));
+        gfx_line(c, pg.x + dp(4), pg.y + dp(13), pg.x + pg.w - dp(4), pg.y + dp(13), dp(1.2f), RGB(0x9a, 0x99, 0x96));
+        gfx_line(c, pg.x + dp(4), pg.y + dp(17), pg.x + pg.w - dp(8), pg.y + dp(17), dp(1.2f), RGB(0x9a, 0x99, 0x96));
     }
-    gfx_text_fit(c, ui.label, r.x + dp(56), r.y + dp(8), r.w - dp(64), title, ui.text);
-    gfx_text_fit(c, ui.small, r.x + dp(56), r.y + dp(8) + ui.label->line, r.w - dp(64), sub, ui.text2);
+    int sw = MIN(text_width(ui.body, sub), r.w / 3);
+    gfx_text_fit(c, ui.body, r.x + dp(64), r.y + (r.h - ui.body->line) / 2, r.w - dp(96) - sw, title, ui.text);
+    gfx_text_fit(c, ui.body, r.x + r.w - dp(24) - sw, r.y + (r.h - ui.body->line) / 2, r.w / 3, sub, ui.text2);
 }
 
 static void draw(canvas_t *c, rect_t a) {
     char buf[300], sub[64];
     breadcrumb(buf, sizeof buf);
-    gfx_text_fit(c, ui.body, a.x + dp(24), a.y + dp(8), a.w - dp(48), st.preview ? st.preview_name : buf, ui.text2);
+    /* the path bar */
+    const char *shown = st.preview ? st.preview_name : buf;
+    int pw = MIN(text_width(ui.body, shown) + dp(32), a.w - dp(32));
+    rect_t pb = { a.x + dp(16), a.y + dp(10), pw, dp(36) };
+    gfx_rrect(c, pb, dp(8), RGBA(255, 255, 255, 20));
+    gfx_text_fit(c, ui.body, pb.x + dp(16), pb.y + (pb.h - ui.body->line) / 2, pb.w - dp(32), shown, ui.text);
     rect_t L = list_rect(a);
-    ui_card(c, L, dp(20), 0);
-    rect_t inner = { L.x + dp(8), L.y + dp(8), L.w - dp(16), L.h - dp(16) };
+    gfx_fill(c, (rect_t){ L.x, L.y - 1, L.w, 1 }, RGBA(0, 0, 0, 90));
+    rect_t inner = L;
     gfx_clip(c, inner);
 
     if (st.preview) {
@@ -215,16 +228,16 @@ static void draw(canvas_t *c, rect_t a) {
             char size[24], free_[24];
             fmt_bytes(size, sizeof size, k.vol[i].size);
             fmt_bytes(free_, sizeof free_, k.vol[i].free);
-            if (k.native) fmt(sub, sizeof sub, "%s", k.vol[i].boot ? "RAM copy of the boot stick" : "needs a native storage driver");
-            else fmt(sub, sizeof sub, "%s  \xc2\xb7  %s free%s", size, free_, k.vol[i].boot ? "  \xc2\xb7  QRT boot volume" : "");
+            if (k.native) fmt(sub, sizeof sub, "%s", k.vol[i].boot ? "Boot drive" : "Not available");
+            else fmt(sub, sizeof sub, "%s free of %s", free_, size);
             draw_row(c, r, k.vol[i].label, sub, 1, st.pressed == i);
         }
-        if (!k.n_vol) gfx_text_center(c, ui.body, inner, "The firmware exposes no FAT volumes", ui.text3);
+        if (!k.n_vol) gfx_text_center(c, ui.body, inner, "No drives", ui.text3);
         if (st.error[0]) gfx_text_center(c, ui.body, (rect_t){ inner.x, inner.y + inner.h - dp(60), inner.w, dp(40) }, st.error, ui.text3);
         st.sc.max = k.n_vol * row_h() - inner.h;
     } else {
         rect_t up = { inner.x, inner.y - st.sc.off, inner.w, row_h() - dp(4) };
-        draw_row(c, up, "..", "Up one level", 1, st.pressed == 0);
+        draw_row(c, up, "..", "", 1, st.pressed == 0);
         for (int i = 0; i < st.n; i++) {
             rect_t r = { inner.x, inner.y + (i + 1) * row_h() - st.sc.off, inner.w, row_h() - dp(4) };
             if (r.y + r.h < inner.y || r.y > inner.y + inner.h) continue;
@@ -258,7 +271,7 @@ static void activate_row(int row) {
     if (st.vol < 0) {
         if (row < 0 || row >= k.n_vol) return;
         if (k.native && !k.vol[row].boot) {
-            fmt(st.error, sizeof st.error, "Only the boot stick is available until QRT has its own storage driver");
+            fmt(st.error, sizeof st.error, "This drive cannot be opened yet");
             return;
         }
         st.vol = row; st.path[0] = 0; load_dir();
@@ -288,4 +301,4 @@ static int event(const event_t *e, rect_t a) {
     return redraw;
 }
 
-const app_t app_files = { "Files", "eMMC, SD & USB", RGB(0x2e, 0xc4, 0xb6), icon, on_open, draw, event, NULL };
+const app_t app_files = { "Files", "Browse drives and folders", RGB(0x35, 0x84, 0xe4), icon, on_open, draw, event, NULL };
