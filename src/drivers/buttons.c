@@ -12,7 +12,16 @@
  *   GPO0 (southwest) pin 0x5F   usage 07:E3  Left GUI (Windows button, if fitted)
  *
  * QRT has no AML interpreter yet, so the table is written down here for this
- * board instead of being evaluated from _CRS.  Each pad's PADCTRL0 bit 0 is
+ * board instead of being evaluated from _CRS.  _CRS picks one of several pin
+ * sets from the board id (GNVS BDID) and the PMIC id (GNVS PMID); the
+ * driver reads both and follows the same choice:
+ *   BDID 1          Windows button GPO1/0x08, volume down GPO0/0x3D
+ *   PMID 3          Windows button on the PMIC (not supported here)
+ *   otherwise       the table below
+ *
+ * The Button test also runs a pad scanner: it samples the input bit of every
+ * pad in the four GPIO communities and lists the ones that changed, so a
+ * press shows which pad really carries a button even if the tables are wrong.  Each pad's PADCTRL0 bit 0 is
  * the input level (Linux pinctrl-cherryview.c documents the layout: pads in
  * families of 15, 0x400 apart, 8 bytes each, from offset 0x4400).
  *
@@ -60,7 +69,7 @@ static struct {
 };
 #define N_BTN ((int)ARRAY_LEN(btn))
 
-static int active;
+static int active, board_id = -1, pmic_id = -1;
 static char why[96] = "not started: the firmware lists no button device (ACPI0011 / PNP0C40)";
 
 /* ACPI fixed power button */
@@ -115,7 +124,18 @@ int buttons_init(void) {
     if (active) return 1;
     if (!k.dsdt) { strlcpy(why, "no DSDT", sizeof why); return 0; }
     if (!venue_gnvs()) { fmt(why, sizeof why, "not the Venue 8 Pro 5855 firmware (DSDT %.6s)", (const char *)k.dsdt + 16); return 0; }
+    const volatile u8 *gn = (const volatile u8 *)(usize)venue_gnvs();
+    board_id = gn[0x322];                             /* BDID */
+    pmic_id = gn[0x349];                              /* PMID */
+    if (board_id == 1) {                              /* _CRS "PBUF" */
+        btn[2].comm = 0; btn[2].pin = 0x3d;
+        btn[3].comm = 1; btn[3].pin = 0x08;
+    } else if (pmic_id == 3 && board_id != 9 && board_id != 10) {
+        btn[3].pin = -1;                              /* "WBUF": the Windows button is on the PMIC */
+    }
+    klog("buttons: board id %d, PMIC id %d", board_id, pmic_id);
     for (int i = 0; i < N_BTN; i++) {
+        if (btn[i].pin < 0) continue;
         volatile u32 *c0 = padctrl0(btn[i].comm, btn[i].pin), *c1 = c0 + 1;
         u32 v = *c0, v1 = *c1;
         if (v == 0xffffffffu) { fmt(why, sizeof why, "GPIO bank GPO%d does not answer", btn[i].comm); klog("buttons: %s", why); return 0; }
@@ -130,6 +150,7 @@ int buttons_init(void) {
     }
     hal_delay_us(2000);                               /* let the input settle */
     for (int i = 0; i < N_BTN; i++) {
+        if (btn[i].pin < 0) continue;
         u32 v = *padctrl0(btn[i].comm, btn[i].pin);
         btn[i].idle = btn[i].last = btn[i].stable = (int)(v & PAD_RXSTATE);
         klog("buttons: %s = GPO%d pin 0x%x, PADCTRL0 %08x, resting level %d", btn[i].name, btn[i].comm, btn[i].pin, v, btn[i].idle);
@@ -142,13 +163,72 @@ int buttons_init(void) {
 
 static volatile u32 *intstat(int comm) { return (volatile u32 *)(usize)(community[comm] + 0x300); }
 
+/* ---- the pad scanner (Button test) ------------------------------------------------ */
+static const int families[4] = { 7, 5, 2, 7 };       /* pads per community = families * 15 */
+#define MAX_PADS 105
+static struct {
+    int on;
+    u8 prev[4][MAX_PADS], valid[4][MAX_PADS];
+    u16 hits[4][MAX_PADS];
+    u16 ihits[4][16];
+} sc;
+
+void buttons_scan_start(void) {
+    if (!venue_gnvs()) return;
+    memset(&sc, 0, sizeof sc);
+    for (int c = 0; c < 4; c++) {
+        for (int p = 0; p < families[c] * 15; p++) {
+            u32 v = *padctrl0(c, p);
+            sc.valid[c][p] = v != 0xffffffffu && v != 0;
+            sc.prev[c][p] = (u8)(v & PAD_RXSTATE);
+        }
+    }
+    sc.on = 1;
+}
+
+static void scan_poll(void) {
+    for (int c = 0; c < 4; c++) {
+        for (int p = 0; p < families[c] * 15; p++) {
+            if (!sc.valid[c][p]) continue;
+            u8 v = (u8)(*padctrl0(c, p) & PAD_RXSTATE);
+            if (v != sc.prev[c][p]) { sc.prev[c][p] = v; if (sc.hits[c][p] < 999) sc.hits[c][p]++; }
+        }
+        u32 is = *intstat(c) & 0xffff;
+        for (int l = 0; l < 16; l++) if ((is >> l) & 1) { if (sc.ihits[c][l] < 999) sc.ihits[c][l]++; }
+    }
+}
+
+static int scan_lines(char lines[][112], int n, int max) {
+    static const char *cname[4] = { "SW", "N", "E", "SE" };
+    if (!sc.on || n >= max) return n;
+    char *l = lines[n++];
+    usize o = fmt(l, 112, "pads that changed:");
+    int any = 0;
+    for (int c = 0; c < 4; c++)
+        for (int p = 0; p < families[c] * 15; p++)
+            if (sc.hits[c][p] && o < 100) { o += fmt(l + o, 112 - o, " %s/%02x x%u", cname[c], p, sc.hits[c][p]); any = 1; }
+    if (!any) strlcpy(l + o, " none yet - press each button", 112 - o);
+    if (n < max) {
+        l = lines[n++];
+        o = fmt(l, 112, "interrupt status lines seen:");
+        any = 0;
+        for (int c = 0; c < 4; c++)
+            for (int i = 0; i < 16; i++)
+                if (sc.ihits[c][i] && o < 100) { o += fmt(l + o, 112 - o, " %s#%d", cname[c], i); any = 1; }
+        if (!any) strlcpy(l + o, " none", 112 - o);
+    }
+    return n;
+}
+
 int buttons_poll(event_t *out, int max) {
+    if (sc.on) scan_poll();
     if (!active) return 0;
     int n = 0;
     u64 now = k_now_ms();
     u32 ist[4];
     for (int c = 0; c < 4; c++) ist[c] = *intstat(c);
     for (int i = 0; i < N_BTN && n < max; i++) {
+        if (btn[i].pin < 0) continue;
         int rx = level(i);
         if (rx != btn[i].idle) btn[i].rx_moved = 1;
         if (btn[i].intsel >= 0 && (ist[btn[i].comm] >> btn[i].intsel) & 1) {
@@ -198,9 +278,10 @@ int buttons_poll(event_t *out, int max) {
 /* the live state, one line per source, for the Button test screen */
 int buttons_debug(char lines[][112], int max) {
     int n = 0;
-    if (n < max) fmt(lines[n++], 112, "driver: %s", why);
-    if (!active) return n;
+    if (n < max) fmt(lines[n++], 112, "driver: %s (board id %d, PMIC id %d)", why, board_id, pmic_id);
+    if (!active) return scan_lines(lines, n, max);
     for (int i = 0; i < N_BTN && n < max; i++) {
+        if (btn[i].pin < 0) { fmt(lines[n++], 112, "%-11s on the PMIC (not supported)", btn[i].name); continue; }
         volatile u32 *c0 = padctrl0(btn[i].comm, btn[i].pin);
         u32 v = *c0, v1 = c0[1];
         fmt(lines[n++], 112, "%-11s GPO%d/%02x pad %08x %08x in=%u rest=%d gpio=%u cfg=%u lock=%u int=%d edges=%d presses=%d",
@@ -211,12 +292,13 @@ int buttons_debug(char lines[][112], int max) {
         if (fx.on) fmt(lines[n++], 112, "ACPI power button: PM1_STS %04x (port %x), SCI_EN %d, presses %d", io_inw(fx.sts), fx.sts, fx.sci, fx.presses);
         else strlcpy(lines[n++], "ACPI power button: not present", 112);
     }
-    return n;
+    return scan_lines(lines, n, max);
 }
 
 void buttons_status(char *buf, usize cap) {
     if (!active) { strlcpy(buf, why, cap); return; }
     usize o = 0;
     for (int i = 0; i < N_BTN; i++)
-        o += fmt(buf + o, cap - o, "%s%s %s, %d", i ? "; " : "", btn[i].name, level(i) != btn[i].idle ? "down" : "up", btn[i].presses);
+        if (btn[i].pin >= 0)
+            o += fmt(buf + o, cap - o, "%s%s %s, %d", i ? "; " : "", btn[i].name, level(i) != btn[i].idle ? "down" : "up", btn[i].presses);
 }

@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.5.8"
+#define QRT_VERSION "0.5.9"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8
@@ -112,6 +112,7 @@ void hal_cursor(int *x, int *y, int *visible);
 /* ---- platform services with a firmware and a native implementation ---- */
 void hal_present(const u32 *px, int stride, int x, int y, int w, int h);  /* rect -> panel */
 void hal_wait_frame(void);           /* sleep until the next ~10 ms frame tick */
+void hal_wait_frame_ms(u32 ms);     /* native: sleep ms (other threads run); firmware: next tick */
 void hal_delay_us(u32 us);
 void *hal_dma_alloc(usize bytes);        /* zeroed, page-aligned, contiguous; pointer == bus address */
 void hal_settings_prepare(void);     /* cache + make settings reachable after ExitBootServices */

@@ -189,8 +189,8 @@ static void draw(canvas_t *c, rect_t a) {
         heading(&f, "Button test");
         gfx_text_fit(c, ui.body, body.x + dp(4), f.y, body.w, "Press each button: its line should change. A photo of this screen helps find a fault.", ui.text2);
         f.y += ui.body->line + dp(12);
-        char lines[8][112];
-        int n = buttons_debug(lines, 8);
+        char lines[10][112];
+        int n = buttons_debug(lines, 10);
         const font_t *m = font_pick(F_MONO, dp(12));
         rect_t box = { body.x, f.y, body.w, n * (m->line + dp(6)) + dp(20) };
         gfx_rrect(c, box, dp(12), RGB(0x1d, 0x1d, 0x20));
@@ -215,7 +215,7 @@ static void draw(canvas_t *c, rect_t a) {
 
 static int event(const event_t *e, rect_t a) {
     if (e->type == EV_KEY && e->scan == 0x7f01) { st.tab = TAB_HW; st.sc.off = 0; return 1; }   /* from the shell after "bench" */
-    if (e->type == EV_KEY && e->scan == 0x7f02) { st.tab = TAB_BTN; st.sc.off = 0; return 1; }  /* "Button test" */
+    if (e->type == EV_KEY && e->scan == 0x7f02) { st.tab = TAB_BTN; st.sc.off = 0; buttons_scan_start(); return 1; }  /* "Button test" */
     if (tap_track(&st.tap, e, dp(12)))
         for (int i = 0; i < 3; i++) if (in_rect(tab_rect(a, i), e->x, e->y)) { st.tab = i; st.sc.off = 0; return 1; }
     return scroll_event(&st.sc, e, body_rect(a), dp(48));

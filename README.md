@@ -326,10 +326,10 @@ FreeBSD's.
 | | |
 |---|---|
 | Display | works (framebuffer, 1200×1920, rotation) |
-| GPU | Intel Gen8 3D engine copies and turns each frame (**new in 0.5.8, untested on hardware**; it tests itself at boot and falls back to the CPU) |
+| GPU | Intel Gen8 3D engine copies and turns each frame: **works** (0.5.8, coherent mode); it tests itself at boot and falls back to the CPU |
 | Touch | works: QRT's own Wacom driver; tested on the tablet in firmware mode. Native mode needs the same driver after the handover, which is **new in 0.5 and untested on hardware**. |
 | Storage | the boot stick is read into RAM at boot; writes go to RAM only |
-| Buttons | power, volume and Windows through GPIO (input bit and edge latch) and the ACPI fixed power button, both kernel modes. **Not working on the tablet up to 0.5.6; 0.5.7's extra sources are untested.** Button test shows what each source sees. |
+| Buttons | power, volume and Windows through GPIO (input bit and edge latch) and the ACPI fixed power button, both kernel modes. **Not working on the tablet up to 0.5.8.** 0.5.9 follows the firmware's board-id/PMIC-id pin choice and adds a pad scanner to the Button test that lists every GPIO pad that changes when a button is pressed. |
 | Wi-Fi | Intel 8260 driver, WPA2-Personal: **works** (scanning, connecting, DHCP) |
 | Backlight | LPSS PWM #1, native mode: brightness and sleep (**new in 0.5.5.3, untested on hardware**). QRT only takes control if the firmware left that PWM running. |
 | Sleep | backlight off and a slower frame loop; not ACPI suspend |
@@ -374,6 +374,19 @@ the framebuffer in native mode, instead of through a staging copy. With
 the screen rotated in QEMU, a full frame went from 12.6 ms (10.7 ms of it
 for the rotation) to 6.2 ms (4.0 ms).
 
+### Scrolling (0.5.9)
+
+Scrolling used to redraw the whole app on every finger movement. Now, once
+a drag is past the tap distance, the shell moves the pixels that are
+already on screen and asks the app to draw only the strip that came into
+view (plus a narrow column at the right edge for scroll indicators). If
+anything else changed in that area during the same frame, it redraws the
+area as before. A flick keeps the content moving and slows it down, and a
+touch stops it. The frame loop also no longer waits a fixed 10 ms after
+every frame: it sleeps only what is left of the 10 ms period. The QEMU test
+compares a scrolled screen with a full redraw of the same state, pixel for
+pixel.
+
 ### GPU acceleration (0.5.8)
 
 On the tablet in native mode, the GPU now does that last step. The driver
@@ -391,8 +404,8 @@ What it does not do: the apps and the shell are still drawn by the CPU.
 The GPU takes the copy and the rotation, which was the largest part of a
 rotated frame.
 
-Safety, because this could not be tried on a real tablet before release
-(QEMU has no Intel GPU):
+Safety (it was released before it could be tried on a tablet; QEMU has no
+Intel GPU). It has since been confirmed working on the 5855:
 - It only starts in native mode, and only on 8086:22b0–22b3.
 - At boot it turns a 64×64 test picture on the GPU and checks every pixel.
   If the GPU does not see the CPU's writes, it retries with explicit cache
@@ -422,9 +435,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.5.8.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.5.9.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.5.8.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.5.9.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's micro-USB port with an OTG adapter.
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

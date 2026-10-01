@@ -229,20 +229,53 @@ int tap_track(tap_t *t, const event_t *e, int slop) {
     }
 }
 
+/* ---- scrolling ----------------------------------------------------------------
+ * scroll_event() moves the offset; when nothing but the offset changed (the
+ * finger is past the tap slop, a wheel, a key, a flick) it tells the shell,
+ * which shifts the pixels of the area in the composed scene and has only the
+ * newly exposed strip drawn - instead of the whole app every move. */
+static struct { rect_t area; int dy, bad; } sb;   /* scroll to apply at the next frame */
+static int scroll_noted;                          /* the current app event was a pure scroll */
+static struct { scroll_t *s; rect_t area; const app_t *app; float pos; u64 t_us; } fling;
+
+static void scroll_note(rect_t area, int dy) {
+    if (sb.dy && (sb.area.x != area.x || sb.area.y != area.y || sb.area.w != area.w || sb.area.h != area.h)) sb.bad = 1;
+    sb.area = area;
+    sb.dy += dy;
+    scroll_noted = 1;
+}
+
 int scroll_event(scroll_t *s, const event_t *e, rect_t area, int step) {
-    int old = s->off;
-    if (e->type == EV_DOWN && in_rect(area, e->x, e->y)) { s->dragging = 1; s->last_y = e->y; s->moved = 0; }
-    else if (e->type == EV_MOVE && s->dragging) {
-        s->off -= e->y - s->last_y;
-        if (ABS_I(e->y - s->last_y) > 0) s->moved += ABS_I(e->y - s->last_y);
+    int old = s->off, moved_before = s->moved;
+    u64 now = k_now_us();
+    if (e->type == EV_DOWN && in_rect(area, e->x, e->y)) {
+        s->dragging = 1; s->last_y = e->y; s->moved = 0; s->v = 0; s->t_us = now;
+        if (fling.s == s) fling.s = NULL;                /* a touch stops a flick */
+    } else if (e->type == EV_MOVE && s->dragging) {
+        int dy = e->y - s->last_y;
+        s->off -= dy;
+        s->moved += ABS_I(dy);
+        float dt = (float)(now - s->t_us) / 1000.0f;   /* ms */
+        if (dt > 0.5f) {
+            float inst = -dy / dt;
+            s->v = dt > 60 ? inst : 0.6f * inst + 0.4f * s->v;
+            s->t_us = now;
+        }
         s->last_y = e->y;
-    } else if (e->type == EV_UP) s->dragging = 0;
+    } else if (e->type == EV_UP) {
+        /* let go while still moving: keep going */
+        if (s->dragging && s->moved > dp(16) && now - s->t_us < 70000 && (s->v > 0.3f || s->v < -0.3f)) {
+            fling.s = s; fling.area = area; fling.app = sh.app; fling.pos = (float)s->off; fling.t_us = now;
+        }
+        s->dragging = 0;
+    }
     else if (e->type == EV_SCROLL) s->off += e->dy * step;
     else if (e->type == EV_KEY && e->scan == SCAN_DOWN) s->off += step;
     else if (e->type == EV_KEY && e->scan == SCAN_UP) s->off -= step;
     else if (e->type == EV_KEY && e->scan == SCAN_PGDN) s->off += area.h * 3 / 4;
     else if (e->type == EV_KEY && e->scan == SCAN_PGUP) s->off -= area.h * 3 / 4;
     s->off = CLAMP(s->off, 0, MAX(0, s->max));
+    if (s->off != old && (e->type != EV_MOVE || moved_before > dp(16))) scroll_note(area, s->off - old);
     return s->off != old;
 }
 
@@ -1456,7 +1489,8 @@ static void key_event(const event_t *e) {
     }
     if (e->scan == SCAN_ESC) { shell_go_home(); return; }
     sh.app_damaged = 0;
-    if (sh.app->event && sh.app->event(e, app_area()) && !sh.app_damaged) shell_damage(app_area());
+    scroll_noted = 0;
+    if (sh.app->event && sh.app->event(e, app_area()) && !sh.app_damaged && !scroll_noted) shell_damage(app_area());
 }
 
 enum { OWN_NONE, OWN_OSK, OWN_DOCK, OWN_MAIN, OWN_POWER, OWN_LOCK };
@@ -1532,7 +1566,8 @@ static void dispatch(event_t e) {
     if (e.type == EV_DOWN && in_rect(min_rect(), e.x, e.y)) { shell_go_home(); sh.owner = OWN_NONE; return; }
     if (e.type == EV_DOWN && in_rect(header_rect(), e.x, e.y)) return;
     sh.app_damaged = 0;
-    if (sh.app->event && sh.app->event(&e, app_area()) && !sh.app_damaged) shell_damage(app_area());
+    scroll_noted = 0;
+    if (sh.app->event && sh.app->event(&e, app_area()) && !sh.app_damaged && !scroll_noted) shell_damage(app_area());
 }
 
 /* ---- boot splash ------------------------------------------------------------- */
@@ -1554,7 +1589,52 @@ static void splash(float t) {
 /* ---- frame pipeline ------------------------------------------------------------ */
 static rect_t cursor_rect(int x, int y) { return (rect_t){ x - dp(3), y - dp(3), dp(20), dp(28) }; }
 
+/* Shift the pixels of a scrolled area and draw only what came into view.
+ * Falls back to redrawing the area when anything else could be in the way. */
+static void apply_scroll(void) {
+    rect_t area = sb.area;
+    int dy = sb.dy, bad = sb.bad;
+    memset(&sb, 0, sizeof sb);
+    if (!dy && !bad) return;
+    rect_t a = rect_intersect(area, app_area());
+    rect_t osd = osd_paint_rect();
+    int ok = !bad && a.w > dp(40) && ABS_I(dy) < a.h - dp(8) && !tr.active && sh.view == VIEW_APP && !sh.locked &&
+             !sh.overview && !sh.launcher_open && !sh.power_open && !sh.dock_drag && !sh.animating &&
+             rect_intersect(sh.dmg, a).w <= 0 && !(sh.osd_shown && rect_intersect(osd, a).w > 0);
+    if (!ok) { sh.dmg = rect_union(sh.dmg, area); return; }
+    /* the rightmost columns hold scroll indicators that do not move with the content */
+    int bar = dp(10);
+    rect_t m = { a.x, a.y, a.w - bar, a.h };
+    u32 *px = sh.scene.px;
+    usize st = (usize)sh.scene.stride;
+    if (dy > 0)
+        for (int y = m.y; y < m.y + m.h - dy; y++) memmove(px + y * st + m.x, px + (y + dy) * st + m.x, (usize)m.w * 4);
+    else
+        for (int y = m.y + m.h - 1; y >= m.y - dy; y--) memmove(px + y * st + m.x, px + (y + dy) * st + m.x, (usize)m.w * 4);
+    compose(dy > 0 ? (rect_t){ a.x, a.y + a.h - dy, a.w, dy } : (rect_t){ a.x, a.y, a.w, -dy });
+    compose((rect_t){ a.x + a.w - bar, a.y, bar, a.h });
+    sh.pdmg = rect_union(sh.pdmg, a);
+}
+
+/* a flick: the offset keeps moving and slows down, as on a phone */
+static void fling_step(void) {
+    if (!fling.s) return;
+    scroll_t *s = fling.s;
+    if (sh.view != VIEW_APP || sh.app != fling.app || s->dragging || sh.locked) { fling.s = NULL; return; }
+    u64 now = k_now_us();
+    float dt = (float)(now - fling.t_us) / 1000.0f;
+    fling.t_us = now;
+    if (dt > 50) dt = 50;
+    fling.pos += s->v * dt;
+    float decay = 1.0f - dt / 380.0f;                    /* about e^(-t/380 ms) */
+    s->v *= decay > 0 ? decay : 0;
+    int target = CLAMP((int)fling.pos, 0, MAX(0, s->max));
+    if (target != s->off) { scroll_note(fling.area, target - s->off); s->off = target; }
+    if ((s->v < 0.02f && s->v > -0.02f) || target == 0 || target == s->max) fling.s = NULL;
+}
+
 static void render(void) {
+    apply_scroll();
     if (tr.active) {
         /* keep the target picture current (app ticks, presses), then animate */
         if (sh.dmg.w > 0 && sh.dmg.h > 0) compose(sh.dmg);
@@ -1647,8 +1727,12 @@ void shell_main(void) {
 
     sh.dirty = 1;
     sh.last_input_ms = k_now_ms();
+    u64 frame_t0 = k_now_us();
     for (;;) {
-        hal_wait_frame();
+        /* a frame every 10 ms: sleep only what is left after drawing the last one */
+        u64 spent = (k_now_us() - frame_t0) / 1000;
+        hal_wait_frame_ms(spent >= 9 ? 1 : (u32)(10 - spent));
+        frame_t0 = k_now_us();
         sh.now_ms = k_now_ms();
 
         event_t ev[32];
@@ -1679,6 +1763,7 @@ void shell_main(void) {
         for (int i = 0; i < nr; i++) key_event(&rep[i]);
         if (sh.bench_pending) { sh.bench_pending = 0; run_benchmark(); }
         if (sh.keyboard_pending) { sh.keyboard_pending = 0; shell_keyboard(!osk_visible()); }
+        fling_step();
         sh.app_damaged = 0;
         if (sh.view == VIEW_APP && sh.app->tick && sh.app->tick(now) && !sh.app_damaged) shell_damage(app_area());
         if (!sh.dirty) {

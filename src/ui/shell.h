@@ -68,8 +68,11 @@ void ui_card(canvas_t *c, rect_t r, int radius, int hi);
 void ui_button(canvas_t *c, rect_t r, const char *label, u32 fill, u32 fg);
 void ui_chip(canvas_t *c, rect_t r, const char *label, int selected);
 void ui_section(canvas_t *c, int x, int y, const char *title);
-/* vertical drag / wheel scrolling for long content */
-typedef struct { int off, max, dragging, last_y, moved; } scroll_t;
+/* vertical drag / wheel scrolling for long content.  A flick keeps it moving
+ * (the shell animates off), and while it moves the shell shifts the pixels
+ * already on screen and only asks the app to draw the strip that came into
+ * view: everything the app draws inside `area` must move with off. */
+typedef struct { int off, max, dragging, last_y, moved; float v; u64 t_us; } scroll_t;
 int  scroll_event(scroll_t *s, const event_t *e, rect_t area, int step);
 
 void ui_kv(canvas_t *c, rect_t r, const char *key, const char *value);

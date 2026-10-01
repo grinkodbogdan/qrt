@@ -401,6 +401,14 @@ void hal_present(const u32 *px, int stride, int x, int y, int w, int h) {
     k.gop->Blt(k.gop, (u32 *)px, EfiBltBufferToVideo, x, y, x, y, w, h, (UINTN)stride * 4);
 }
 
+void hal_wait_frame_ms(u32 ms) {
+#if defined(__x86_64__)
+    if (k.native) { thread_sleep_ms(ms ? ms : 1); return; }
+#endif
+    (void)ms;
+    hal_wait_frame();                                  /* the firmware's 10 ms timer */
+}
+
 void hal_wait_frame(void) {
 #if defined(__x86_64__)
     if (k.native) { thread_sleep_ms(10); return; }     /* the CPU halts until then */

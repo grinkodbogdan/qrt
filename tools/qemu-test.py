@@ -333,6 +333,24 @@ def default_script(q, shots):
     shots.append(q.shot("14-settings"))
     q.drag([(600, 600)] + [(600, 600 - i * 40) for i in range(1, 10)], settle=1.0)
     shots.append(q.shot("14-settings-more"))
+    # scrolling shifts the pixels already on screen and draws only the new strip:
+    # a full redraw of the same state (power menu opened and closed) must match it.
+    # Native kernel only: the firmware's serial terminal splits the F12 sequence.
+    if ARCH == "x64":
+        q.keys("powerlong", settle=1.0)
+        q.keys("esc", settle=1.0)
+        redrawn = q.shot("14-settings-redrawn")
+        try:
+            from PIL import Image, ImageChops
+            a_img = Image.open(shots[-1]).convert("RGB").crop((0, 40, 1170, 800))     # below the clock
+            b_img = Image.open(redrawn).convert("RGB").crop((0, 40, 1170, 800))
+            box = ImageChops.difference(a_img, b_img).getbbox()
+            if box:
+                print(f"FAIL: scrolled picture differs from a full redraw in {box}")
+                sys.exit(1)
+            print("scroll: shifted picture matches a full redraw")
+        except ImportError:
+            pass
     q.drag([(600, 200)] + [(600, 200 + i * 60) for i in range(1, 10)], settle=1.0)
     q.tap(744, 257)                        # rotation 90 deg -> 800x1280 portrait canvas
     time.sleep(2)
