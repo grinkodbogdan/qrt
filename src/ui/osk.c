@@ -41,6 +41,7 @@ static const osk_key_t layers[3][ROWS][MAXK] = {
 
 static struct {
     int visible, layer, shift, caps;
+    int pinned;                    /* the desk-mode controller: only the hide key closes it */
     int down_r, down_k;            /* key under the finger, -1 none */
     u64 repeat_at;
     u64 last_shift_ms;
@@ -50,7 +51,8 @@ static int row_len(int layer, int r) { int n = 0; while (n < MAXK && layers[laye
 
 int osk_visible(void) { return o.visible; }
 void osk_show(void) { if (!o.visible) { o.visible = 1; o.layer = 0; o.shift = 0; } }
-void osk_hide(void) { o.visible = 0; o.down_r = o.down_k = -1; }
+void osk_hide(void) { if (!o.pinned) { o.visible = 0; o.down_r = o.down_k = -1; } }
+void osk_pin(int on) { o.pinned = on; if (on) osk_show(); }
 int osk_height(void) { return o.visible ? dp(4 * 54 + 16) : 0; }
 
 /* The panel spans 'area' (the content area left of the dock) at its bottom. */
@@ -209,7 +211,7 @@ int osk_pointer(const event_t *e, rect_t area, event_t *out, int max) {
         return 0;
     }
     case K_LAYER: o.layer = key->ch; return 0;
-    case K_HIDE: osk_hide(); return 0;
+    case K_HIDE: o.visible = 0; return 0;
     case K_BACK: return 0;                     /* sent on press */
     }
     return emit(key, out);

@@ -202,6 +202,65 @@ def main():
     return 0 if ok else 1
 
 
+def pad_key(label, s=800 / 680):
+    """Centre of a key of the desk-mode controller's keyboard (letters layer), which
+    spans the whole 1280x800 panel - the geometry of key_rect() in src/ui/osk.c."""
+    dpv = lambda v: int(v * s + 0.5)
+    rows = [[(c, 1) for c in "qwertyuiop"], [(c, 1) for c in "asdfghjkl"],
+            [("shift", 1.5)] + [(c, 1) for c in "zxcvbnm"] + [("back", 1.5)],
+            [("?123", 1.5), ("-", 1), ("/", 1), ("space", 4), (".", 1), ("enter", 1.5), ("hide", 1)]]
+    pad, gap, kh = dpv(8), dpv(6), dpv(48)
+    top = H - dpv(4 * 54 + 16)
+    maxw = min(W - 2 * pad, dpv(820))
+    x0 = (W - maxw) // 2
+    unit = (maxw - gap * 10) / max(sum(w for _, w in r) for r in rows)
+    for ri, r in enumerate(rows):
+        for ki, (l, w) in enumerate(r):
+            if l == label:
+                row_w = sum(ww for _, ww in r) * unit + gap * (len(r) - 1)
+                x = x0 + (maxw - row_w) / 2 + sum(ww * unit + gap for _, ww in r[:ki])
+                return int(x + w * unit / 2), top + pad + ri * (kh + gap) + kh // 2
+    raise KeyError(label)
+
+
+def desk_test(q, shots, dock):
+    """A USB mouse (QEMU's usb-tablet, an absolute pointer) clicks a dock icon; then a
+    virtual monitor is plugged in (QEMU has no DisplayPort): the shell moves to it and
+    the panel becomes the controller.  Its Apps button and keyboard open Clock on the
+    monitor; the power menu brings the shell back - Clock must then be on the panel."""
+    def mouse_to(x, y):
+        q.cmd("input-send-event", events=[{"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / (W - 1))}},
+                                          {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / (H - 1))}}])
+    def mouse_button(down):
+        q.cmd("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
+    for i in range(10):
+        mouse_to(300 + i * 92, 600 - i * 50); time.sleep(0.05)
+    mouse_to(1226, dock["files"]); time.sleep(0.5)
+    mouse_button(True); time.sleep(0.15); mouse_button(False); time.sleep(1.5)
+    shots.append(q.shot("21-mouse-files"))
+    q.keys("esc", settle=1.0)
+    # plug a 1280x720 monitor: the panel shows the touchpad and keyboard
+    q.serial.sendall(b"\x14v1280,720;"); time.sleep(2.0)
+    shots.append(q.shot("22-desk-controller"))
+    q.tap(1058, 483, settle=1.0)                    # Apps: the launcher, on the monitor
+    for ch in "clock":
+        q.tap(*pad_key(ch), settle=0.3)
+    q.tap(*pad_key("enter"), settle=1.5)
+    q.drag([(400, 250)] + [(400 + i * 30, 250 + i * 8) for i in range(1, 10)], settle=0.5)   # the touchpad
+    q.tap(600, 300, settle=0.8)                     # tap: a click on the monitor
+    q.keys("powerlong", settle=1.0)
+    shots.append(q.shot("22-desk-power"))
+    q.tap(640, 261, settle=2.0)                     # "Mirror to the external screen"
+    shots.append(q.shot("22-desk-mirrored"))
+    q.serial.sendall(b"\x14v0,0;"); time.sleep(1.0)   # unplug
+    log = open(os.path.join(ROOT, "build", f"serial-{ARCH}.log"), errors="replace").read()
+    for want in ("absolute pointer ready", "shell: controlling the external screen", "shell: back on the tablet, mirrored"):
+        if want not in log:
+            raise RuntimeError(f"desk test: no '{want}' in the log")
+    print("desk: mouse, virtual monitor, controller and power menu work")
+    q.keys("esc", settle=1.0)
+
+
 def default_script(q, shots):
     """Walk the shell and every app with touch, the on-screen keyboard and the
     serial keyboard.  Coordinates are for the 1280x800 landscape layout the
@@ -352,10 +411,12 @@ def default_script(q, shots):
     shots.append(q.shot("18-dock-left"))
     q.drag([(45, 300)] + [(45 + i * 125, 300 + i * 5) for i in range(1, 10)], settle=1.2)
     shots.append(q.shot("18-dock-right"))
+    if ARCH == "x64":
+        desk_test(q, shots, dock)
     # Settings: rotate to portrait
     dock_tap("settings")
     shots.append(q.shot("14-settings"))
-    q.drag([(600, 600)] + [(600, 600 - i * 40) for i in range(1, 10)], settle=1.0)
+    q.drag([(600, 600)] + [(600, 600 - i * 40) for i in range(1, 10)], settle=2.5)   # the flick coasts to a stop
     shots.append(q.shot("14-settings-more"))
     # scrolling shifts the pixels already on screen and draws only the new strip:
     # a full redraw of the same state (power menu opened and closed) must match it.

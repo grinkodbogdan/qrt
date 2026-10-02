@@ -61,6 +61,15 @@ static struct {
     int app_damaged, bench_pending;
     rect_t cursor_drawn;
     int last_minute;
+    /* desk mode: the shell runs on the external monitor, the panel is its touchpad and keyboard */
+    int desk, mon_seen, desk_auto;
+    canvas_t pad;                 /* the panel's picture in desk mode */
+    ui_t pad_ui;                  /* metrics for the panel while the shell's are the monitor's */
+    int pad_dirty, pad_power_drawn, pad_owner, pad_pressed;
+    float mx, my;                 /* the mouse pointer (logical coords of the shell's screen) */
+    u32 mbtn;                     /* mouse buttons held */
+    int tp_down, tp_lx, tp_ly, tp_moved, tp_drag, tp_hold, tp_acc;
+    u64 tp_t0, tp_last_tap;
 } sh;
 
 shell_stats_t shell_stats;
@@ -310,12 +319,17 @@ void ui_kv(canvas_t *c, rect_t r, const char *key, const char *value) {
 }
 
 /* ---- metrics & theme ------------------------------------------------------ */
-static void ui_metrics(void) {
-    ui.W = (sh.rot & 1) ? (int)k.fb_h : (int)k.fb_w;
-    ui.H = (sh.rot & 1) ? (int)k.fb_w : (int)k.fb_h;
+static void panel_size(int *w, int *h) {
+    *w = (sh.rot & 1) ? (int)k.fb_h : (int)k.fb_w;
+    *h = (sh.rot & 1) ? (int)k.fb_w : (int)k.fb_h;
+}
+
+/* metrics for a screen of W x H whose short edge is 'across' dp */
+static void metrics_for(int W, int H, float across) {
+    ui.W = W;
+    ui.H = H;
     ui.landscape = ui.W > ui.H;
-    /* An 8" tablet is ~680 dp across its short edge. */
-    float s = (float)MIN(ui.W, ui.H) / 680.0f;
+    float s = (float)MIN(ui.W, ui.H) / across;
     ui.s = CLAMP(s, 1.0f, 3.0f);
     ui.small   = font_pick(F_REGULAR, dp(13));
     ui.body    = font_pick(F_REGULAR, dp(15));
@@ -335,6 +349,22 @@ static void ui_metrics(void) {
     ui.header  = RGB(0x30, 0x30, 0x30);
     ui.bg_top    = RGB(0x14, 0x0f, 0x26);
     ui.bg_bottom = RGB(0x06, 0x0b, 0x19);
+}
+
+static void ui_metrics(void) {
+    int w, h;
+    panel_size(&w, &h);
+    /* An 8" tablet is ~680 dp across its short edge; a desk monitor is seen from further
+     * away but has room to spare: 760 dp across keeps 1080p at about 1.4 px per dp */
+    if (sh.desk && display_size(&w, &h)) metrics_for(w, h, 760);
+    else metrics_for(w, h, 680);
+    if (sh.desk) {                                     /* the panel's own metrics, for the controller */
+        ui_t keep = ui;
+        panel_size(&w, &h);
+        metrics_for(w, h, 680);
+        sh.pad_ui = ui;
+        ui = keep;
+    }
 }
 
 /* Soft radial light, the signature of the wallpaper. */
@@ -392,6 +422,9 @@ static void alloc_canvases(void) {
     sh.wall = canvas_new(ui.W, ui.H);
     sh.wall_dim = canvas_new(ui.W, ui.H);
     if (!sh.phys.px) sh.phys = canvas_new((int)k.fb_w, (int)k.fb_h);
+    canvas_free(&sh.pad);
+    if (sh.desk) sh.pad = canvas_new(sh.pad_ui.W, sh.pad_ui.H);
+    sh.pad_dirty = 1;
 }
 
 static void relayout(void) {
@@ -483,10 +516,20 @@ static void rotate_job_fn(void *arg, int i, int n) {
     if (y0 < y1) rotate_band(y0, y1);
 }
 
+static void present_panel(const canvas_t *src, rect_t d);
+
+/* The shell's picture goes to the external monitor (mirrored, or as the desk in desk
+ * mode) and, unless the shell lives on the monitor, to the panel. */
 static void present(const canvas_t *src, rect_t d) {
-    d = rect_intersect(d, full_rect());
+    d = rect_intersect(d, (rect_t){ 0, 0, src->w, src->h });
     if (d.w <= 0 || d.h <= 0) return;
     display_mirror(src->px, src->w, src->h, src->stride, d.x, d.y, d.w, d.h);   /* a monitor on the USB-C port */
+    if (!sh.desk) present_panel(src, d);
+}
+
+static void present_panel(const canvas_t *src, rect_t d) {
+    d = rect_intersect(d, (rect_t){ 0, 0, src->w, src->h });
+    if (d.w <= 0 || d.h <= 0) return;
     /* the GPU's 3D engine copies (and turns) the rectangle when it is up */
     if (gpu_present(src->px, src->w, src->h, src->stride, sh.rot, d.x, d.y, d.w, d.h)) return;
     if (!sh.rot) {
@@ -676,7 +719,7 @@ static rect_t content_rect(void) {
     return c;
 }
 /* content minus the keyboard */
-static rect_t work_rect(void) { rect_t c = content_rect(); c.h -= osk_height(); return c; }
+static rect_t work_rect(void) { rect_t c = content_rect(); if (!sh.desk) c.h -= osk_height(); return c; }
 
 /* ---- dock ------------------------------------------------------------------- */
 static const app_t *const pinned[] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_sketch, &app_settings };
@@ -873,10 +916,20 @@ static void draw_launcher(canvas_t *c) {
 }
 
 /* ---- power menu (hardware power button) ---------------------------------------- */
-static const char *power_items[] = { "Sleep", "Restart", "Shut down", "Firmware setup", "Cancel" };
-#define N_POWER 5
+/* With a monitor connected the menu also switches between controlling it (the shell on
+ * the monitor, the tablet as touchpad and keyboard) and mirroring the tablet to it. */
+enum { P_DESK, P_MIRROR, P_SLEEP, P_RESTART, P_SHUTDOWN, P_FIRMWARE, P_CANCEL };
+static const char *power_labels[] = { "Control the external screen", "Mirror to the external screen", "Sleep", "Restart",
+                                      "Shut down", "Firmware setup", "Cancel" };
+static int power_items(int *ids) {
+    int n = 0;
+    if (display_connected()) ids[n++] = sh.desk ? P_MIRROR : P_DESK;
+    for (int i = P_SLEEP; i <= P_CANCEL; i++) ids[n++] = i;
+    return n;
+}
 static rect_t power_panel(void) {
-    int w = MIN(ui.W - dp(40), dp(360)), h = dp(76) + N_POWER * dp(56);
+    int ids[8], n = power_items(ids);
+    int w = MIN(ui.W - dp(40), dp(360)), h = dp(76) + n * dp(56);
     return (rect_t){ (ui.W - w) / 2, (ui.H - h) / 2, w, h };
 }
 static rect_t power_row(int i) { rect_t p = power_panel(); return (rect_t){ p.x + dp(14), p.y + dp(64) + i * dp(56), p.w - dp(28), dp(50) }; }
@@ -885,8 +938,10 @@ static void draw_power(canvas_t *c) {
     rect_t p = power_panel();
     ui_card(c, p, dp(24), 1);
     gfx_text(c, ui.title, p.x + dp(20), p.y + dp(20), "Power", ui.text);
-    for (int i = 0; i < N_POWER; i++)
-        ui_button(c, power_row(i), power_items[i], i == 2 ? RGB(0xe5, 0x48, 0x4d) : RGBA(255, 255, 255, 30), ui.text);
+    int ids[8], n = power_items(ids);
+    for (int i = 0; i < n; i++)
+        ui_button(c, power_row(i), power_labels[ids[i]],
+                  ids[i] == P_SHUTDOWN ? RGB(0xe5, 0x48, 0x4d) : ids[i] <= P_MIRROR ? ui.accent : RGBA(255, 255, 255, 30), ui.text);
 }
 
 /* ---- app chrome ----------------------------------------------------------------- */
@@ -1099,10 +1154,10 @@ static void compose_rect(rect_t d) {
         else if (sh.view == VIEW_HOME) draw_home(&c, &frame_time);
         else draw_app(&c);
         if (sh.launcher_open) draw_launcher(&c);
-        osk_draw(&c, content_rect());
+        if (!sh.desk) osk_draw(&c, content_rect());
         draw_dock(&c);
     }
-    if (sh.power_open) draw_power(&c);
+    if (sh.power_open && !sh.desk) draw_power(&c);
     if (sh.osd_shown) draw_osd(&c);
 }
 
@@ -1154,6 +1209,7 @@ void shell_go_home(void) {
 }
 
 void shell_keyboard(int show) {
+    if (sh.desk) return;                         /* the controller's keyboard is always there */
     if (show && !osk_visible()) { osk_show(); sh.dirty = 1; }
     else if (!show && osk_visible()) { osk_hide(); sh.dirty = 1; }
 }
@@ -1299,17 +1355,29 @@ static void dock_animate(u64 now) {
 }
 
 static void go_to_sleep(void);
-static void power_pointer(const event_t *e) {
-    if (!tap_track(&sh.tap, e, dp(12))) return;
-    int hit = -1;
-    for (int i = 0; i < N_POWER; i++) if (in_rect(power_row(i), e->x, e->y)) hit = i;
+static void desk_enter(void);
+static void desk_leave(void);
+/* the item tapped (P_*), P_CANCEL for a tap outside, -1 while no tap has finished */
+static int power_hit(const event_t *e) {
+    if (!tap_track(&sh.tap, e, dp(12))) return -1;
+    int ids[8], n = power_items(ids), hit = P_CANCEL;
+    for (int i = 0; i < n; i++) if (in_rect(power_row(i), e->x, e->y)) hit = ids[i];
+    return hit;
+}
+static void power_act(int id) {
+    if (id < 0) return;
     sh.power_open = 0;
     sh.dirty = 1;
-    if (hit == 0) go_to_sleep();
-    else if (hit == 1) hal_reboot();
-    else if (hit == 2) hal_shutdown();
-    else if (hit == 3) hal_reboot_to_firmware();
+    switch (id) {
+    case P_DESK: desk_enter(); break;
+    case P_MIRROR: desk_leave(); break;
+    case P_SLEEP: go_to_sleep(); break;
+    case P_RESTART: hal_reboot(); break;
+    case P_SHUTDOWN: hal_shutdown(); break;
+    case P_FIRMWARE: hal_reboot_to_firmware(); break;
+    }
 }
+static void power_pointer(const event_t *e) { power_act(power_hit(e)); }
 
 /* ---- volume (mock audio: there is no sound driver yet) ---------------------------- */
 static rect_t osd_rect(void) {
@@ -1394,6 +1462,10 @@ static void go_to_sleep(void) {
     /* no backlight control (QEMU, firmware mode): at least a black panel */
     memset(sh.scene.px, 0, (usize)sh.scene.stride * ui.H * 4);
     present(&sh.scene, full_rect());
+    if (sh.desk && sh.pad.px) {                    /* the controller too */
+        memset(sh.pad.px, 0, (usize)sh.pad.stride * sh.pad.h * 4);
+        present_panel(&sh.pad, (rect_t){ 0, 0, sh.pad.w, sh.pad.h });
+    }
     klog("shell: asleep%s", backlight_available() ? " (backlight off)" : " (screen blanked)");
 }
 static void wake_up(void) {
@@ -1402,6 +1474,7 @@ static void wake_up(void) {
     backlight_power(1);
     sh.last_input_ms = k_now_ms();
     sh.dirty = 1;
+    sh.pad_dirty = 1;
     klog("shell: awake");
 }
 static void unlock(void) {
@@ -1498,6 +1571,9 @@ static void key_event(const event_t *e) {
 enum { OWN_NONE, OWN_OSK, OWN_DOCK, OWN_MAIN, OWN_POWER, OWN_LOCK };
 
 static void ov_gesture_done(int committed) { if (!committed) sh.overview = 0; }
+static void pointer(event_t e);
+static void mouse_event(const event_t *e);
+static void pad_pointer(const event_t *e);
 
 static void dispatch(event_t e) {
     sh.last_input_ms = sh.now_ms;
@@ -1505,21 +1581,28 @@ static void dispatch(event_t e) {
         /* asleep: power or the Windows button (or a keyboard) wakes it; touch and volume do not,
          * unless there are no hardware buttons (firmware mode, other machines) */
         if (e.type == EV_KEY && e.scan != SCAN_VOLUP && e.scan != SCAN_VOLDN && e.scan != SCAN_POWER_LONG) wake_up();
+        else if (e.type == EV_REL && e.scan) wake_up();                  /* a mouse click */
         else if (e.type == EV_DOWN && !buttons_active()) { wake_up(); sh.owner = OWN_NONE; }
         return;
     }
     if (e.type == EV_KEY) { key_event(&e); return; }
+    if (e.type == EV_REL) { mouse_event(&e); return; }
     int lx, ly;
     to_logical(e.x, e.y, &lx, &ly);
     e.x = lx; e.y = ly;
+    if (sh.desk && !e.from_mouse) { pad_pointer(&e); return; }      /* the panel is the controller */
     if (e.from_mouse) { sh.cursor_x = lx; sh.cursor_y = ly; sh.cursor_on = 1; sh.cursor_dirty = 1; }
     else if (sh.cursor_on) { sh.cursor_on = 0; sh.cursor_dirty = 1; }
+    pointer(e);
+}
 
+/* a pointer event in the shell's logical coordinates (touch, or the mouse at the cursor) */
+static void pointer(event_t e) {
     /* a touch belongs to whatever it started on until it lifts */
     if (e.type == EV_DOWN || e.type == EV_SCROLL) {
         if (sh.power_open) sh.owner = OWN_POWER;
         else if (sh.locked) sh.owner = OWN_LOCK;
-        else if (osk_visible() && in_rect(osk_rect(content_rect()), e.x, e.y)) sh.owner = OWN_OSK;
+        else if (!sh.desk && osk_visible() && in_rect(osk_rect(content_rect()), e.x, e.y)) sh.owner = OWN_OSK;
         else if (in_rect(dock_rect(), e.x, e.y)) sh.owner = OWN_DOCK;
         else sh.owner = OWN_MAIN;
     }
@@ -1571,6 +1654,241 @@ static void dispatch(event_t e) {
     scroll_noted = 0;
     if (sh.app->event && sh.app->event(&e, app_area()) && !sh.app_damaged && !scroll_noted) shell_damage(app_area());
 }
+
+/* ---- the mouse ----------------------------------------------------------------------
+ * Mice (src/drivers/usb, EV_REL) and the desk-mode touchpad move one pointer in the
+ * shell's logical coordinates; it is drawn as the cursor and clicks where it is. */
+static void mouse_place(float x, float y) {
+    sh.mx = CLAMP(x, 0.0f, (float)(ui.W - 1));
+    sh.my = CLAMP(y, 0.0f, (float)(ui.H - 1));
+    int nx = (int)sh.mx, ny = (int)sh.my;
+    if (sh.cursor_on && nx == sh.cursor_x && ny == sh.cursor_y) return;
+    sh.cursor_x = nx; sh.cursor_y = ny; sh.cursor_on = 1; sh.cursor_dirty = 1;
+    pointer((event_t){ .type = EV_MOVE, .x = nx, .y = ny, .from_mouse = 1 });   /* drags while a button is down */
+}
+static void mouse_button(int down) {
+    if (!sh.cursor_on) { sh.cursor_x = (int)sh.mx; sh.cursor_y = (int)sh.my; sh.cursor_on = 1; }
+    sh.cursor_dirty = 1;
+    pointer((event_t){ .type = down ? EV_DOWN : EV_UP, .x = sh.cursor_x, .y = sh.cursor_y, .from_mouse = 1 });
+}
+static void mouse_wheel(int steps) {
+    if (steps) pointer((event_t){ .type = EV_SCROLL, .x = sh.cursor_x, .y = sh.cursor_y, .dy = steps, .from_mouse = 1 });
+}
+
+static void mouse_event(const event_t *e) {
+    if (!sh.cursor_on) { sh.cursor_x = (int)sh.mx; sh.cursor_y = (int)sh.my; }
+    if (e->from_mouse == 2) mouse_place(e->x * (ui.W - 1) / 65535.0f, e->y * (ui.H - 1) / 65535.0f);
+    else if (e->x || e->y) {
+        /* counts to pixels, faster for fast movements */
+        int v = ABS_I(e->x) + ABS_I(e->y);
+        float gain = ui.s * (v > 12 ? 2.0f : v > 5 ? 1.4f : 0.9f);
+        mouse_place(sh.mx + e->x * gain, sh.my + e->y * gain);
+    } else if (!sh.cursor_on) { sh.cursor_on = 1; sh.cursor_dirty = 1; }
+    u32 b = e->scan, pressed = b & ~sh.mbtn;
+    if ((b ^ sh.mbtn) & 1) mouse_button(b & 1);
+    sh.mbtn = b;
+    if (pressed & 8) key_event(&(event_t){ .type = EV_KEY, .scan = SCAN_ESC });      /* the back button */
+    mouse_wheel(-e->dy);                                                            /* wheel away: scroll up */
+}
+
+/* ---- desk mode: the shell on the external monitor -------------------------------------
+ * The shell is laid out for the monitor and drawn only there; the panel shows a
+ * controller - a touchpad, a scroll strip, click and drag buttons and the on-screen
+ * keyboard.  "Mirror" (or the keyboard's hide key, or the power menu) brings the
+ * shell back to the panel, with the monitor mirroring it again.  Everything here
+ * that measures the panel runs with ui = sh.pad_ui (pad_begin/pad_end). */
+enum { PO_NONE, PO_POWER, PO_KBD, PO_MIRROR, PO_CLICK, PO_HOLD, PO_APPS, PO_TOUCH, PO_SCROLL };
+static ui_t ui_keep;
+static void pad_begin(void) { ui_keep = ui; ui = sh.pad_ui; }
+static void pad_end(void) { ui = ui_keep; }
+
+#define PAD_BAR dp(64)
+static rect_t pad_full(void) { return (rect_t){ 0, 0, ui.W, ui.H }; }
+static rect_t pad_mirror_btn(void) { int w = dp(124), h = dp(40); return (rect_t){ ui.W - dp(16) - w, (PAD_BAR - h) / 2, w, h }; }
+static rect_t pad_kbd(void) { return osk_rect(pad_full()); }
+static rect_t pad_btn(int i) {
+    rect_t k = pad_kbd();
+    int h = dp(50), g = dp(10), x = dp(16), w = (ui.W - 2 * x - 2 * g) / 3;
+    return (rect_t){ x + i * (w + g), k.y - dp(12) - h, w, h };
+}
+static rect_t pad_area(void) { int y = PAD_BAR + dp(4); return (rect_t){ dp(16), y, ui.W - dp(32), pad_btn(0).y - dp(12) - y }; }
+static rect_t pad_scroll(void) { rect_t a = pad_area(); int w = MIN(dp(64), a.w / 5); return (rect_t){ a.x + a.w - w, a.y, w, a.h }; }
+static rect_t pad_touch(void) { rect_t a = pad_area(), s = pad_scroll(); return (rect_t){ a.x, a.y, s.x - dp(10) - a.x, a.h }; }
+static rect_t pad_rect(int po) {
+    return po == PO_MIRROR ? pad_mirror_btn() : po == PO_CLICK ? pad_btn(0) : po == PO_HOLD ? pad_btn(1) : po == PO_APPS ? pad_btn(2) : (rect_t){ 0 };
+}
+
+static void pad_draw(canvas_t *c) {
+    rect_t full = pad_full();
+    gfx_vgradient(c, full, ui.bg_top, ui.bg_bottom);
+    /* the bar: what is being controlled, and the way back */
+    char sub[80];
+    int mw, mh;
+    display_size(&mw, &mh);
+    fmt(sub, sizeof sub, "%s, %d x %d", display_monitor(), mw, mh);
+    rect_t mb = pad_mirror_btn();
+    gfx_text_fit(c, ui.label, dp(18), PAD_BAR / 2 - ui.label->line + dp(2), mb.x - dp(30), "Controlling the external screen", ui.text);
+    gfx_text_fit(c, ui.small, dp(18), PAD_BAR / 2 + dp(2), mb.x - dp(30), sub, ui.text2);
+    ui_button(c, mb, "Mirror", sh.pad_pressed == PO_MIRROR ? ALPHA(ui.accent, 200) : ui.accent, ui.text);
+    /* the touchpad */
+    rect_t t = pad_touch();
+    gfx_rrect(c, t, dp(18), sh.pad_pressed == PO_TOUCH ? RGBA(255, 255, 255, 26) : RGBA(255, 255, 255, 16));
+    gfx_rrect_outline(c, t, dp(18), 1, ui.stroke);
+    int cy = t.y + t.h / 2 - ui.title->line;
+    gfx_text_center(c, ui.title, (rect_t){ t.x, cy, t.w, ui.title->line }, "Touchpad", ui.text3);
+    gfx_text_center(c, ui.small, (rect_t){ t.x + dp(8), cy + ui.title->line + dp(6), t.w - dp(16), ui.small->line },
+                    "Slide to move, tap to click", ui.text3);
+    gfx_text_center(c, ui.small, (rect_t){ t.x + dp(8), cy + ui.title->line + dp(6) + ui.small->line, t.w - dp(16), ui.small->line },
+                    "Tap, then slide to drag", ui.text3);
+    /* the scroll strip */
+    rect_t s = pad_scroll();
+    gfx_rrect(c, s, dp(18), sh.pad_pressed == PO_SCROLL ? RGBA(255, 255, 255, 26) : RGBA(255, 255, 255, 12));
+    gfx_rrect_outline(c, s, dp(18), 1, ui.stroke);
+    float sx = s.x + s.w / 2.0f, a = dp(8);
+    for (int d = -1; d <= 1; d += 2) {
+        float yy = d < 0 ? s.y + dp(30) : s.y + s.h - dp(30);
+        gfx_line(c, sx - a, yy - d * a / 2, sx, yy + d * a / 2, dp(2.5f), ui.text2);
+        gfx_line(c, sx, yy + d * a / 2, sx + a, yy - d * a / 2, dp(2.5f), ui.text2);
+    }
+    for (int i = -2; i <= 2; i++) gfx_fill(c, (rect_t){ (int)sx - dp(9), s.y + s.h / 2 + i * dp(9), dp(18), dp(2) }, ui.text3);
+    /* the buttons */
+    static const char *labels[] = { "Click", "Hold to drag", "Apps" };
+    for (int i = 0; i < 3; i++) {
+        int po = PO_CLICK + i;
+        const char *l = po == PO_HOLD && sh.tp_hold ? "Release" : labels[i];
+        u32 fill = sh.pad_pressed == po ? ALPHA(ui.accent, 200) : po == PO_HOLD && sh.tp_hold ? ui.accent : RGBA(255, 255, 255, 30);
+        ui_button(c, pad_btn(i), l, fill, ui.text);
+    }
+    osk_draw(c, full);
+    if (sh.power_open) draw_power(c);
+}
+
+static void pad_render(void) {
+    if (!sh.pad.px) return;
+    pad_begin();
+    gfx_limit(&sh.pad, pad_full());
+    pad_draw(&sh.pad);
+    pad_end();
+    present_panel(&sh.pad, (rect_t){ 0, 0, sh.pad.w, sh.pad.h });
+    sh.pad_dirty = 0;
+    sh.pad_power_drawn = sh.power_open;
+}
+
+static void pad_pointer(const event_t *e) {
+    event_t keys[4];
+    int nk = 0, power = -1, act = PO_NONE, press = -1, click = 0, scroll = 0, hidden = 0;
+    float dx = 0, dy = 0;
+    u64 now = k_now_ms();
+    pad_begin();
+    if (e->type == EV_DOWN) {
+        int po = PO_NONE;
+        if (sh.power_open) po = PO_POWER;
+        else if (in_rect(pad_kbd(), e->x, e->y)) po = PO_KBD;
+        else if (in_rect(pad_scroll(), e->x, e->y)) po = PO_SCROLL;
+        else if (in_rect(pad_area(), e->x, e->y)) po = PO_TOUCH;
+        else for (int i = PO_MIRROR; i <= PO_APPS; i++) if (in_rect(pad_rect(i), e->x, e->y)) po = i;
+        sh.pad_owner = po;
+        if (po != PO_KBD && po != PO_POWER) { sh.pad_pressed = po; sh.pad_dirty = 1; }
+    }
+    int owner = sh.pad_owner, slop = dp(6);
+    switch (owner) {
+    case PO_POWER: power = power_hit(e); break;
+    case PO_KBD:
+        nk = osk_pointer(e, pad_full(), keys, 4);
+        hidden = !osk_visible();                                   /* the hide key: back to mirroring */
+        sh.pad_dirty = 1;
+        break;
+    case PO_MIRROR: case PO_CLICK: case PO_HOLD: case PO_APPS:
+        if (e->type == EV_UP && in_rect(pad_rect(owner), e->x, e->y)) act = owner;
+        break;
+    case PO_TOUCH:
+        if (e->type == EV_DOWN) {
+            sh.tp_down = 1; sh.tp_lx = e->x; sh.tp_ly = e->y; sh.tp_moved = 0; sh.tp_t0 = now;
+            if (now - sh.tp_last_tap < 350 && !sh.tp_hold) { sh.tp_drag = 1; press = 1; }   /* tap, then slide: drag */
+        } else if (e->type == EV_MOVE && sh.tp_down) {
+            int ddx = e->x - sh.tp_lx, ddy = e->y - sh.tp_ly;
+            sh.tp_lx = e->x; sh.tp_ly = e->y;
+            sh.tp_moved += ABS_I(ddx) + ABS_I(ddy);
+            if (sh.tp_moved > slop || sh.tp_drag) {
+                int v = ABS_I(ddx) + ABS_I(ddy);
+                /* panel pixels to monitor pixels: the same distance in dp, then faster for fast strokes */
+                float gain = 1.5f * (ui_keep.s / ui.s) * (v > dp(14) ? 2.2f : v > dp(5) ? 1.5f : 1.0f);
+                dx += ddx * gain; dy += ddy * gain;
+            }
+        } else if (e->type == EV_UP) {
+            if (sh.tp_drag) { press = 0; sh.tp_drag = 0; sh.tp_last_tap = 0; }
+            else if (sh.tp_moved <= slop && now - sh.tp_t0 < 300) { click = 1; sh.tp_last_tap = now; }
+            sh.tp_down = 0;
+        }
+        break;
+    case PO_SCROLL:
+        if (e->type == EV_DOWN) { sh.tp_acc = 0; sh.tp_ly = e->y; }
+        else if (e->type == EV_MOVE) {
+            sh.tp_acc += e->y - sh.tp_ly;
+            sh.tp_ly = e->y;
+            int step = dp(26);
+            while (sh.tp_acc >= step) { scroll--; sh.tp_acc -= step; }             /* finger down: earlier content */
+            while (sh.tp_acc <= -step) { scroll++; sh.tp_acc += step; }
+        }
+        break;
+    }
+    if (e->type == EV_UP) {
+        if (sh.pad_pressed) sh.pad_dirty = 1;
+        sh.pad_owner = sh.pad_pressed = PO_NONE;
+    }
+    pad_end();
+
+    /* act in the shell's own metrics */
+    if (power >= 0) { power_act(power); sh.pad_dirty = 1; }
+    for (int i = 0; i < nk; i++) key_event(&keys[i]);
+    if (hidden) { desk_leave(); return; }
+    if (dx != 0 || dy != 0) mouse_place(sh.mx + dx, sh.my + dy);
+    if (press >= 0) mouse_button(press);
+    if (click) { mouse_button(1); mouse_button(0); }
+    mouse_wheel(scroll);
+    switch (act) {
+    case PO_MIRROR: desk_leave(); break;
+    case PO_CLICK: mouse_button(1); mouse_button(0); break;
+    case PO_HOLD: sh.tp_hold = !sh.tp_hold; mouse_button(sh.tp_hold); sh.pad_dirty = 1; break;
+    case PO_APPS: key_event(&(event_t){ .type = EV_KEY, .scan = SCAN_HOMEBTN }); break;
+    }
+}
+
+static void desk_enter(void) {
+    if (sh.desk || !display_connected()) return;
+    trans_end();
+    sh.desk = 1;
+    sh.power_open = 0;
+    sh.owner = OWN_NONE;
+    sh.pad_owner = sh.pad_pressed = PO_NONE;
+    sh.tp_hold = sh.tp_drag = sh.tp_down = 0;
+    osk_pin(1);
+    relayout();
+    sh.mx = ui.W / 2.0f; sh.my = ui.H / 2.0f;
+    sh.cursor_x = (int)sh.mx; sh.cursor_y = (int)sh.my;
+    sh.cursor_on = 1; sh.cursor_dirty = 1; sh.cursor_drawn = (rect_t){ 0 };
+    klog("shell: controlling the external screen (%dx%d); the panel is its touchpad and keyboard", ui.W, ui.H);
+}
+
+static void desk_leave(void) {
+    if (!sh.desk) return;
+    if (sh.tp_hold || sh.tp_drag) mouse_button(0);
+    sh.tp_hold = sh.tp_drag = sh.tp_down = 0;
+    trans_end();
+    sh.desk = 0;
+    sh.power_open = 0;
+    sh.owner = OWN_NONE;
+    osk_pin(0);
+    osk_hide();
+    relayout();
+    sh.mx = ui.W / 2.0f; sh.my = ui.H / 2.0f;
+    sh.cursor_on = 0; sh.cursor_drawn = (rect_t){ 0 };
+    klog("shell: back on the tablet%s", display_connected() ? ", mirrored to the external screen" : "");
+}
+
+int  shell_desk(void) { return sh.desk; }
+int  shell_desk_auto(void) { return sh.desk_auto; }
+void shell_set_desk_auto(int on) { sh.desk_auto = on; hal_setting_set(u"QrtDeskAuto", (u32)on); }
 
 /* ---- boot splash ------------------------------------------------------------- */
 static void splash(float t) {
@@ -1714,11 +2032,13 @@ void shell_main(void) {
     sh.sleep_after = (int)hal_setting_get(u"QrtSleepAfter", 120);
     sh.volume = sh.volume_saved = CLAMP((int)hal_setting_get(u"QrtVolume", 50), 0, 100);
     sh.launch_pressed = sh.dock_pressed = -1;
+    sh.desk_auto = (int)hal_setting_get(u"QrtDeskAuto", 1) != 0;
     k.graphics_up = 1;
     gpu_autostart();
     display_start();
     if (!k.native) k.st->ConOut->EnableCursor(k.st->ConOut, 0);
     relayout();
+    sh.mx = ui.W / 2.0f; sh.my = ui.H / 2.0f;
 
     for (int i = 1; i <= 12; i++) {
         float t = i / 12.0f;
@@ -1755,6 +2075,14 @@ void shell_main(void) {
             u64 limit = (u64)(sh.locked ? MIN(sh.sleep_after, 20) : sh.sleep_after) * 1000;
             if (now - sh.last_input_ms > limit) { go_to_sleep(); continue; }
         }
+        /* a monitor came or went: control it (or keep mirroring), or bring the shell home */
+        int conn = display_connected();
+        if (conn != sh.mon_seen) {
+            sh.mon_seen = conn;
+            if (conn && sh.desk_auto) desk_enter();
+            else if (!conn) desk_leave();
+            sh.dirty = 1;
+        }
         dock_animate(now);
         if (sh.osd_shown && now > sh.osd_until) {
             sh.osd_shown = 0;
@@ -1763,7 +2091,7 @@ void shell_main(void) {
         }
         event_t rep[4];
         int nr = osk_tick(now, rep, 4);
-        if (nr) shell_damage(osk_rect(content_rect()));
+        if (nr) { if (sh.desk) sh.pad_dirty = 1; else shell_damage(osk_rect(content_rect())); }
         for (int i = 0; i < nr; i++) key_event(&rep[i]);
         if (sh.bench_pending) { sh.bench_pending = 0; run_benchmark(); }
         if (sh.keyboard_pending) { sh.keyboard_pending = 0; shell_keyboard(!osk_visible()); }
@@ -1792,5 +2120,6 @@ void shell_main(void) {
             sh.pdmg = rect_union(sh.pdmg, sh.cursor_drawn);
         }
         render();
+        if (sh.desk && (sh.pad_dirty || sh.pad_power_drawn != sh.power_open)) pad_render();
     }
 }

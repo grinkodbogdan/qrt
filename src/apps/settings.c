@@ -39,7 +39,7 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
 typedef struct {
     int x, w;                                   /* the clamped column */
     int y_look, y_power, y_sound, y_start, y_system, y_about;
-    rect_t accent[N_ACCENTS], rot[4], sleep[N_SLEEP], kern[2], gpu[2], ext[2], power[3];
+    rect_t accent[N_ACCENTS], rot[4], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], power[3];
     rect_t bright, vol;                         /* slider tracks */
     rect_t g_look, g_power, g_sound, g_start, g_system, g_about;   /* group boxes */
     int bottom;
@@ -82,11 +82,12 @@ static lay_t layout(rect_t a) {
     L.y_start = y;
     if (sizeof(void *) == 8) {
         y += title;
-        L.g_start = (rect_t){ x, y, w, 3 * ROW_H };
+        L.g_start = (rect_t){ x, y, w, 4 * ROW_H };
         int kw = MIN(dp(130), w / 4);
         for (int i = 0; i < 2; i++) L.kern[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + dp(11), kw, ROW_H - dp(22) };
         for (int i = 0; i < 2; i++) L.gpu[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + ROW_H + dp(11), kw, ROW_H - dp(22) };
         for (int i = 0; i < 2; i++) L.ext[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + 2 * ROW_H + dp(11), kw, ROW_H - dp(22) };
+        for (int i = 0; i < 2; i++) L.desk[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + 3 * ROW_H + dp(11), kw, ROW_H - dp(22) };
         y += L.g_start.h + dp(24);
     } else L.g_start = (rect_t){ 0 };
 
@@ -163,7 +164,7 @@ static void draw(canvas_t *c, rect_t a) {
 
     if (sizeof(void *) == 8) {
         int fw = st.fw_mode;                     /* draw() may run on any core: no firmware calls here */
-        group(c, L.g_start, L.y_start, "Startup", 3);
+        group(c, L.g_start, L.y_start, "Startup", 4);
         row_label(c, L.g_start, 0, "Kernel mode", k.boot_note[0] ? k.boot_note : "Applies after a restart");
         segment(c, L.kern[0], "Native", !fw, 1, 0);
         segment(c, L.kern[1], "Firmware", fw, 0, 1);
@@ -173,6 +174,10 @@ static void draw(canvas_t *c, rect_t a) {
         row_label(c, L.g_start, 2, "External display (USB-C)", display_status());
         segment(c, L.ext[0], "On", st.ext_on, 1, 0);
         segment(c, L.ext[1], "Off", !st.ext_on, 0, 1);
+        int da = shell_desk_auto();
+        row_label(c, L.g_start, 3, "When a monitor is connected", da ? "The tablet becomes its touchpad and keyboard" : "The tablet's screen is mirrored to it");
+        segment(c, L.desk[0], "Control", da, 1, 0);
+        segment(c, L.desk[1], "Mirror", !da, 0, 1);
     }
 
     group(c, L.g_system, L.y_system, "System", 1);
@@ -241,13 +246,15 @@ static int event(const event_t *e, rect_t a) {
                 return 1;
             }
     if (sizeof(void *) == 8)
-        for (int i = 0; i < 2; i++)
+        for (int i = 0; i < 2; i++) {
+            if (in_rect(L.desk[i], e->x, e->y)) { shell_set_desk_auto(i == 0); shell_redraw(); return 1; }
             if (in_rect(L.ext[i], e->x, e->y)) {
                 display_set_enabled(i == 0);
                 st.ext_on = display_enabled();
                 shell_redraw();
                 return 1;
             }
+        }
     for (int i = 0; i < 3; i++) {
         if (!in_rect(L.power[i], e->x, e->y)) continue;
         if (st.confirm != i + 1) { st.confirm = i + 1; return 1; }

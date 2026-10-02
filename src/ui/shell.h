@@ -56,6 +56,9 @@ int  shell_sleep_after(void);            /* seconds of inactivity before sleep; 
 void shell_set_sleep_after(int seconds);
 int  shell_rotation(void);
 void shell_set_accent(int idx);
+int  shell_desk(void);                   /* 1: the shell is on the external monitor, the panel is its controller */
+int  shell_desk_auto(void);              /* control a monitor when it is connected (else mirror) */
+void shell_set_desk_auto(int on);
 int  shell_accent_index(void);
 extern const u32 accent_palette[];
 extern const char *accent_names[];

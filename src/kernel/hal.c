@@ -6,6 +6,7 @@
 #include "../drivers/usb/xhci.h"
 #include "../drivers/touch.h"
 #include "../drivers/uart.h"
+#include "../drivers/i915/display.h"
 #if defined(__x86_64__)
 #include "../arch/x64/sched.h"
 #include "../arch/x64/mm.h"
@@ -135,6 +136,7 @@ static int inject_key(c16 ch, event_t *out) {
         if (*p == ',') v = &y;
         else if (*p >= '0' && *p <= '9') *v = *v * 10 + (*p - '0');
     }
+    if (buf[0] == 'v') { display_virtual(x, y); return 1; }   /* tests: plug a monitor of x by y (0: unplug) */
     out->x = CLAMP(x, 0, (int)k.fb_w - 1);
     out->y = CLAMP(y, 0, (int)k.fb_h - 1);
     out->type = buf[0] == 'd' ? EV_DOWN : buf[0] == 'u' ? EV_UP : EV_MOVE;

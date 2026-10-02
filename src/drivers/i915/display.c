@@ -140,6 +140,7 @@ static struct {
     int last_w, last_h, x0, y0;
     float scale;
     volatile int busy;         /* the thread is changing the mode: no mirroring */
+    int virt;                  /* display_virtual(): a test monitor in memory */
     u32 frames;
 } D;
 
@@ -880,6 +881,7 @@ void display_start(void) {
 }
 
 const char *display_status(void) {
+    if (D.virt) return D.status;
     if (!k.native) return "Needs the native kernel";
     if (!k.is_venue) return "Only on the Venue 8 Pro 5855 (Cherry Trail DisplayPort)";
     if (!D.R && !D.status[0]) return "Not started";
@@ -893,6 +895,40 @@ void display_set_enabled(int on) {
     if (!D.R) return;
     if (!on) { D.state = D_DISABLED; strlcpy(D.status, "Off", sizeof D.status); }
     else if (D.state == D_DISABLED) { D.state = D_SEARCHING; strlcpy(D.status, "No external display connected", sizeof D.status); }
+}
+
+int display_connected(void) { return D.state == D_ON && D.fb && !D.busy; }
+int display_size(int *w, int *h) { *w = D.m.hd; *h = D.m.vd; return display_connected(); }
+const char *display_monitor(void) { return D.monitor; }
+
+/* tests (QEMU has no DisplayPort): a monitor that is only a buffer in memory */
+void display_virtual(int w, int h) {
+    if (k.is_venue) return;
+    if (w <= 0 || h <= 0) { D.state = D_SEARCHING; strlcpy(D.status, "No external display connected", sizeof D.status); klog("display: the virtual monitor was unplugged"); return; }
+    w = MIN(w, 3840); h = MIN(h, 2160);
+    usize bytes = (usize)w * 4 * (usize)h;
+    if (!D.fb || D.fb_bytes < bytes) { D.fb = hal_dma_alloc(bytes); D.fb_bytes = D.fb ? bytes : 0; }
+    if (!D.fb) return;
+    D.virt = 1;
+    D.fb_gtt = 0;                                                        /* not scanned out: CPU copies only */
+    D.m = (dmode_t){ 148500, w, w, w, w, h, h, h, h, 1, 1 };
+    D.pitch = (u32)w * 4;
+    D.last_w = D.last_h = 0;
+    strlcpy(D.monitor, "Test monitor", sizeof D.monitor);
+    fmt(D.status, sizeof D.status, "%s: %dx%d (test)", D.monitor, w, h);
+    klog("display: %s", D.status);
+    D.state = D_ON;
+}
+
+/* a checksum of the monitor's picture, for tests */
+u32 display_checksum(void) {
+    if (D.state != D_ON || !D.fb) return 0;
+    u32 sum = 0;
+    for (int y = 0; y < D.m.vd; y += 3) {
+        const u32 *row = (const u32 *)((const u8 *)D.fb + (usize)y * D.pitch);
+        for (int x = 0; x < D.m.hd; x += 7) sum = sum * 31 + (row[x] & 0xffffff);
+    }
+    return sum;
 }
 
 /* ---- mirroring --------------------------------------------------------------------------- */
@@ -917,7 +953,7 @@ void display_mirror(const u32 *px, int w, int h, int stride, int x, int y, int r
     if (dx1 > hx) dx1 = hx;
     if (dy1 > hy) dy1 = hy;
     if (dx1 <= dx0 || dy1 <= dy0) return;
-    if (gpu_present_scaled(px, w, h, stride, D.fb_gtt, W, H, (int)D.pitch, D.x0, D.y0, D.scale, dx0, dy0, dx1 - dx0, dy1 - dy0)) {
+    if (D.fb_gtt && gpu_present_scaled(px, w, h, stride, D.fb_gtt, W, H, (int)D.pitch, D.x0, D.y0, D.scale, dx0, dy0, dx1 - dx0, dy1 - dy0)) {
         D.frames++;
         return;
     }
@@ -944,4 +980,9 @@ const char *display_status(void) { return "Needs the 64-bit native kernel"; }
 int display_enabled(void) { return 0; }
 void display_set_enabled(int on) { (void)on; }
 void display_mirror(const u32 *px, int w, int h, int stride, int x, int y, int rw, int rh) {}
+int display_connected(void) { return 0; }
+int display_size(int *w, int *h) { *w = *h = 0; return 0; }
+const char *display_monitor(void) { return ""; }
+void display_virtual(int w, int h) { (void)w; (void)h; }
+u32 display_checksum(void) { return 0; }
 #endif

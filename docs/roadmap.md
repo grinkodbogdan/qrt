@@ -37,7 +37,8 @@ from the stick on demand instead of being copied into RAM at boot.
 | Text from a glyph atlas texture; the wallpaper and app windows as textures; transitions blended on the GPU | |
 | Wayland client buffers composited as textures (feeds section 1, milestone 6) | |
 | A Mesa-compatible path for Linux programs (`/dev/dri`, i915 ioctls) | long term |
-| External monitors on the USB-C port (DP Alt Mode): modeset of pipe B/C, mirroring scaled by the GPU | **0.6.4**, untested on hardware |
+| External monitors on the USB-C port (DP Alt Mode): modeset of pipe B/C, mirroring scaled by the GPU | **0.6.4**, works on the tablet |
+| Desk mode: the shell on the monitor, the tablet as its touchpad and keyboard; USB mice | **0.6.5** |
 | The external monitor as a second screen with its own windows | |
 
 ## 3. Audio (Cherry Trail SST + a Realtek codec)

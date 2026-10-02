@@ -23,6 +23,7 @@
 #include "xhci.h"
 #include "usb.h"
 #include "../bt/bt.h"
+#include "../hidmouse.h"
 
 #if defined(__x86_64__)
 #include "../../arch/x64/mm.h"
@@ -124,6 +125,8 @@ struct udev {
     epdesc_t eps[16];
     int neps;
     int kbd;                               /* boot keyboard */
+    int mouse;                             /* a pointer: its report layout */
+    hidmouse_t hm;
     u8 prev[8];
     volatile int ctl_done, ctl_cc;
 };
@@ -438,6 +441,43 @@ static void kbd_report(void *arg, const u8 *r, int len) {
     memcpy(d->prev, r, 8);
 }
 
+/* ---- mice (HID report protocol, src/drivers/hidmouse.c) ---------------------------------------- */
+static void mouse_report(void *arg, const u8 *r, int len) {
+    udev_t *d = arg;
+    mouse_report_t m;
+    if (!hm_decode(&d->hm, r, len, &m)) return;
+    event_t e = { .type = EV_REL, .x = m.x, .y = m.y, .dy = m.wheel, .scan = (u16)m.buttons, .from_mouse = m.abs ? 2 : 1 };
+    /* movement between two polls of the event loop adds up; a button change or a wheel step stays separate */
+    if (x.nkeys) {
+        event_t *l = &x.keys[x.nkeys - 1];
+        if (l->type == EV_REL && l->scan == e.scan && l->from_mouse == e.from_mouse && !l->dy && !e.dy) {
+            if (e.from_mouse == 2) { l->x = e.x; l->y = e.y; } else { l->x += e.x; l->y += e.y; }
+            return;
+        }
+    }
+    if (x.nkeys < (int)ARRAY_LEN(x.keys)) x.keys[x.nkeys++] = e;
+}
+
+/* a HID interface that may be a pointer: its report descriptor says, else the boot protocol */
+static int mouse_setup(udev_t *d, int iface, int ep, int rdesc_len, int boot_mouse) {
+    static u8 rd[1024];
+    int ok = 0;
+    if (rdesc_len > 0 && rdesc_len <= (int)sizeof rd && !control(d, 0x81, 6, 0x2200, (u16)iface, rd, (u16)rdesc_len))
+        ok = hm_parse(&d->hm, rd, rdesc_len);
+    if (!ok && boot_mouse) {
+        hm_boot(&d->hm);
+        control(d, 0x21, 0x0b, 0, (u16)iface, NULL, 0);                /* SET_PROTOCOL boot */
+        ok = 1;
+    }
+    if (!ok) return 0;
+    control(d, 0x21, 0x0a, 0, (u16)iface, NULL, 0);                    /* SET_IDLE 0 (may stall: fine) */
+    if (ep_open(d, (u8)ep, mouse_report, d)) return 0;
+    d->mouse = 1;
+    klog("usb: port %d: %s ready (%s, %d buttons%s)", d->port, d->hm.x.rel || d->hm.boot ? "mouse" : "absolute pointer",
+         d->hm.boot ? "boot protocol" : "report descriptor", d->hm.nbuttons, d->hm.wheel.present ? ", wheel" : "");
+    return 1;
+}
+
 /* ---- enumeration ---------------------------------------------------------------------------- */
 static const struct { u16 vid, pid; const char *name; } known[] = {
     { 0x8087, 0x0a2b, "Intel Wireless 8260 Bluetooth" },
@@ -534,14 +574,23 @@ static void enumerate(int root, int speed, udev_t *parent, int pport) {
     u16 total = (u16)MIN(cfg[2] | cfg[3] << 8, (int)sizeof cfg);
     if (control(d, 0x80, 6, 0x0200, 0, cfg, total)) { free_dev(d); return; }
     int kbd_if = -1, kbd_ep = 0, cur_if = -1, cur_alt = 0, cur_cls = 0, cur_sub = 0, cur_proto = 0;
+    typedef struct { int iface, ep, rlen, boot; } hidif_t;
+    hidif_t hid[4];                                                    /* other HID interfaces: mice? */
+    int nhid = 0, cur_rlen = 0;
     for (int o = 0; o + 2 <= total && cfg[o] >= 2; o += cfg[o]) {
         if (cfg[o + 1] == 4 && o + 9 <= total) {                       /* interface */
             cur_if = cfg[o + 2]; cur_alt = cfg[o + 3]; cur_cls = cfg[o + 5]; cur_sub = cfg[o + 6]; cur_proto = cfg[o + 7];
+            cur_rlen = 0;
             if (!d->iclass) { d->iclass = (u8)cur_cls; d->isub = (u8)cur_sub; d->iproto = (u8)cur_proto; }
+        } else if (cfg[o + 1] == 0x21 && o + 9 <= total && cfg[o + 6] == 0x22) {   /* HID: the report descriptor's length */
+            cur_rlen = cfg[o + 7] | cfg[o + 8] << 8;
         } else if (cfg[o + 1] == 5 && o + 7 <= total && cur_alt == 0 && d->neps < (int)ARRAY_LEN(d->eps)) {   /* endpoint */
             d->eps[d->neps++] = (epdesc_t){ cfg[o + 2], cfg[o + 3], (u8)cur_if, (u16)(cfg[o + 4] | cfg[o + 5] << 8), cfg[o + 6] };
             if (cur_cls == 3 && cur_sub == 1 && cur_proto == 1 && kbd_if < 0 && (cfg[o + 2] & 0x80) && (cfg[o + 3] & 3) == 3) {
                 kbd_if = cur_if; kbd_ep = cfg[o + 2];
+            } else if (cur_cls == 3 && (cfg[o + 2] & 0x80) && (cfg[o + 3] & 3) == 3 && nhid < (int)ARRAY_LEN(hid) &&
+                       !(nhid && hid[nhid - 1].iface == cur_if)) {
+                hid[nhid++] = (hidif_t){ cur_if, cfg[o + 2], cur_rlen, cur_sub == 1 && cur_proto == 2 };
             }
         }
     }
@@ -562,8 +611,11 @@ static void enumerate(int root, int speed, udev_t *parent, int pport) {
         control(d, 0x21, 0x0a, 0, (u16)kbd_if, NULL, 0);               /* SET_IDLE 0 */
         memset(d->prev, 0, sizeof d->prev);
         if (!ep_open(d, (u8)kbd_ep, kbd_report, d)) { d->kbd = 1; klog("usb: port %d: keyboard ready", d->port); }
-        return;
     }
+    /* mice: a mouse on its own, or the pointer half of a keyboard-and-mouse receiver */
+    for (int i = 0; i < nhid && !d->mouse; i++) mouse_setup(d, hid[i].iface, hid[i].ep, hid[i].rlen, hid[i].boot);
+    if (d->mouse && !d->kbd && !strcmp(d->what, "HID")) strlcpy(d->what, d->hm.x.rel || d->hm.boot ? "USB mouse" : "USB pointer (tablet)", sizeof d->what);
+    if (kbd_if >= 0 || d->mouse) return;
     /* Bluetooth: the wireless-controller class (e0/01/01), as Linux's btusb matches it */
     if (d->dclass == 0xe0 || (d->iclass == 0xe0 && d->isub == 1 && d->iproto == 1)) bt_usb_attach(d);
 }

@@ -9,3 +9,8 @@ int  display_enabled(void);               /* the Settings switch */
 void display_set_enabled(int on);
 /* the shell drew rectangle d of its canvas: show it on the external monitor too */
 void display_mirror(const u32 *px, int w, int h, int stride, int x, int y, int rw, int rh);
+int  display_connected(void);             /* a monitor is up and showing our buffer */
+int  display_size(int *w, int *h);        /* its mode; returns display_connected() */
+const char *display_monitor(void);        /* its name from the EDID */
+void display_virtual(int w, int h);       /* tests: plug (w x h) or unplug (0) a monitor that is only memory */
+u32  display_checksum(void);              /* tests: a sample of the monitor's picture */

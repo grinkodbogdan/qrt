@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.6.4"
+#define QRT_VERSION "0.6.5"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8
@@ -92,7 +92,10 @@ u64  k_now_us(void);
 void k_walltime(EFI_TIME *t);
 
 /* ---- input: normalised event stream (physical framebuffer coords) ---- */
-typedef enum { EV_NONE, EV_DOWN, EV_MOVE, EV_UP, EV_KEY, EV_SCROLL } ev_type_t;
+/* EV_REL: a mouse report - x, y movement (or, with from_mouse == 2, an absolute
+ * position 0..65535 on each axis), dy the wheel, scan the buttons (bit 0 left,
+ * 1 right, 2 middle).  The shell turns it into cursor moves and clicks. */
+typedef enum { EV_NONE, EV_DOWN, EV_MOVE, EV_UP, EV_KEY, EV_SCROLL, EV_REL } ev_type_t;
 typedef struct {
     ev_type_t type;
     int x, y;          /* EV_DOWN/MOVE/UP */
