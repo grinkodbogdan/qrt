@@ -1,0 +1,275 @@
+From 2ea6f69ff48a431417c22d98d52757666aea1d37 Mon Sep 17 00:00:00 2001
+From: grinkodbogdan <grinkod.bogdan@gmail.com>
+Date: Fri, 2 Oct 2026 15:03:34 +0000
+Subject: [PATCH 2/2] UI/QRT: a QRT front-end, the browser and its helpers in
+ one program
+
+QRT (github.com/grinkodbogdan/qrt) runs Ladybird as a native program.
+The front-end is one static executable: started as "ladybird <Helper>"
+it runs that helper process (WebContent, RequestServer, ...), so
+LibWeb, LibJS and ICU's data are on the disk once.  LibWebView launches
+helpers that way on QRT.  QRT has no seccomp or Landlock: LibSandbox
+leaves the seccomp code out and the helpers run unsandboxed.
+
+For now the front-end runs headless (--headless=screenshot|text).
+---
+ Libraries/LibSandbox/CMakeLists.txt    |  7 +++-
+ Libraries/LibWebView/HelperProcess.cpp |  6 +++
+ UI/CMakeLists.txt                      |  6 ++-
+ UI/QRT/Application.cpp                 | 14 +++++++
+ UI/QRT/Application.h                   | 26 +++++++++++++
+ UI/QRT/CMakeLists.txt                  | 30 ++++++++++++++
+ UI/QRT/SandboxQRT.cpp                  | 25 ++++++++++++
+ UI/QRT/main.cpp                        | 54 ++++++++++++++++++++++++++
+ 8 files changed, 166 insertions(+), 2 deletions(-)
+ create mode 100644 UI/QRT/Application.cpp
+ create mode 100644 UI/QRT/Application.h
+ create mode 100644 UI/QRT/CMakeLists.txt
+ create mode 100644 UI/QRT/SandboxQRT.cpp
+ create mode 100644 UI/QRT/main.cpp
+
+diff --git a/Libraries/LibSandbox/CMakeLists.txt b/Libraries/LibSandbox/CMakeLists.txt
+index d2780770..4b959c2a 100644
+--- a/Libraries/LibSandbox/CMakeLists.txt
++++ b/Libraries/LibSandbox/CMakeLists.txt
+@@ -3,10 +3,15 @@ set(SOURCES
+     Sandbox.cpp
+ )
+ 
+-if (LINUX)
++# QRT has no seccomp (its helpers run unsandboxed for now)
++if (LINUX AND NOT QRT)
+     list(APPEND SOURCES
+         Seccomp.cpp
+     )
+ endif()
+ 
+ ladybird_lib(LibSandbox sandbox)
++if (QRT)
++    # musl's msghdr has padding fields and a socklen_t msg_controllen
++    target_compile_options(LibSandbox PRIVATE -Wno-missing-designated-field-initializers -Wno-sign-compare)
++endif()
+diff --git a/Libraries/LibWebView/HelperProcess.cpp b/Libraries/LibWebView/HelperProcess.cpp
+index 14d334d8..f1872bc0 100644
+--- a/Libraries/LibWebView/HelperProcess.cpp
++++ b/Libraries/LibWebView/HelperProcess.cpp
+@@ -169,7 +169,13 @@ static ErrorOr<NonnullRefPtr<ClientType>> launch_server_process(
+     auto process_type = WebView::process_type_from_name(server_name);
+     auto const& browser_options = WebView::Application::browser_options();
+ 
++#if defined(__QRT__)
++    // On QRT the helpers are part of the ladybird executable: "ladybird <Helper> args..."
++    arguments.prepend(server_name);
++    Vector<ByteString> candidate_server_paths { TRY(Core::System::current_executable_path()) };
++#else
+     auto candidate_server_paths = TRY(get_paths_for_helper_process(server_name));
++#endif
+ 
+     if (browser_options.profile_helper_process == process_type && browser_options.profile_tool == ProfileTool::Callgrind) {
+         arguments.prepend({
+diff --git a/UI/CMakeLists.txt b/UI/CMakeLists.txt
+index 605ee377..04887986 100644
+--- a/UI/CMakeLists.txt
++++ b/UI/CMakeLists.txt
+@@ -49,6 +49,8 @@ endfunction()
+ 
+ if (ANDROID OR VCPKG_TARGET_ANDROID)
+     add_subdirectory("Android")
++elseif (QRT)
++    add_subdirectory("QRT")
+ else()
+     add_subdirectory("Qt")
+ endif()
+@@ -103,7 +105,9 @@ else()
+     )
+ endif()
+ 
+-add_dependencies(ladybird ${ladybird_helper_processes})
++if (NOT QRT)    # on QRT the helpers are inside the ladybird executable
++    add_dependencies(ladybird ${ladybird_helper_processes})
++endif()
+ # FIXME: Increase support for building targets on Windows
+ if (NOT WIN32)
+     add_dependencies(WebDriver ladybird)
+diff --git a/UI/QRT/Application.cpp b/UI/QRT/Application.cpp
+new file mode 100644
+index 00000000..cd48e21d
+--- /dev/null
++++ b/UI/QRT/Application.cpp
+@@ -0,0 +1,14 @@
++/*
++ * Copyright (c) 2026, the QRT developers.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include <UI/QRT/Application.h>
++
++namespace Ladybird {
++
++Application::Application() = default;
++Application::~Application() = default;
++
++}
+diff --git a/UI/QRT/Application.h b/UI/QRT/Application.h
+new file mode 100644
+index 00000000..b312290a
+--- /dev/null
++++ b/UI/QRT/Application.h
+@@ -0,0 +1,26 @@
++/*
++ * Copyright (c) 2026, the QRT developers.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#include <LibWebView/Application.h>
++
++namespace Ladybird {
++
++// The QRT front-end: Ladybird as a native program on QRT (github.com/grinkodbogdan/qrt).
++// For now it runs headless (--headless=screenshot|text|layout-tree); its window in the QRT
++// shell comes next.
++class Application final : public WebView::Application {
++    WEB_VIEW_APPLICATION(Application)
++
++public:
++    virtual ~Application() override;
++
++private:
++    Application();
++};
++
++}
+diff --git a/UI/QRT/CMakeLists.txt b/UI/QRT/CMakeLists.txt
+new file mode 100644
+index 00000000..d548c354
+--- /dev/null
++++ b/UI/QRT/CMakeLists.txt
+@@ -0,0 +1,30 @@
++# The QRT front-end (github.com/grinkodbogdan/qrt): one static executable that is both the
++# browser and, started as "ladybird <Helper>", each of its helper processes.
++add_executable(ladybird main.cpp Application.cpp SandboxQRT.cpp)
++
++set(qrt_helpers Compositor ImageDecoder MediaServer RequestServer WebContent WebWorker)
++if (ENABLE_CRANELIFT_JIT)
++    list(APPEND qrt_helpers WasmCompiler)
++    target_compile_definitions(ladybird PRIVATE QRT_HAVE_WASM_COMPILER)
++endif()
++foreach (helper IN LISTS qrt_helpers)
++    set(main "${LADYBIRD_SOURCE_DIR}/Services/${helper}/main.cpp")
++    target_sources(ladybird PRIVATE "${main}")
++    set_source_files_properties("${main}" PROPERTIES COMPILE_DEFINITIONS "ladybird_main=qrt_${helper}_main")
++endforeach()
++# sandboxes: QRT has no seccomp or landlock
++target_sources(ladybird PRIVATE
++    ${LADYBIRD_SOURCE_DIR}/Services/RendererSandboxUnimplemented.cpp
++    ${LADYBIRD_SOURCE_DIR}/Services/Compositor/SandboxUnimplemented.cpp
++    ${LADYBIRD_SOURCE_DIR}/Services/ImageDecoder/SandboxUnimplemented.cpp
++    ${LADYBIRD_SOURCE_DIR}/Services/MediaServer/SandboxUnimplemented.cpp
++    ${LADYBIRD_SOURCE_DIR}/Services/RequestServer/SandboxUnimplemented.cpp
++)
++if (ENABLE_CRANELIFT_JIT)
++    target_sources(ladybird PRIVATE ${LADYBIRD_SOURCE_DIR}/Services/WasmCompiler/SandboxUnimplemented.cpp)
++    target_link_libraries(ladybird PRIVATE wasmcompilerservice)
++endif()
++target_link_libraries(ladybird PRIVATE compositorservice imagedecoderservice mediaserverservice requestserverservice
++    webcontentservice webworkerservice LibSandbox LibThreading LibMedia LibURL LibWeb LibJS LibGC LibUnicode)
++target_include_directories(ladybird PRIVATE ${LADYBIRD_SOURCE_DIR}/Services ${CMAKE_BINARY_DIR}/Services ${CMAKE_BINARY_DIR})
++create_ladybird_bundle(ladybird)
+diff --git a/UI/QRT/SandboxQRT.cpp b/UI/QRT/SandboxQRT.cpp
+new file mode 100644
+index 00000000..5f51bef1
+--- /dev/null
++++ b/UI/QRT/SandboxQRT.cpp
+@@ -0,0 +1,25 @@
++/*
++ * Copyright (c) 2026, the QRT developers.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++// What the helpers' Linux code paths call from the Linux sandbox (seccomp, Landlock),
++// which QRT does not have: the helpers run unsandboxed for now.
++
++#include <AK/Error.h>
++#include <AK/StringView.h>
++#include <Services/Compositor/Sandbox.h>
++
++namespace Sandbox {
++
++void set_connect_broker_fd(int);
++void set_connect_broker_fd(int) { }
++
++}
++
++namespace Compositor {
++
++ErrorOr<void> restrict_filesystem(StringView) { return {}; }
++
++}
+diff --git a/UI/QRT/main.cpp b/UI/QRT/main.cpp
+new file mode 100644
+index 00000000..66052fa4
+--- /dev/null
++++ b/UI/QRT/main.cpp
+@@ -0,0 +1,54 @@
++/*
++ * Copyright (c) 2026, the QRT developers.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++// One program, several processes: on QRT, Ladybird's helper processes are this same
++// executable started as "ladybird <Helper> args..." (see launch_server_process), so the
++// libraries they share (LibWeb, LibJS, ICU's data...) are on the disk once.
++
++#include <AK/StringView.h>
++#include <LibMain/Main.h>
++#include <LibWebView/Application.h>
++#include <UI/QRT/Application.h>
++
++#define QRT_HELPERS(X) \
++    X(Compositor)      \
++    X(ImageDecoder)    \
++    X(MediaServer)     \
++    X(RequestServer)   \
++    X(WebContent)      \
++    X(WebWorker)       \
++    QRT_WASM_HELPER(X)
++
++#ifdef QRT_HAVE_WASM_COMPILER
++#    define QRT_WASM_HELPER(X) X(WasmCompiler)
++#else
++#    define QRT_WASM_HELPER(X)
++#endif
++
++#define DECLARE_HELPER(name) ErrorOr<int> qrt_##name##_main(Main::Arguments);
++QRT_HELPERS(DECLARE_HELPER)
++
++ErrorOr<int> ladybird_main(Main::Arguments arguments)
++{
++    if (arguments.argc > 1) {
++        auto helper = arguments.strings[1];
++        Main::Arguments shifted { arguments.argc - 1, arguments.argv + 1, arguments.strings.slice(1) };
++#define RUN_HELPER(name)        \
++    if (helper == #name##sv)    \
++        return qrt_##name##_main(shifted);
++        QRT_HELPERS(RUN_HELPER)
++    }
++
++    AK::set_rich_debug_enabled(true);
++    auto app = TRY(Ladybird::Application::create(arguments));
++    if (app->should_exit_after_profile_coordination())
++        return 0;
++    if (!Ladybird::Application::browser_options().headless_mode.has_value()) {
++        warnln("ladybird: the QRT window is not there yet; use --headless=screenshot|text|layout-tree");
++        return 1;
++    }
++    return app->execute();
++}
+-- 
+2.43.0
+

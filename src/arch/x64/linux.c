@@ -25,7 +25,9 @@ enum { EPERM = 1, ENOENT = 2, EINTR = 4, EBADF = 9, ECHILD = 10, EAGAIN = 11, EN
 #define O_APPEND  02000
 #define O_DIRECTORY 0200000
 #define AT_FDCWD  (-100)
-#define KMSG      (1 << 30)               /* ufile flags of /dev/kmsg (an F_TTY that writes to the kernel log) */
+#define KMSG      (1 << 30)
+#define DEV_RANDOM (1 << 29)              /* ufile flags of an F_NULL: /dev/urandom, /dev/random */
+#define DEV_ZERO   (1 << 28)              /* ... /dev/zero */               /* ufile flags of /dev/kmsg (an F_TTY that writes to the kernel log) */
 #define AT_SYMLINK_NOFOLLOW 0x100
 #define AT_EMPTY_PATH 0x1000
 
@@ -104,6 +106,11 @@ static i64 do_open(proc_t *p, int dirfd, u64 upath, int flags) {
     if (e) return e;
     if (!strcmp(path, "/dev/null")) { int fd = alloc_fd(p, 0); if (fd >= 0) p->fd[fd] = (ufile_t){ F_NULL }; return fd; }
     if (!strcmp(path, "/dev/tty") || !strcmp(path, "/dev/console")) { int fd = alloc_fd(p, 0); if (fd >= 0) p->fd[fd] = (ufile_t){ F_TTY }; return fd; }
+    if (!strcmp(path, "/dev/urandom") || !strcmp(path, "/dev/random") || !strcmp(path, "/dev/zero")) {
+        int fd = alloc_fd(p, 0);
+        if (fd >= 0) { p->fd[fd] = (ufile_t){ F_NULL }; p->fd[fd].flags = path[5] == 'z' ? DEV_ZERO : DEV_RANDOM; }
+        return fd;
+    }
     if (!strcmp(path, "/dev/kmsg")) { int fd = alloc_fd(p, 0); if (fd >= 0) { p->fd[fd] = (ufile_t){ F_TTY }; p->fd[fd].flags = KMSG; } return fd; }
     abs_path(p, dirfd, path, full, sizeof full);
     if (!strncmp(full, "/dev/shm/", 9) && full[9] && !strchr(full + 9, '/')) {     /* shm_open */
@@ -254,7 +261,11 @@ static i64 do_read(proc_t *p, int fd, u64 buf, u64 len) {
     ufile_t *f = &p->fd[fd];
     if (!UOK(buf, len)) return -EFAULT;
     switch (f->type) {
-    case F_TTY: case F_NULL: return 0;                  /* no keyboard for programs yet: EOF */
+    case F_NULL:
+        if (f->flags & DEV_RANDOM) { random_bytes((u8 *)(usize)buf, (usize)len); return (i64)len; }
+        if (f->flags & DEV_ZERO) { memset((void *)(usize)buf, 0, len); return (i64)len; }
+        return 0;
+    case F_TTY: return 0;                               /* no keyboard for programs yet: EOF */
     case F_FILE: {
         i64 r = vfs_read(f->vn, f->off, (void *)(usize)buf, len);
         if (r > 0) f->off += (u64)r;
@@ -755,6 +766,23 @@ static i64 unix_mmsg(proc_t *p, ufile_t *f, u64 vec, u32 n, int flags, int send)
 }
 
 /* ---- dispatch ----------------------------------------------------------------------- */
+/* QRT_TRACE=1: a failing call goes to the kernel log, with the path it was given */
+static void trace_failure(proc_t *p, u64 nr, u64 a0, u64 a1, i64 r) {
+    if (r == -EAGAIN || r == -EINTR) return;
+    u64 path = 0;
+    switch (nr) {
+    case 2: case 4: case 6: case 21: case 59: case 83: case 84: case 87: case 89: case 137: path = a0; break;
+    case 257: case 258: case 262: case 263: case 267: case 269: case 332: case 439: path = a1; break;
+    }
+    char s[80] = "";
+    if (path && UOK(path, 1)) {
+        usize i = 0;
+        for (; i < sizeof s - 1 && UOK(path + i, 1) && ((const char *)(usize)path)[i]; i++) s[i] = ((const char *)(usize)path)[i];
+        s[i] = 0;
+    }
+    klog("trace: %s[%d] sys %llu -> %lld %s", p->name, p->pid, nr, r, s);
+}
+
 void syscall_dispatch(frame_t *f) {
     proc_t *p = proc_current();
     u64 nr = f->rax, a0 = f->rdi, a1 = f->rsi, a2 = f->rdx, a3 = f->r10, a4 = f->r8, a5 = f->r9;
@@ -781,6 +809,34 @@ void syscall_dispatch(frame_t *f) {
             fd_release(p, (int)a0);
             r = 0;
         } else r = -EBADF;
+        break;
+    case 221: r = fdp(p, a0) ? 0 : -EBADF; break;       /* fadvise64: a hint */
+    case 74: case 75:                                   /* fsync, fdatasync: files live in RAM */
+        r = fdp(p, a0) ? 0 : -EBADF; break;
+    case 90: case 91: case 92: case 93: case 94: case 260: case 268:   /* chmod, fchmod, chown, fchown, lchown, fchownat, fchmodat */
+        r = 0; break;                                   /* one user, no permissions: accepted */
+    case 86: case 265: r = -EPERM; break;               /* link, linkat: no hard links (callers fall back) */
+    case 137: case 138: {                               /* statfs, fstatfs: a tmpfs */
+        u64 buf = a1;
+        if (!UOK(buf, 120)) { r = -EFAULT; break; }
+        u64 *s = (u64 *)(usize)buf;
+        memset(s, 0, 120);
+        s[0] = 0x01021994;                              /* f_type: TMPFS_MAGIC */
+        s[1] = PAGE;                                    /* f_bsize */
+        s[2] = pmm_total_bytes() / PAGE;                /* f_blocks */
+        s[3] = s[4] = pmm_free_bytes() / PAGE;          /* f_bfree, f_bavail */
+        s[5] = 65536; s[6] = 65536;                     /* f_files, f_ffree */
+        s[8] = 255;                                     /* f_namelen */
+        s[9] = PAGE;                                    /* f_frsize */
+        r = 0; break;
+    }
+    case 436:                                           /* close_range(first, last, flags): CLOSE_RANGE_CLOEXEC = 4 */
+        if (a0 > a1 || (a2 & ~4ull)) { r = -EINVAL; break; }
+        for (u64 fd = a0; fd <= a1 && fd < MAX_FDS; fd++) {
+            if (!p->fd[fd].type) continue;
+            if (a2 & 4) p->fd[fd].cloexec = 1; else fd_release(p, (int)fd);
+        }
+        r = 0;
         break;
     /* sockets (lsock.c) */
     /* sockets: AF_UNIX here (unix.c), AF_INET over the network stack (lsock.c) */
@@ -913,6 +969,25 @@ void syscall_dispatch(frame_t *f) {
         r = nr == 17 ? vfs_read(p->fd[a0].vn, a3, (void *)(usize)a1, a2) : vfs_write(p->fd[a0].vn, a3, (const void *)(usize)a1, a2);
         break;
     }
+    case 295: case 296: case 327: case 328: {          /* preadv, pwritev, preadv2, pwritev2 (flags ignored) */
+        int wr = nr == 296 || nr == 328;
+        if (nr >= 327 && (i64)a3 == -1) { nr = wr ? 20 : 19; goto vec; }       /* the current offset: readv/writev */
+        if (!UOK(a1, a2 * 16)) { r = -EFAULT; break; }
+        if ((int)a0 < 0 || (int)a0 >= MAX_FDS || p->fd[a0].type != F_FILE) { r = fdp(p, a0) ? -ESPIPE : -EBADF; break; }
+        const u64 *iov = (const u64 *)(usize)a1;
+        u64 off = a3;
+        r = 0;
+        for (u64 i = 0; i < a2; i++) {
+            if (!UOK(iov[i * 2], iov[i * 2 + 1])) { if (!r) r = -EFAULT; break; }
+            i64 n = wr ? vfs_write(p->fd[a0].vn, off, (const void *)(usize)iov[i * 2], iov[i * 2 + 1])
+                       : vfs_read(p->fd[a0].vn, off, (void *)(usize)iov[i * 2], iov[i * 2 + 1]);
+            if (n < 0) { if (!r) r = n; break; }
+            r += n; off += (u64)n;
+            if ((u64)n < iov[i * 2 + 1]) break;
+        }
+        break;
+    }
+    vec:
     case 19: case 20: {                                 /* readv / writev */
         if (!UOK(a1, a2 * 16)) { r = -EFAULT; break; }
         const u64 *iov = (const u64 *)(usize)a1;
@@ -1143,6 +1218,7 @@ void syscall_dispatch(frame_t *f) {
     default: log_unknown(nr == 0xffff ? entry_nr | 0x10000 : nr); break;   /* 0x1xxxx: a native number */
     }
     f->rax = (u64)r;
+    if (p->trace && r < 0 && r > -4096) trace_failure(p, nr, a0, a1, r);
     me->in_sys = 0;
     if (p->killed) proc_thread_exit(137);                       /* the process is going (Stop, exit_group) */
     sig_deliver_pending(p, f, nr, entry_nr, &r);                /* a handler to run (or a call to restart) */

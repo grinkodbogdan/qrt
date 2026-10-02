@@ -7,8 +7,13 @@
 
 static vnode_t *root;
 static u64 total_bytes;
+#if defined(__x86_64__)                 /* Ladybird is one 150 MB program */
+#define MAX_FILE  (256ull << 20)
+#define MAX_TOTAL (768ull << 20)
+#else
 #define MAX_FILE  (48ull << 20)
 #define MAX_TOTAL (160ull << 20)
+#endif
 
 vnode_t *vfs_root(void) { return root; }
 u64 vfs_total_bytes(void) { return total_bytes; }
@@ -207,7 +212,14 @@ static int gen_group(char *b, int cap) { return gen_text(b, cap, "root:x:0:\n");
 
 static void synth(const char *path, int (*g)(char *, int)) { vnode_t *n = vfs_create(path, 0); n->gen = g; }
 
+#if defined(__x86_64__)
+int proc_status_text(char *b, int cap);   /* proc.c: /proc/self/status of the calling process */
+#endif
+
 static void add_synthetic(void) {
+#if defined(__x86_64__)
+    synth("/proc/self/status", proc_status_text);
+#endif
     synth("/proc/version", gen_version);
     synth("/proc/cpuinfo", gen_cpuinfo);
     synth("/proc/meminfo", gen_meminfo);
@@ -272,6 +284,17 @@ static vnode_t *deep_copy(vnode_t *n, vnode_t *parent) {
     *c = *n;
     c->parent = parent ? parent : c;
     c->child = c->sibling = NULL;
+#if defined(__x86_64__)
+    if (n->data && !n->gen && n->size >= (1u << 20)) {
+        /* big files (programs): whole pages outside the heap, so that exec can map a
+         * program's read-only segments straight from here, shared by every process
+         * running it (load_elf).  They are never freed: kfree ignores them, and a
+         * rewritten or deleted file just leaves its old pages to whoever maps them. */
+        c->cap = (n->size + PAGE - 1) & ~(PAGE - 1);
+        c->data = (u8 *)(usize)pmm_alloc_contig(c->cap / PAGE);
+        memcpy(c->data, n->data, n->size);
+    } else
+#endif
     if (n->data && !n->gen) {
         c->data = kalloc(n->cap ? n->cap : 1);
         memcpy(c->data, n->data, n->size);

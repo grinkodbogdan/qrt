@@ -79,6 +79,10 @@ RUST_MUSL := $(shell d=$$(rustc --print sysroot 2>/dev/null)/lib/rustlib/x86_64-
 RUST_HELLO := $(if $(RUST_MUSL),build/rootfs/bin/rust-hello)
 # Ladybird, built natively for QRT by ports/ladybird/build.sh; shipped when it has been built
 LADYBIRD := $(if $(wildcard build/ladybird/bin/js),build/rootfs/bin/js build/rootfs/share/tests/js-test.js)
+# the browser (one program: it and its helper processes), its resources, fonts, fontconfig
+LADYBIRD += $(if $(wildcard build/ladybird/bin/Ladybird),build/rootfs/bin/ladybird build/rootfs/share/Lagom/.stamp \
+            build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/render.sh)
+FONT_DIRS := /usr/share/fonts/truetype/liberation /usr/share/fonts/truetype/dejavu
 ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
           build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/hello-window build/rootfs/bin/cxx-test $(RUST_HELLO) $(LADYBIRD) build/rootfs/lib64/ld-linux-x86-64.so.2
 
@@ -133,6 +137,35 @@ build/rootfs/bin/cxx-test: sdk/examples/cxx-test.cpp build/sdk/.cxxstamp
 build/rootfs/bin/js: build/ladybird/bin/js
 	@mkdir -p $(dir $@)
 	llvm-strip-20 -o $@ $<
+
+build/rootfs/bin/ladybird: build/ladybird/bin/Ladybird
+	@mkdir -p $(dir $@)
+	llvm-strip-20 -o $@ $<
+
+build/rootfs/share/Lagom/.stamp: build/ladybird/bin/Ladybird
+	rm -rf build/rootfs/share/Lagom; mkdir -p build/rootfs/share
+	cp -r build/ladybird/share/Lagom build/rootfs/share/Lagom
+	touch $@
+
+# Liberation (SIL OFL; metric-compatible with Arial, Times New Roman, Courier New) and
+# DejaVu (free licence, see share/fonts/README.txt), from the build machine
+build/rootfs/share/fonts/.stamp: tools/fonts.conf
+	@mkdir -p $(dir $@)
+	for d in $(FONT_DIRS); do cp $$d/*.ttf $(dir $@); done
+	printf 'Liberation fonts: SIL Open Font License 1.1 (github.com/liberationfonts).\nDejaVu fonts: Bitstream Vera licence with DejaVu changes in the public domain (dejavu-fonts.github.io).\n' > $(dir $@)README.txt
+	touch $@
+
+build/rootfs/etc/fonts/fonts.conf: tools/fonts.conf
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+build/rootfs/share/tests/render.sh: tests/ladybird/render.sh
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+build/rootfs/share/tests/page.html: tests/ladybird/page.html
+	@mkdir -p $(dir $@)
+	cp $< $@
 
 build/rootfs/share/tests/js-test.js: tests/ladybird/js-test.js
 	@mkdir -p $(dir $@)

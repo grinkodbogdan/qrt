@@ -1,8 +1,8 @@
 From 676fadc4545caf3044246ae00b1417ace8ee6c14 Mon Sep 17 00:00:00 2001
 From: grinkodbogdan <grinkod.bogdan@gmail.com>
 Date: Fri, 2 Oct 2026 10:25:14 +0000
-Subject: [PATCH] LibJS: link generate_interpreter_layout as a host program on
- QRT
+Subject: [PATCH 1/2] LibJS: link generate_interpreter_layout as a host program
+ on QRT
 
 QRT programs use QRT's own system calls, so a tool the build runs is
 linked with the QRT SDK's host libc (QRT_HOST_LINK_OPTIONS) instead.

@@ -176,6 +176,13 @@ def main():
         else:
             print("FAIL: kernel never reached the shell\n" + log[-2000:])
             return 1
+        # then the kernel decides on native mode (a key typed before that would count as
+        # "held at boot") - with a big image, copying it into RAM takes a while under TCG
+        while time.time() < deadline + 300:
+            log = open(serial, errors="replace").read()
+            if "shell: first frame" in log or "firmware mode" in log:
+                break
+            time.sleep(0.5)
         time.sleep(4)   # splash animation + first frame under TCG
         print("--- kernel log (serial) ---")
         print("\n".join(l for l in log.replace("\r", "").splitlines() if l.strip() and "\x1b" not in l)[-1500:])
@@ -246,6 +253,26 @@ def native_test(q, shots):
         if "js: \"js: ok\"" not in slog() or "js-exit=0" not in slog():
             raise RuntimeError("native: Ladybird's js failed\n  " + "\n  ".join(l for l in slog().splitlines() if l.startswith("js") or "proc: js" in l)[-1500:])
         progs.append("Ladybird's js (%d checks)" % (slog().count(": ok\"") - 1))
+    if os.path.exists(os.path.join(ROOT, "build", "rootfs", "bin", "ladybird")):
+        # Ladybird (L4): tests/ladybird/page.html rendered headless by the browser and its
+        # helper processes; the PNG comes back through the kernel log (tools/kmsg-png.py)
+        q.keys(*"sh /share/tests/render.sh", settle=0.2)
+        q.keys("ret", settle=1)
+        for _ in range(600):
+            if "lb-done" in slog():
+                break
+            time.sleep(1)
+        png = os.path.join(SHOTS, f"{ARCH}-06-ladybird-page.png")
+        os.makedirs(SHOTS, exist_ok=True)
+        ok = "lb-exit=0" in slog() and subprocess.run([sys.executable, os.path.join(ROOT, "tools", "kmsg-png.py"), serial, png]).returncode == 0
+        if ok:
+            from PIL import Image
+            im = Image.open(png).convert("RGB")
+            ok = im.size == (800, 600) and len(im.resize((40, 30)).getcolors(1200) or []) > 20   # not a blank page
+        if not ok:
+            raise RuntimeError("native: Ladybird did not render the test page\n  " + "\n  ".join(l for l in slog().splitlines() if "ladybird" in l)[-1500:])
+        shots.append(png)
+        progs.append("Ladybird (a page rendered by its processes)")
     q.keys(*"hello-window", settle=0.2)
     q.keys("ret", settle=1)
     for _ in range(40):

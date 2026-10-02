@@ -47,8 +47,8 @@ if [ -n "$rootfs" ] && [ -d "$rootfs/bin" ]; then
 fi
 
 # shared libraries for dynamically linked programs (/lib64, /lib/x86_64-linux-gnu) and
-# data (/share: tests, later Ladybird's resources)
-for d in lib lib64 share; do
+# data (/share: tests, Ladybird's resources, fonts; /etc: fontconfig)
+for d in lib lib64 share etc; do
     if [ -n "$rootfs" ] && [ -d "$rootfs/$d" ]; then
         mcopy -s -i "$esp" "$rootfs/$d" ::/
     fi

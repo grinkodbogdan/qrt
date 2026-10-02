@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<!-- page.html - the page Ladybird renders headless in the QEMU test (step L4): CSS layout
+     (flex, grid), fonts through fontconfig, gradients, rounded corners, shadows, an SVG, a
+     canvas drawn by script, and a PNG image decoded by the ImageDecoder process. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QRT + Ladybird</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #f4f4f7; color: #222; }
+  header { background: linear-gradient(90deg, #3b5bdb, #9c36b5); color: white; padding: 18px 24px; }
+  header h1 { margin: 0; font-size: 30px; }
+  header p { margin: 4px 0 0; opacity: .85; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 24px; }
+  .card { background: white; border-radius: 12px; padding: 14px 16px; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  .card h2 { margin: 0 0 8px; font-size: 18px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .chip { border-radius: 999px; padding: 4px 10px; color: white; font-size: 13px; }
+  .serif { font-family: serif; } .mono { font-family: monospace; }
+  table { border-collapse: collapse; width: 100%; } td, th { border: 1px solid #ccc; padding: 3px 6px; text-align: left; }
+</style>
+</head>
+<body>
+<header><h1>Ladybird on QRT</h1><p>Rendered natively by LibWeb and Skia on the Tessera kernel</p></header>
+<main>
+  <section class="card"><h2>Text</h2>
+    <p>Sans: The quick brown fox jumps over the lazy dog.</p>
+    <p class="serif">Serif: The quick brown fox jumps over the lazy dog.</p>
+    <p class="mono">Mono: for (int i = 0; i &lt; 10; i++)</p>
+    <p>Unicode: café, Straße, Ελληνικά, Кириллица</p>
+  </section>
+  <section class="card"><h2>Flex and colours</h2>
+    <div class="row"><span class="chip" style="background:#e03131">red</span><span class="chip" style="background:#2f9e44">green</span><span class="chip" style="background:#1971c2">blue</span><span class="chip" style="background:#f08c00">orange</span></div>
+    <table style="margin-top:10px"><tr><th>Step</th><th>State</th></tr><tr><td>L3 js</td><td>done</td></tr><tr><td>L4 render</td><td id="state">waiting for script</td></tr></table>
+  </section>
+  <section class="card"><h2>SVG</h2>
+    <svg width="220" height="90" viewBox="0 0 220 90"><circle cx="45" cy="45" r="38" fill="#fab005"/><rect x="95" y="10" width="70" height="70" rx="10" fill="#12b886"/><path d="M175 80 L200 10 L215 80 Z" fill="#7048e8"/></svg>
+  </section>
+  <section class="card"><h2>Canvas and image</h2>
+    <div class="row"><canvas id="c" width="150" height="90"></canvas><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAADnklEQVR4nBXUqxpFERSF0Z1lWZZlWZZlWZZlWZZlWf6zLHuO43iA8Vm3+X0f4kN+qA/9YT7sh/vwH+EjfqSP/FE+6kf76B/jY36sDz72x/m4H98nEAIpUAItMAIrcAIvCIIoSIIsKIIqaIIuGIIpWAIEW3AEVzxIIiRSoiRaYiRW4iReEiRRkiRZUiRV0iRdMiRTsiRItuRIrnyQQiikQim0wiiswim8IiiiIimyoiiqoim6YiimYilQbMVRXPUgjdBIjdJojdFYjdN4TdBETdJkTdFUTdN0zdBMzdKg2ZqjufpBBmGQBmXQBmOwBmfwhmCIhmTIhmKohmbohmGYhmXAsA3HcM2DLMIiLcqiLcZiLc7iLcESLcmSLcVSLc3SLcMyLcuCZVuO5doHOYRDOpRDO4zDOpzDO4IjOpIjO4qjOpqjO4ZjOpYDx3Ycx3UP8giP9CiP9hiP9TiP9wRP9CRP9hRP9TRP9wzP9CwPnu05nusfFBABGVABHTABG3ABHwiBGEiBHCiBGmiBHhiBGVgBAjtwAjc8KCIiMqIiOmIiNuIiPhIiMZIiOVIiNdIiPTIiM7IiRHbkRG58UEIkZEIldMIkbMIlfCIkYiIlcqIkaqIlemIkZmIlSOzESdz0oIzIyIzK6IzJ2IzL+EzIxEzK5EzJ1EzL9MzIzMzKkNmZk7n5QQVRkAVV0AVTsAVX8IVQiIVUyIVSqIVW6IVRmIVVoLALp3DLgyqiIiuqoiumYiuu4iuhEiupkiulUiut0iujMiurQmVXTuXWBzVEQzZUQzdMwzZcwzdCIzZSIzdKozZaozdGYzZWg8ZunMZtD+qIjuyoju6Yju24ju+ETuykTu6UTu20Tu+MzuysDp3dOZ3bHzQQAzlQAz0wAztwAz8IgzhIgzwogzpogz4YgzlYAwZ7cAZ3PGgiJnKiJnpiJnbiJn4SJnGSJnlSJnXSJn0yJnOyJkz25EzufNBCLORCLfTCLOzCLfwiLOIiLfKiLOqiLfpiLOZiLVjsxVnc9aB/YL6oeyH14uUFwzvpd4zvjN4BvNV9S/fW5Q36jeg197XlFfS+8pD/23Dgvvj+NmIjN2qjN2ZjN27jN2ETN2mTN2VTN23TN2MzN2v/mb05m7sfdBAHeVAHfTAHe3AHfwiHeEiHfCiHemiHfhiHeVjn/5l9OId7HnQRF3lRF30xF3txF38Jl3hJl3wpl3ppl34Zl3lZ91/SvpzLvfwAj0rHrpedIxQAAAAASUVORK5CYII=" width="72" height="72" alt="png"></div>
+  </section>
+</main>
+<script>
+  const g = document.getElementById("c").getContext("2d");
+  const grad = g.createLinearGradient(0, 0, 150, 0);
+  grad.addColorStop(0, "#ff6b6b"); grad.addColorStop(1, "#4dabf7");
+  g.fillStyle = grad; g.fillRect(0, 0, 150, 90);
+  g.fillStyle = "white"; g.font = "bold 20px sans-serif"; g.fillText("canvas", 30, 52);
+  document.getElementById("state").textContent = "rendered by script at " + new Date(Date.UTC(2026, 9, 2)).toISOString().slice(0, 10);
+</script>
+</body>
+</html>

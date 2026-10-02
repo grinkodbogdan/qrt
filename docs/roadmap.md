@@ -16,7 +16,7 @@ in [ladybird.md](ladybird.md).
 | L1. Native programs | the native personality, the SDK (musl on QRT system calls, `qrt-cc`, `qrt-cargo`), `libqrt` windows, Rust std | **done in 0.8.0** ([sdk.md](sdk.md)) |
 | L2. C++ | LLVM 20's libc++, libc++abi, libunwind, compiler-rt for QRT; `qrt-c++` | **done** (in 0.8.0's tree, tested in QEMU) |
 | L3. Ladybird's base | its 34 libraries cross-built (`ports/`), AK, LibCore, LibJS + ICU: the `js` shell runs | **done** (in 0.8.0's tree, tested in QEMU) |
-| L4. Rendering | LibWeb, LibGfx with Skia (CPU), FreeType, HarfBuzz, image libraries: a page rendered to PNG | next |
+| L4. Rendering | LibWeb, LibGfx with Skia (CPU), FreeType, HarfBuzz, image libraries: a page rendered to PNG | **done** (in 0.8.0's tree, tested in QEMU) |
 | L5. Network, processes | RequestServer (curl, OpenSSL), WebContent and ImageDecoder processes: a real HTTPS site loads | |
 | L6. The QRT front-end | tabs, address bar, touch, keyboard, desk mode; a bigger image read on demand: the default browser | |
 

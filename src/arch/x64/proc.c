@@ -341,6 +341,17 @@ static int has_qrt_note(const u8 *img, u64 size, const phdr_t *ph) {
     return 0;
 }
 
+/* /proc/self/status: the lines programs read (Ladybird's debugger check reads TracerPid) */
+int proc_status_text(char *b, int cap) {
+    proc_t *p = proc_current();
+    if (!p) return 0;
+    return fmt(b, (usize)cap, "Name:\t%s\nState:\tR (running)\nTgid:\t%d\nPid:\t%d\nPPid:\t%d\nTracerPid:\t0\n"
+               "Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nThreads:\t1\n", p->name, p->pid, p->pid, p->ppid);
+}
+
+/* page-aligned memory outside the heap: a big file's own pages */
+static int file_pages(const u8 *d) { return d && !((u64)(usize)d & (PAGE - 1)) && !heap_owns(d); }
+
 /* Load one ELF image: an executable (ET_EXEC at its own addresses, ET_DYN at
  * USER_PIE_BASE) or, with base != 0, a shared object such as ld.so. */
 static int load_elf(proc_t *p, const u8 *img, u64 size, u64 base, image_t *out, char *err, usize cap) {
@@ -365,9 +376,28 @@ static int load_elf(proc_t *p, const u8 *img, u64 size, u64 base, image_t *out, 
         if (ph->type != 1) continue;
         u64 va = base + ph->vaddr, end = va + ph->memsz;
         if (!range_user(va & ~(PAGE - 1), end) || ph->offset + ph->filesz > size) { fmt(err, cap, "segment at %llx does not fit", va); return 0; }
-        for (u64 a = va & ~(PAGE - 1); a < end; a += PAGE)
-            if (!as_translate(p->cr3, a)) as_map(p->cr3, a, pmm_alloc(0), 1);
-        put_user(p, va, img + ph->offset, ph->filesz);
+        /* a read-only segment of a file held in whole pages maps those pages, shared;
+         * other pages get a private copy (zeroed past the file's bytes) */
+        int share = file_pages(img) && !(ph->flags & 2) && ((ph->offset - ph->vaddr) & (PAGE - 1)) == 0;
+        for (u64 a = va & ~(PAGE - 1); a < end; a += PAGE) {
+            u64 lo = MAX(a, va), hi = MIN(a + PAGE, va + ph->filesz);
+            if (!as_translate(p->cr3, a)) {
+                u64 fo = ph->offset + (a - va);          /* wraps below va: the page's file offset */
+                if (share && a + PAGE <= va + ph->filesz && fo + PAGE <= ((size + PAGE - 1) & ~(PAGE - 1))) {
+                    as_map(p->cr3, a, (u64)(usize)(img + fo), AS_SHARED);
+                    continue;
+                }
+                as_map(p->cr3, a, pmm_alloc(0), 1);
+            } else if (file_pages(img)) {                /* a file page another segment shares: copy it first */
+                u64 cur = as_translate(p->cr3, a) & ~(PAGE - 1);
+                if (cur >= (u64)(usize)img && cur < (u64)(usize)img + size) {
+                    u64 f = pmm_alloc(0);
+                    phys_write(f, (const void *)(usize)cur, PAGE);
+                    as_map(p->cr3, a, f, 1);
+                }
+            }
+            if (lo < hi) put_user(p, lo, img + ph->offset + (lo - va), hi - lo);
+        }
         if (!out->phdr && ph->offset <= e->phoff && e->phoff < ph->offset + ph->filesz)
             out->phdr = va + (e->phoff - ph->offset);
         if (end > out->hi) out->hi = end;
@@ -401,10 +431,13 @@ static u64 elf_span(const u8 *img, u64 size) {
     return hi > lo ? ((hi + PAGE - 1) & ~(PAGE - 1)) : 0;
 }
 
+/* a file's contents: a big file's own pages (see vfs.c's deep_copy; kfree ignores them),
+ * anything else copied into the heap */
 static u8 *read_file(const char *path, u64 *size) {
     vnode_t *n = vfs_lookup(path);
     if (!n || n->dir) return NULL;
     *size = vfs_size(n);
+    if (file_pages(n->data)) return n->data;
     u8 *img = kalloc(*size ? *size : 1);
     vfs_read(n, 0, img, *size);
     return img;
@@ -421,6 +454,8 @@ static u64 build_stack(proc_t *p, int argc, const char *const *argv, const char 
     int nenv = 0;
     argc = MIN(argc, 64);
     for (int i = argc - 1; i >= 0; i--) { u64 n = strlen(argv[i]) + 1; sp -= n; put_user(p, sp, argv[i], n); strs[i] = sp; }
+    p->trace = 0;
+    for (int i = 0; envp[i]; i++) if (!strcmp(envp[i], "QRT_TRACE=1")) p->trace = 1;
     for (int i = 0; envp[i] && nenv < 64; i++) { u64 n = strlen(envp[i]) + 1; sp -= n; put_user(p, sp, envp[i], n); envs[nenv++] = sp; }
     sp -= 8; put_user(p, sp, "x86_64", 7); u64 platform = sp;
     u64 execfn = strs[0];

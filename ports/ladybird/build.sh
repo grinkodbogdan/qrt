@@ -25,9 +25,9 @@ if [ ! -f "$SRC/.qrt-patched" ]; then
 fi
 (cd "$SRC" && rustup target add x86_64-unknown-linux-musl >/dev/null)
 
-# static, no GUI targets yet (UI/QRT comes with L6), Rust crates for QRT's musl target
+# static; UI/QRT is the front-end (the browser and its helper processes in one program), Rust crates for QRT's musl target
 cmake -G Ninja -S "$SRC" -B "$OUT" -DCMAKE_TOOLCHAIN_FILE="$SDK/qrt.cmake" -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_SHARED_LIBS=OFF -DENABLE_GUI_TARGETS=OFF -DENABLE_LTO_FOR_RELEASE=OFF -DENABLE_LAGOM_CCACHE=OFF \
+    -DBUILD_SHARED_LIBS=OFF -DENABLE_GUI_TARGETS=ON -DENABLE_LTO_FOR_RELEASE=OFF -DENABLE_LAGOM_CCACHE=OFF \
     -DLADYBIRD_ENABLE_CPPTRACE=OFF -DRUST_TARGET_TRIPLE=x86_64-unknown-linux-musl \
     -DLADYBIRD_CACHE_DIR="$root/build/ladybird-cache" >"$OUT.log" 2>&1 || { tail -30 "$OUT.log"; exit 1; }
-ninja -C "$OUT" -j"$(nproc)" "${@:-js}"
+ninja -C "$OUT" -k 0 -j"$(nproc)" "${@:-js}"

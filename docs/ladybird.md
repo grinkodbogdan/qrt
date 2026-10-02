@@ -46,7 +46,7 @@ Each step is a release with its own test, as with everything else in QRT.
 | L1 | Native QRT programs: the native personality, the SDK (musl on QRT system calls, `qrt-cc`), `libqrt` windows, Rust std | **0.8.0**: `native-test`, `rust-hello`, `hello-window` pass in the QEMU test |
 | L2 | C++: LLVM 20's compiler-rt, libunwind, libc++abi, libc++ built for QRT; `qrt-c++` | **done**: `cxx-test` (exceptions, threads, `<format>`, `std::filesystem`, coroutines) passes on QRT |
 | L3 | Ladybird's libraries (`ports/`) and its base: AK, LibCore, LibGC, LibJS with ICU, simdutf, fast_float, fmt, libtommath, simdjson, LibJS's Rust crates | **done**: `js`, Ladybird's JavaScript shell, runs natively on QRT and passes `tests/ladybird/js-test.js` (classes, generators, BigInt, Proxy, RegExp, typed arrays, `Intl` with ICU's data, promise jobs) |
-| L4 | Rendering: LibWeb and LibGfx with Skia's CPU rasteriser, FreeType, HarfBuzz and the image libraries; fonts from the image | Ladybird's `headless-browser` renders a local page to a PNG on QRT |
+| L4 | Rendering: LibWeb and LibGfx with Skia's CPU rasteriser, FreeType, HarfBuzz and the image libraries; fonts from the image | **done**: `ladybird --headless=screenshot` renders `tests/ladybird/page.html` (CSS grid and flex, fonts, SVG, a canvas, a PNG, script) with its WebContent, ImageDecoder and other processes; the QEMU test checks the PNG |
 | L5 | Network and processes: RequestServer (curl, OpenSSL, brotli, zstd, nghttp2, libpsl), WebContent and ImageDecoder as separate processes over Unix sockets, bitmaps in memfd shared memory | `headless-browser` loads a real HTTPS site |
 | L6 | The QRT front-end (`UI/QRT`, on `libqrt`): a window with tabs, an address bar, touch scrolling, the on-screen keyboard, desk mode with the mouse; the bigger image read on demand | Ladybird is the default browser on the tablet |
 | L7 | Later: media (ffmpeg; sound once the RT5670/SST driver exists), the GPU (Skia on Vulkan/GL needs a Mesa-class driver), sandboxing | |
@@ -94,6 +94,20 @@ kernel provides what those paths expect.
     except the kernel's device window at 512 GiB–1 TiB).
   - `/dev/kmsg` logs every line of a write, which is how the QEMU test reads `js`'s
     output.
+- **One program (L4)**: `UI/QRT` is QRT's front-end. Started as `ladybird <Helper>`,
+  the same executable is each helper process (WebContent, RequestServer, ImageDecoder,
+  Compositor, WebWorker, MediaServer, WasmCompiler), so LibWeb, LibJS and ICU's data are
+  on disk once (150 MB stripped). The kernel maps a program's read-only pages from the
+  file, shared by every process running it.
+- **What else L4 needed**:
+  - libpng with the APNG patch; OpenSSL with threads (its Configure turns them off when
+    `LDFLAGS` has `-static`); SQLite in exclusive locking mode (WAL without a shared
+    `-shm` mapping);
+  - fonts (Liberation, DejaVu) and `/etc/fonts/fonts.conf`;
+  - in the kernel: `close_range`, `/proc/self/status`, `/dev/urandom`, `fsync`,
+    `statfs`, `preadv`/`pwritev`, the `chmod`/`chown` family, and files up to 256 MB.
+- **Tracing**: run a program with `QRT_TRACE=1` in its environment and every system call
+  that fails is logged with its path, which is how these were found.
 - **Size**: `js` is 48 MB stripped, 33 MB of which is ICU's data. The image now grows
   to fit what it carries (96 MB with `js`). Trimming ICU's data to the locales QRT needs
   is part of L6.
