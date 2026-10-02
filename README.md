@@ -172,13 +172,16 @@ personality, not as a Linux binary. Its windows are apps in the shell: they appe
 dock and the overview, follow rotation, the keyboard and desk mode, and get touches,
 mouse clicks and keys as events.
 
-`/bin` has three examples:
+`/bin` has these examples:
 - `native-test` (C library),
+- `cxx-test` (C++23 with libc++),
 - `rust-hello` (Rust's standard library),
-- `hello-window` (a window).
+- `hello-window` (a window),
+- `js`: **Ladybird's JavaScript engine**, built natively for QRT. Try
+  `js /share/tests/js-test.js`, or `js` alone for its prompt.
 
-The QEMU test runs all three. This is step L1 of porting a modern browser, **Ladybird**,
-natively: see [docs/sdk.md](docs/sdk.md) and [docs/ladybird.md](docs/ladybird.md).
+The QEMU test runs all of them. They are steps L1–L3 of porting a modern browser,
+**Ladybird**, natively: see [docs/sdk.md](docs/sdk.md) and [docs/ladybird.md](docs/ladybird.md).
 
 ## Linux programs
 

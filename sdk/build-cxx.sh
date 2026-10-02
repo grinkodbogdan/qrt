@@ -47,6 +47,9 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "static only")
 set(ENV{PKG_CONFIG_LIBDIR} "$sys/usr/lib/pkgconfig:$sys/usr/share/pkgconfig")
 set(ENV{PKG_CONFIG_SYSROOT_DIR} "$sys")
+# build tools a project compiles and runs during its build: link them as Linux programs
+# (sdk/build-hostlib.sh), e.g. target_link_options(tool PRIVATE \${QRT_HOST_LINK_OPTIONS})
+set(QRT_HOST_LINK_OPTIONS -B$sdk/hostlib -L$sdk/hostlib)
 EOF
 
 b="$sdk/rt"
@@ -61,11 +64,14 @@ cmake -G Ninja -S "$src/runtimes" -B "$b" -DCMAKE_TOOLCHAIN_FILE="$sdk/qrt.cmake
     -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON -DCOMPILER_RT_INCLUDE_TESTS=OFF \
     -DLIBUNWIND_ENABLE_SHARED=OFF -DLIBUNWIND_USE_COMPILER_RT=ON -DLIBUNWIND_INCLUDE_TESTS=OFF \
     -DLIBCXXABI_ENABLE_SHARED=OFF -DLIBCXXABI_USE_LLVM_UNWINDER=ON -DLIBCXXABI_USE_COMPILER_RT=ON \
-    -DLIBCXXABI_ENABLE_STATIC_UNWINDER=ON -DLIBCXXABI_INCLUDE_TESTS=OFF \
+    -DLIBCXXABI_ENABLE_STATIC_UNWINDER=ON -DLIBCXXABI_INCLUDE_TESTS=OFF -DLIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF \
     -DLIBCXX_ENABLE_SHARED=OFF -DLIBCXX_HAS_MUSL_LIBC=ON -DLIBCXX_USE_COMPILER_RT=ON -DLIBCXX_CXX_ABI=libcxxabi \
     -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON -DLIBCXX_INCLUDE_BENCHMARKS=OFF -DLIBCXX_INCLUDE_TESTS=OFF >/dev/null
 ninja -C "$b" >/dev/null
 ninja -C "$b" install >/dev/null
+
+# (the try-compiles only compile - CMAKE_TRY_COMPILE_TARGET_TYPE - so a function check
+# cannot fail: musl has no __cxa_thread_atexit_impl, which is said explicitly above)
 
 # compiler-rt installs under lib/linux/ with an arch suffix; clang-20 looks for a target's
 # runtime in its own resource directory (lib/x86_64-unknown-linux-musl/libclang_rt.builtins.a),

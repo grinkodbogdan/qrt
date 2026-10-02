@@ -15,6 +15,8 @@ windows directly in the QRT shell. The Linux layer is still there for Linux bina
 | `libqrt.a`, `qrt.h` | the QRT platform API: windows, events, the on-screen keyboard, simple drawing, text in Inter |
 | `bin/qrt-cc` | clang for QRT: `qrt-cc -O2 -o app app.c -lqrt` (static executables) |
 | `bin/qrt-cargo` | cargo for QRT: Rust's `x86_64-unknown-linux-musl` target, linked by `qrt-cc` against QRT's musl (`rustup target add x86_64-unknown-linux-musl` first) |
+| `bin/qrt-c++`, `qrt.cmake` | C++23 (`sdk/build-cxx.sh`): LLVM 20's libc++, libc++abi, libunwind and compiler-rt built for QRT; a CMake toolchain file for libraries and programs |
+| `hostlib/` | musl with Linux's system calls (`sdk/build-hostlib.sh`): a build tool compiled for QRT and linked with `${QRT_HOST_LINK_OPTIONS}` runs on the build machine with the target's exact layouts |
 
 Requirements: clang, ld.lld, llvm-ar, python3 with PIL (for the font), and gcc's `libgcc.a`.
 
@@ -76,7 +78,17 @@ no extra hand-off. The shell side is `src/ui/clientwin.c`, the system calls are
 The QEMU test runs all three. Run any of them from the Terminal on the tablet. Copy your
 own programs into `\bin` on the stick.
 
+## Libraries (`ports/`)
+
+`bash ports/build.sh` cross-builds third-party libraries static into the sysroot, in the
+order of `ports/ORDER`, each from a recipe `ports/<name>.sh` (its version, where its source
+comes from, and its build). Today these are Ladybird's 34 dependencies: zlib, libpng,
+brotli, zstd, libjpeg-turbo, libwebp, expat, libxml2, sqlite3, libtommath, simdutf,
+fast-float, fmt, simdjson, mimalloc, ncurses, libedit, OpenSSL, nghttp2, libpsl, curl,
+FreeType, ICU, HarfBuzz, fontconfig, woff2, dav1d, libavif, wuffs, ffmpeg, Skia, SDL3
+and ANGLE's headers. It takes about 40 minutes the first time. A port that is built is
+skipped; delete `build/ports/done/<name>` to rebuild one.
+
 ## What comes next
 
-C++ (libc++, libc++abi, libunwind built for QRT with LLVM 21) and then Ladybird: see
-[ladybird.md](ladybird.md).
+Ladybird: see [ladybird.md](ladybird.md).

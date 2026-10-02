@@ -4,8 +4,10 @@
 
 #define PAGE 4096ull
 #define USER_TOP   0x40000000ull     /* user space: [0, 1 GiB) of every process ... */
-#define USER_HIGH_BASE 0x1000000000ull   /* ... and [64 GiB, 512 GiB): above any RAM the identity map covers */
-#define USER_HIGH_END  0x8000000000ull
+#define USER_HIGH_BASE 0x1000000000ull   /* ... and [64 GiB, 128 TiB): above any RAM the identity map covers, */
+#define USER_HOLE_BASE 0x8000000000ull   /* except [512 GiB, 1 TiB), where the kernel maps 64-bit device BARs */
+#define USER_HOLE_END  0x10000000000ull
+#define USER_HIGH_END  0x800000000000ull
 #define HIGH_POOL  0x40000000ull     /* kernel memory always comes from >= 1 GiB */
 
 typedef struct {
@@ -41,6 +43,7 @@ void  as_destroy(u64 cr3);
 #define AS_SHARED 4                  /* the frame belongs to a shared object: never freed with the mapping */
 #define AS_NONE   8                  /* as_protect: no access, the page and its contents are kept */
 int   user_va(u64 va);                                   /* in one of the user regions */
+int   user_high_range(u64 start, u64 end);               /* [start, end) inside one high user region */
 int   as_map(u64 cr3, u64 va, u64 frame, int prot);      /* 4 KiB, user-accessible */
 u64   as_translate(u64 cr3, u64 va);                     /* physical address or 0 */
 int   as_pte_writable(u64 cr3, u64 va);                  /* present and writable */

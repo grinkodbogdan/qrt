@@ -245,6 +245,7 @@ static u64 *tbl(u64 e) { return (u64 *)(usize)(e & PTE_ADDR); }
 void *mm_map_mmio(u64 base, u64 size) {
     if (!kpml4_phys || !size) return NULL;
     if (base + size <= max_phys) { mm_uncached(base, size); return (void *)(usize)base; }
+    if (base + size > USER_HOLE_END) { klog("mm: device registers at %llx are beyond the kernel's window", base); return NULL; }
     u64 *pml4 = tbl(kpml4_phys);
     for (u64 a = base & ~((2ull << 20) - 1); a < base + size; a += 2ull << 20) {
         u64 *e4 = &pml4[(a >> 39) & 511];
@@ -274,9 +275,11 @@ void mm_uncached(u64 base, u64 size) {
 
 /* ---- user address spaces ---------------------------------------------------------
  * Two regions per process: the first GiB (pdpt[0]: classic ELF addresses, brk, the
- * stack) and [64 GiB, 512 GiB) (pdpt[64..511]: mmap - Firefox reserves gigabytes).
- * The identity map stops at 64 GiB of physical addresses, so the second region never
- * shadows kernel memory.  Every user pdpt entry carries PTE_U; kernel ones do not.
+ * stack) and [64 GiB, 128 TiB) for mmap (Ladybird's garbage collector reserves 4 TiB
+ * cages): pdpt[64..511] under pml4[0], then pml4[2..255] with their own pdpts.  pml4[1]
+ * ([512 GiB, 1 TiB)) stays the kernel's, for device registers mapped above RAM.  The
+ * identity map stops at 64 GiB of physical addresses, so the high region never shadows
+ * kernel memory.  Every user entry carries PTE_U; kernel ones do not.
  * PTE bit 9 (free for software) marks frames of shared objects (memfd, MAP_SHARED):
  * they belong to the object, not to the mapping. */
 #define PTE_SOFT_SHARED 0x200ull
@@ -293,7 +296,14 @@ void mm_enable_nx(void) {
     nx_bit = PTE_NX;
 }
 
-int user_va(u64 va) { return va < USER_TOP || (va >= USER_HIGH_BASE && va < USER_HIGH_END); }
+int user_va(u64 va) {
+    return va < USER_TOP || (va >= USER_HIGH_BASE && va < USER_HOLE_BASE) || (va >= USER_HOLE_END && va < USER_HIGH_END);
+}
+int user_high_range(u64 start, u64 end) {
+    return (start >= USER_HIGH_BASE && end <= USER_HOLE_BASE) || (start >= USER_HOLE_END && end <= USER_HIGH_END);
+}
+/* the next user address at or after va that is in a region (0: none) */
+static u64 next_user(u64 va) { return va < USER_HIGH_BASE ? USER_HIGH_BASE : va < USER_HOLE_END ? USER_HOLE_END : 0; }
 
 u64 as_create(void) {
     u64 *k4 = tbl(kpml4_phys), *kp = tbl(k4[0]);
@@ -305,12 +315,22 @@ u64 as_create(void) {
     return (u64)(usize)pml4;
 }
 
-static u64 *user_pdpt(u64 cr3) { return tbl(tbl(cr3)[0]); }
+#define PML4_USER_FIRST 2                 /* pml4[2..255]: [1 TiB, 128 TiB) */
+#define PML4_USER_END   256
+
+/* the pdpt that covers va (pml4[0]'s is shared with the kernel's entries); create: make it */
+static u64 *pdpt_of(u64 cr3, u64 va, int create) {
+    u64 *e4 = &tbl(cr3)[(va >> 39) & 511];
+    if (!(*e4 & PTE_P)) { if (!create) return NULL; *e4 = pmm_alloc(1) | PTE_P | PTE_W | PTE_U; }
+    return tbl(*e4);
+}
 
 /* the page table entry for va, or NULL; create: build the missing levels */
 static u64 *pte_of(u64 cr3, u64 va, int create) {
     if (!user_va(va)) return NULL;
-    u64 *e3 = &user_pdpt(cr3)[(va >> 30) & 511];
+    u64 *p3 = pdpt_of(cr3, va, create);
+    if (!p3) return NULL;
+    u64 *e3 = &p3[(va >> 30) & 511];
     if (!(*e3 & PTE_P)) { if (!create) return NULL; *e3 = pmm_alloc(1) | PTE_P | PTE_W | PTE_U; }
     else if (!(*e3 & PTE_U)) return NULL;                 /* the kernel's (a device mapped up here) */
     u64 *e2 = &tbl(*e3)[(va >> 21) & 511];
@@ -324,9 +344,7 @@ static u64 pte_bits(int prot) {
 
 static void flush(u64 cr3, u64 va) { if (read_cr3() == cr3) __asm__ volatile("invlpg (%0)" : : "r"((usize)va) : "memory"); }
 
-u64 as_clone(u64 src) {
-    u64 dst = as_create();
-    u64 *sp3 = user_pdpt(src), *dp3 = user_pdpt(dst);
+static void clone_pdpt(u64 *sp3, u64 *dp3) {
     for (int g = 0; g < 512; g++) {
         if (!(sp3[g] & PTE_P) || !(sp3[g] & PTE_U)) continue;
         u64 *spd = tbl(sp3[g]);
@@ -352,6 +370,13 @@ u64 as_clone(u64 src) {
             }
         }
     }
+}
+
+u64 as_clone(u64 src) {
+    u64 dst = as_create();
+    clone_pdpt(pdpt_of(src, 0, 0), pdpt_of(dst, 0, 0));
+    for (int i = PML4_USER_FIRST; i < PML4_USER_END; i++)
+        if (tbl(src)[i] & PTE_P) clone_pdpt(tbl(tbl(src)[i]), pdpt_of(dst, (u64)i << 39, 1));
     return dst;
 }
 
@@ -409,8 +434,10 @@ int as_move(u64 cr3, u64 from, u64 to) {
 static void as_walk(u64 cr3, u64 start, u64 end, void (*fn)(u64 cr3, u64 *pte, u64 va, int arg), int arg) {
     u64 va = start & ~(PAGE - 1);
     while (va < end) {
-        if (!user_va(va)) { if (va < USER_HIGH_BASE) { va = USER_HIGH_BASE; continue; } break; }
-        u64 e3 = user_pdpt(cr3)[(va >> 30) & 511];
+        if (!user_va(va)) { if (!(va = next_user(va))) break; continue; }
+        u64 *p3 = pdpt_of(cr3, va, 0);
+        if (!p3) { va = (va + (1ull << 39)) & ~((1ull << 39) - 1); continue; }
+        u64 e3 = p3[(va >> 30) & 511];
         if (!(e3 & PTE_P) || !(e3 & PTE_U)) { va = (va + (1ull << 30)) & ~((1ull << 30) - 1); continue; }
         u64 e2 = tbl(e3)[(va >> 21) & 511];
         if (!(e2 & PTE_P)) { va = (va + (2ull << 20)) & ~((2ull << 20) - 1); continue; }
@@ -433,8 +460,7 @@ static void protect_fn(u64 cr3, u64 *pte, u64 va, int prot) {
 void as_unmap_range(u64 cr3, u64 start, u64 end) { as_walk(cr3, start, end, unmap_fn, 0); }
 void as_protect_range(u64 cr3, u64 start, u64 end, int prot) { as_walk(cr3, start, end, protect_fn, prot); }
 
-void as_destroy(u64 cr3) {
-    u64 *pml4 = tbl(cr3), *pdpt = tbl(pml4[0]);
+static void free_pdpt(u64 *pdpt) {
     for (int g = 0; g < 512; g++) {
         if (!(pdpt[g] & PTE_P) || !(pdpt[g] & PTE_U)) continue;
         u64 *pd = tbl(pdpt[g]);
@@ -446,6 +472,13 @@ void as_destroy(u64 cr3) {
         }
         pmm_free(pdpt[g] & PTE_ADDR);
     }
+}
+
+void as_destroy(u64 cr3) {
+    u64 *pml4 = tbl(cr3);
+    free_pdpt(tbl(pml4[0]));
     pmm_free(pml4[0] & PTE_ADDR);
+    for (int i = PML4_USER_FIRST; i < PML4_USER_END; i++)
+        if (pml4[i] & PTE_P) { free_pdpt(tbl(pml4[i])); pmm_free(pml4[i] & PTE_ADDR); }
     pmm_free(cr3);
 }

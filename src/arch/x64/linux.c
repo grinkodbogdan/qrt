@@ -217,13 +217,16 @@ static i64 do_write(proc_t *p, int fd, u64 buf, u64 len) {
     if (!UOK(buf, len)) return -EFAULT;
     switch (f->type) {
     case F_TTY:
-        if (f->flags & KMSG) {                                    /* /dev/kmsg: a line of the kernel log */
-            char line[200];
-            usize n = MIN(len, sizeof line - 1);
-            memcpy(line, (const char *)(usize)buf, n);
-            while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) n--;
-            line[n] = 0;
-            klog("%s: %s", p->name, line);
+        if (f->flags & KMSG) {                                    /* /dev/kmsg: lines of the kernel log */
+            const char *s = (const char *)(usize)buf;
+            for (u64 i = 0; i < len;) {
+                char line[200];
+                usize n = 0;
+                while (i < len && s[i] != '\n' && n < sizeof line - 1) { if (s[i] != '\r') line[n++] = s[i]; i++; }
+                if (i < len && s[i] == '\n') i++;
+                line[n] = 0;
+                klog("%s: %s", p->name, line);
+            }
             return (i64)len;
         }
         term_append(p->term, (const char *)(usize)buf, len); return (i64)len;
@@ -403,7 +406,7 @@ static i64 do_stat_path(proc_t *p, int dirfd, u64 upath, u64 ust, int flags) {
 static int urange(u64 start, u64 end) {
     if (end <= start) return 0;
     if (end <= USER_STACK_TOP - USER_STACK_SIZE) return start >= PAGE;
-    return start >= USER_HIGH_BASE && end <= USER_HIGH_END;
+    return user_high_range(start, end);
 }
 
 /*
@@ -414,7 +417,7 @@ static int urange(u64 start, u64 end) {
  */
 static i64 do_mmap(proc_t *p, u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u64 off) {
     if (!len || (off & (PAGE - 1))) return -EINVAL;
-    if (len > (256ull << 30)) return -ENOMEM;
+    if (len > USER_HIGH_END - USER_HOLE_END) return -ENOMEM;       /* the largest region */
     len = (len + PAGE - 1) & ~(PAGE - 1);
     int anon = (flags & MAP_ANONYMOUS) != 0, shared = (flags & 3) == MAP_SHARED || (flags & 3) == 3;
     ufile_t *uf = NULL;

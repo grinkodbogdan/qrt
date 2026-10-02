@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mkimage.sh OUT.img BOOTIA32.EFI BOOTX64.EFI
 #
-# Builds a 64 MiB GPT disk with a single FAT32 EFI System Partition that
+# Builds a GPT disk (64 MiB, more when the programs need it) with a single FAT32 EFI System Partition that
 # carries both loaders in the removable-media fallback path
 # (\EFI\BOOT\BOOTIA32.EFI and \EFI\BOOT\BOOTX64.EFI), so the same stick
 # boots on 32-bit UEFI (Venue 8 Pro 5830, Bay Trail) and 64-bit UEFI
@@ -10,7 +10,12 @@ set -euo pipefail
 out=$1 ia32=$2 x64=$3 rootfs=${4:-}
 here=$(cd "$(dirname "$0")/.." && pwd)
 
+# 64 MiB, or more when /bin and the rest need it (Ladybird): the contents plus a quarter
 size_mib=64
+if [ -n "$rootfs" ] && [ -d "$rootfs" ]; then
+    need=$(( $(du -sm "$rootfs" | cut -f1) * 5 / 4 + 24 ))
+    [ $need -gt $size_mib ] && size_mib=$(( (need + 15) / 16 * 16 ))
+fi
 part_start=2048                      # sectors (1 MiB alignment)
 part_sectors=$(( (size_mib - 2) * 2048 ))
 
@@ -41,8 +46,9 @@ if [ -n "$rootfs" ] && [ -d "$rootfs/bin" ]; then
     done
 fi
 
-# shared libraries for dynamically linked programs (/lib64, /lib/x86_64-linux-gnu)
-for d in lib lib64; do
+# shared libraries for dynamically linked programs (/lib64, /lib/x86_64-linux-gnu) and
+# data (/share: tests, later Ladybird's resources)
+for d in lib lib64 share; do
     if [ -n "$rootfs" ] && [ -d "$rootfs/$d" ]; then
         mcopy -s -i "$esp" "$rootfs/$d" ::/
     fi

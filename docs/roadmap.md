@@ -14,9 +14,9 @@ in [ladybird.md](ladybird.md).
 | Step | What it brings | State |
 |---|---|---|
 | L1. Native programs | the native personality, the SDK (musl on QRT system calls, `qrt-cc`, `qrt-cargo`), `libqrt` windows, Rust std | **done in 0.8.0** ([sdk.md](sdk.md)) |
-| L2. C++ | LLVM 21; libc++, libc++abi, libunwind, compiler-rt for QRT | next |
-| L3. Ladybird's base | AK, LibCore, LibJS + ICU and friends: the `js` shell runs | |
-| L4. Rendering | LibWeb, LibGfx with Skia (CPU), FreeType, HarfBuzz, image libraries: a page rendered to PNG | |
+| L2. C++ | LLVM 20's libc++, libc++abi, libunwind, compiler-rt for QRT; `qrt-c++` | **done** (in 0.8.0's tree, tested in QEMU) |
+| L3. Ladybird's base | its 34 libraries cross-built (`ports/`), AK, LibCore, LibJS + ICU: the `js` shell runs | **done** (in 0.8.0's tree, tested in QEMU) |
+| L4. Rendering | LibWeb, LibGfx with Skia (CPU), FreeType, HarfBuzz, image libraries: a page rendered to PNG | next |
 | L5. Network, processes | RequestServer (curl, OpenSSL), WebContent and ImageDecoder processes: a real HTTPS site loads | |
 | L6. The QRT front-end | tabs, address bar, touch, keyboard, desk mode; a bigger image read on demand: the default browser | |
 
@@ -29,7 +29,7 @@ services both personalities use, so the native browser builds on them.
 |---|---|---|
 | Dynamic programs and threads | `PT_INTERP` + ld.so, file-backed `mmap`/`MAP_FIXED`, `munmap`, `clone` threads, `futex` | **done in 0.6.0** |
 | Processes | `fork`/`vfork`, `execve`, `wait4`, pipes, `dup2`, `kill`; shells and pipelines | **done in 0.6.3**, signal handlers **0.7.0** |
-| Memory | page protections (NX, `mprotect`, W^X for a JIT), 448 GiB of address space, shared memory (`memfd_create`, `MAP_SHARED`, `/dev/shm`) | **done in 0.7.0** |
+| Memory | page protections (NX, `mprotect`, W^X for a JIT), 127 TiB of address space, shared memory (`memfd_create`, `MAP_SHARED`, `/dev/shm`) | **done in 0.7.0** |
 | Event loops | `epoll`, `eventfd`, `timerfd`, `signalfd`, Unix sockets with `SCM_RIGHTS`, `socketpair`, `listen`/`accept` | **done in 0.7.0** |
 | Files | a writable file system that survives reboots (eMMC/SD or USB storage), files read on demand | needed for L6 |
 

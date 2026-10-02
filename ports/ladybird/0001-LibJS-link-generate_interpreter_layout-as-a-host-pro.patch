@@ -1,0 +1,31 @@
+From 676fadc4545caf3044246ae00b1417ace8ee6c14 Mon Sep 17 00:00:00 2001
+From: grinkodbogdan <grinkod.bogdan@gmail.com>
+Date: Fri, 2 Oct 2026 10:25:14 +0000
+Subject: [PATCH] LibJS: link generate_interpreter_layout as a host program on
+ QRT
+
+QRT programs use QRT's own system calls, so a tool the build runs is
+linked with the QRT SDK's host libc (QRT_HOST_LINK_OPTIONS) instead.
+Same compiler, headers and libc++: the layouts it prints are the target's.
+---
+ Libraries/LibJS/CMakeLists.txt | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Libraries/LibJS/CMakeLists.txt b/Libraries/LibJS/CMakeLists.txt
+index 0e11e6d8..3a0e213d 100644
+--- a/Libraries/LibJS/CMakeLists.txt
++++ b/Libraries/LibJS/CMakeLists.txt
+@@ -361,6 +361,10 @@ if (DEFINED FLAP_ARCH)
+         target_compile_options(generate_interpreter_layout PRIVATE -fno-sanitize=fuzzer)
+         target_link_options(generate_interpreter_layout PRIVATE -fno-sanitize=fuzzer)
+     endif()
++    # QRT: the build runs it, so it is linked as a Linux program (the QRT SDK's host libc)
++    if (QRT)
++        target_link_options(generate_interpreter_layout PRIVATE ${QRT_HOST_LINK_OPTIONS})
++    endif()
+     # NB: GenerateLayout.cpp does not depend on Op.h since opcode field
+     # offsets are computed from interpreter.flap by flapc directly.
+ 
+-- 
+2.43.0
+

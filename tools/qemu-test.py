@@ -235,6 +235,17 @@ def native_test(q, shots):
     for cmd in progs:
         if not any(f"proc: {cmd} (pid" in l and "exited with 0," in l for l in slog().splitlines()):
             raise RuntimeError(f"native: {cmd} did not exit cleanly\n  " + "\n  ".join(l for l in slog().splitlines() if "native" in l or "rust" in l)[-1200:])
+    if os.path.exists(os.path.join(ROOT, "build", "rootfs", "bin", "js")):
+        # Ladybird's JavaScript engine (ports/ladybird/build.sh), its output into the kernel log
+        q.keys(*"js /share/tests/js-test.js >/dev/kmsg 2>&1; echo js-exit=$? >/dev/kmsg", settle=0.2)
+        q.keys("ret", settle=1)
+        for _ in range(240):
+            if "js-exit=" in slog():
+                break
+            time.sleep(1)
+        if "js: \"js: ok\"" not in slog() or "js-exit=0" not in slog():
+            raise RuntimeError("native: Ladybird's js failed\n  " + "\n  ".join(l for l in slog().splitlines() if l.startswith("js") or "proc: js" in l)[-1500:])
+        progs.append("Ladybird's js (%d checks)" % (slog().count(": ok\"") - 1))
     q.keys(*"hello-window", settle=0.2)
     q.keys("ret", settle=1)
     for _ in range(40):

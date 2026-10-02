@@ -29,3 +29,6 @@ dav1d
 libavif
 wuffs
 ffmpeg
+skia
+sdl3
+angle

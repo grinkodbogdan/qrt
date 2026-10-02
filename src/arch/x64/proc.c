@@ -143,7 +143,7 @@ void proc_vmas_release(proc_t *p) {
 static int range_user(u64 start, u64 end) {
     if (end <= start) return 0;
     if (end <= USER_STACK_TOP - USER_STACK_SIZE) return start >= PAGE;
-    return start >= USER_HIGH_BASE && end <= USER_HIGH_END;
+    return user_high_range(start, end);
 }
 
 int proc_range_free(proc_t *p, u64 start, u64 end) {
@@ -165,8 +165,11 @@ static u64 find_in(proc_t *p, u64 lo, u64 hi, u64 len) {
     return 0;
 }
 
-/* first fit in the mmap window, one guard page after every mapping */
-u64 proc_find_free(proc_t *p, u64 len) { return find_in(p, USER_MMAP_BASE, USER_MMAP_END, len); }
+/* first fit in the mmap window (below the kernel's hole first), one guard page after every mapping */
+u64 proc_find_free(proc_t *p, u64 len) {
+    u64 a = find_in(p, USER_MMAP_BASE, USER_HOLE_BASE, len);
+    return a ? a : find_in(p, USER_HOLE_END, USER_MMAP_END, len);
+}
 u64 proc_find_free_low(proc_t *p, u64 len) { return find_in(p, USER_LOW_MMAP, USER_STACK_TOP - USER_STACK_SIZE - (1ull << 20), len); }
 
 /* cut [start, end) out of the VMAs: returns how many pieces were removed or trimmed */
