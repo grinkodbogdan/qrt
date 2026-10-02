@@ -26,7 +26,7 @@
 #define QLEN 128
 
 typedef struct {
-    int used, id, pid;
+    int used, ready, id, pid;          /* ready: set up; the shell may show it */
     proc_t *owner;
     char title[48];
     kobj_t *shm;                       /* the current buffer (the window's reference) */
@@ -153,6 +153,7 @@ int cw_create(proc_t *p, const char *title) {
     rect_t a = shell_app_area();
     new_buffer(w, a.w, a.h);
     w->app = (app_t){ w->title, "Native QRT program", RGB(0x5e, 0x5c, 0x64), icon, opens[k], draws[k], events[k], NULL, closes[k] };
+    { LOCK; w->ready = 1; UNLOCK; }    /* only now may the shell open it: draws[k] is set */
     klog("shell: %s (pid %d) opened window %d, %dx%d", p->name, p->pid, w->id, w->w, w->h);
     return w->id;
 }
@@ -230,7 +231,7 @@ void clientwin_poll(void) {
     rect_t a = shell_app_area();
     for (int i = 0; i < MAX_WIN; i++) {
         cwin_t *w = &win[i];
-        if (!w->used) continue;
+        if (!w->used || !w->ready) continue;
         if (w->closing || w->owner->exited) {
             if (w->added) shell_app_remove(&w->app);
             LOCK;
@@ -247,7 +248,13 @@ void clientwin_poll(void) {
             else { klog("shell: no room for %s's window", w->owner->name); w->closing = 1; }
             continue;
         }
-        if (w->keyboard) { if (shell_app_showing(&w->app)) shell_keyboard(w->keyboard == 1); w->keyboard = 0; }
+        if (w->keyboard) {
+            if (shell_app_showing(&w->app)) {
+                klog("shell: %s's window %s the keyboard", w->owner->name, w->keyboard == 1 ? "shows" : "hides");
+                shell_keyboard(w->keyboard == 1);
+            }
+            w->keyboard = 0;
+        }
         /* the app area changed (rotation, keyboard, desk mode): a new buffer, and the program is told */
         if (shell_app_showing(&w->app) && (a.w != w->w || a.h != w->h) && a.w > 0 && a.h > 0) {
             new_buffer(w, a.w, a.h);

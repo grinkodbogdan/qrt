@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# mkimage.sh OUT.img BOOTIA32.EFI BOOTX64.EFI
+# mkimage.sh OUT.img BOOTX64.EFI [ROOTFS]
 #
-# Builds a GPT disk (64 MiB, more when the programs need it) with a single FAT32 EFI System Partition that
-# carries both loaders in the removable-media fallback path
-# (\EFI\BOOT\BOOTIA32.EFI and \EFI\BOOT\BOOTX64.EFI), so the same stick
-# boots on 32-bit UEFI (Venue 8 Pro 5830, Bay Trail) and 64-bit UEFI
-# (Venue 8 Pro 5855, Cherry Trail) firmware.
+# Builds a GPT disk (64 MiB, more when the programs need it) with a single FAT32 EFI
+# System Partition that carries the loader in the removable-media fallback path
+# (\EFI\BOOT\BOOTX64.EFI) for 64-bit UEFI (Venue 8 Pro 5855, Cherry Trail).
 set -euo pipefail
-out=$1 ia32=$2 x64=$3 rootfs=${4:-}
+out=$1 x64=$2 rootfs=${3:-}
 here=$(cd "$(dirname "$0")/.." && pwd)
 
 # 64 MiB, or more when /bin and the rest need it (Ladybird): the contents plus a quarter
@@ -31,7 +29,6 @@ esp=$tmp/esp.img
 truncate -s $(( part_sectors * 512 )) "$esp"
 mkfs.fat -F 32 -n QRT "$esp" >/dev/null
 mmd   -i "$esp" ::/EFI ::/EFI/BOOT ::/qrt
-mcopy -i "$esp" "$ia32" ::/EFI/BOOT/BOOTIA32.EFI
 mcopy -i "$esp" "$x64"  ::/EFI/BOOT/BOOTX64.EFI
 # a few files so the Files app has something to show on first boot
 for f in "$here"/image/*; do

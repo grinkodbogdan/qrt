@@ -2,7 +2,7 @@
 # run-qemu.sh [ia32|x64] [extra qemu args...]
 # Boots build/qrt.img under OVMF with a USB touchscreen-like tablet device.
 set -euo pipefail
-arch=${1:-ia32}; shift || true
+arch=${1:-x64}; shift || true
 here=$(cd "$(dirname "$0")/.." && pwd)
 ovmf=${OVMF_DIR:-/usr/share/OVMF}
 if [ "$arch" = ia32 ]; then code=$ovmf/OVMF32_CODE_4M.fd vars=$ovmf/OVMF32_VARS_4M.fd

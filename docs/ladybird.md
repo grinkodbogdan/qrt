@@ -54,7 +54,7 @@ Each step is a release with its own test, as with everything else in QRT.
 ## Using it (L6, first version)
 
 The dock's **Browser** is Ladybird when the image has it (`/bin/ladybird`); the old
-built-in text browser remains for the 32-bit kernel. The window has:
+built-in text browser remains as a fallback for an image built without it. The window has:
 - back, forward, and reload (stop while loading);
 - a keyboard button (the on-screen keyboard);
 - the address bar: tap it, type, and press Enter.
@@ -65,14 +65,29 @@ On the page:
 - the window follows the shell (rotation, the keyboard, desk mode) like any native
   window.
 
-Not yet: tabs (links that open a new tab load in the background), file downloads, and
-the GPU. A known problem: in QEMU the machine has sometimes reset (a triple fault) while
-Ladybird starts, in a few runs out of ten. Two kernel races found while hunting it are
-fixed: a process killed while its last thread was tearing it down got its descriptors
-released twice, and the shell's render jobs could reach a worker core half-written. The
-reset itself still hides: it doesn't happen with QEMU's logging, a gdb breakpoint on the
-double-fault entry never hits, and when it happens every CPU is found in low-memory
-startup code.
+Since 0.9.0:
+- a link that opens a new window (`target=_blank`, `window.open`) loads in the same
+  view, since there are no tabs yet;
+- the on-screen keyboard comes up by itself when a text field on the page takes the
+  focus, and goes away when it loses it.
+
+Not yet: tabs, file downloads, and the GPU.
+
+### The triple fault (fixed in 0.9.0)
+
+In 0.8.0, QEMU sometimes reset (a triple fault) while Ladybird started, in a few runs out
+of ten. A window's shell entry was published before it was filled in: `cw_create` marked
+the slot used with a zeroed `app_t`, then allocated the window's buffer (which can be
+preempted) before setting the entry's `draw` callback. If the shell thread ran in that
+gap, it opened the window and its render jobs called `draw`, which was NULL. The worker
+cores jumped to address 0 and ran through zeroed low memory (`00 00` is a valid
+instruction) into the SMP startup trampoline at 0x9e000. Its 16-bit code, run in long
+mode, loaded a garbage GDT and reset the machine.
+
+A window now becomes visible to the shell only when it is complete (`ready`), and the
+shell never calls a missing `draw`. Two other races found during the hunt were fixed in
+0.8.0's tree: descriptors released twice for a process killed while it exited, and render
+jobs reaching a worker core half-written.
 
 ## Building it
 

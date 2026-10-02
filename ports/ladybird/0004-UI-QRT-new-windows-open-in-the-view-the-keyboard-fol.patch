@@ -1,0 +1,79 @@
+From b31e646835de7236a21554151a665a49d3f83fee Mon Sep 17 00:00:00 2001
+From: grinkodbogdan <grinkod.bogdan@gmail.com>
+Date: Fri, 2 Oct 2026 21:32:30 +0000
+Subject: [PATCH 4/4] UI/QRT: new windows open in the view, the keyboard
+ follows text fields
+
+---
+ UI/QRT/BrowserWindow.cpp | 31 +++++++++++++++++++++++++++++++
+ UI/QRT/BrowserWindow.h   |  5 +----
+ 2 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/UI/QRT/BrowserWindow.cpp b/UI/QRT/BrowserWindow.cpp
+index 3fde8e5c..ef6a224c 100644
+--- a/UI/QRT/BrowserWindow.cpp
++++ b/UI/QRT/BrowserWindow.cpp
+@@ -43,6 +43,27 @@ static ToolbarItem toolbar_item_at(int x)
+     return ToolbarItem::Address;
+ }
+ 
++// There are no tabs yet: a page that opens one (target=_blank, window.open) gets a hidden
++// view for it, as headless Ladybird does, and as soon as that view has somewhere to go,
++// this view goes there instead.
++PageView::PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size)
++    : HeadlessWebView(move(theme), size)
++{
++    on_new_web_view = [this](auto, auto, ::WebView::WebContentClient& page_process, Optional<Web::PageId> page_index) {
++        auto child = page_index.has_value()
++            ? HeadlessWebView::create_child(*this, page_process, *page_index)
++            : HeadlessWebView::create(m_theme, m_viewport_size, is_private());
++        auto& view = adopt_child_web_view(move(child));
++        view.on_url_change = [this, &view](URL::URL const& url) {
++            if (url.serialize() == "about:blank"sv)
++                return;
++            load(url);
++            view.on_url_change = nullptr;
++        };
++        return view.handle();
++    };
++}
++
+ NonnullOwnPtr<PageView> PageView::create(Core::AnonymousBuffer theme, Web::DevicePixelSize size)
+ {
+     auto view = adopt_own(*new PageView(move(theme), size));
+@@ -105,6 +126,16 @@ ErrorOr<void> BrowserWindow::initialize(Vector<URL::URL> const& urls)
+         draw_toolbar();
+         qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
+     };
++    // a text field took the focus (or lost it): the on-screen keyboard follows
++    m_view->on_input_method_state_change = [this] {
++        bool wants = m_view->input_method_state().is_enabled;
++        if (m_editing_address || wants == m_keyboard)
++            return;
++        m_keyboard = wants;
++        qrt_keyboard(wants);
++        draw_toolbar();
++        qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++    };
+     m_view->on_loading_state_change = [this](bool loading) {
+         m_loading = loading;
+         draw_toolbar();
+diff --git a/UI/QRT/BrowserWindow.h b/UI/QRT/BrowserWindow.h
+index e1436dbf..65e1b53a 100644
+--- a/UI/QRT/BrowserWindow.h
++++ b/UI/QRT/BrowserWindow.h
+@@ -29,10 +29,7 @@ public:
+     RefPtr<Gfx::Bitmap> frame(Gfx::IntSize& size) const;
+ 
+ private:
+-    PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size)
+-        : HeadlessWebView(move(theme), size)
+-    {
+-    }
++    PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size);
+ };
+ 
+ // Ladybird's window in the QRT shell: a toolbar (back, forward, reload, the address,
+-- 
+2.43.0
+

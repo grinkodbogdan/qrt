@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <!-- page.html - the page Ladybird renders headless in the QEMU test (step L4): CSS layout
      (flex, grid), fonts through fontconfig, gradients, rounded corners, shadows, an SVG, a
-     canvas drawn by script, and a PNG image decoded by the ImageDecoder process. -->
+     canvas drawn by script, and a PNG image decoded by the ImageDecoder process. In the
+     window test, tapping the text field brings up the on-screen keyboard. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -21,6 +22,7 @@
 </style>
 </head>
 <body>
+<input id="q" placeholder="Type here" style="position: absolute; top: 14px; right: 24px; width: 260px; height: 44px; font-size: 18px; border-radius: 8px; border: 0; padding: 0 12px">
 <header><h1>Ladybird on QRT</h1><p>Rendered natively by LibWeb and Skia on the Tessera kernel</p></header>
 <main>
   <section class="card"><h2>Text</h2>

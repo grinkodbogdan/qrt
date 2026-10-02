@@ -71,6 +71,7 @@ static struct {
     float mx, my;                 /* the mouse pointer (logical coords of the shell's screen) */
     u32 mbtn;                     /* mouse buttons held */
     int tp_down, tp_lx, tp_ly, tp_moved, tp_drag, tp_hold, tp_acc;
+    int tp_two, tp_two_steps;     /* two fingers on the touch area: this gesture scrolls (steps so far) */
     u64 tp_t0, tp_last_tap;
 } sh;
 
@@ -978,7 +979,7 @@ static void draw_app(canvas_t *c) {
 
     rect_t area = app_area();
     gfx_clip(c, area);
-    sh.app->draw(c, area);
+    if (sh.app->draw) sh.app->draw(c, area);
     gfx_unclip(c);
 }
 
@@ -1758,6 +1759,8 @@ static void pad_draw(canvas_t *c) {
                     "Slide to move, tap to click", ui.text3);
     gfx_text_center(c, ui.small, (rect_t){ t.x + dp(8), cy + ui.title->line + dp(6) + ui.small->line, t.w - dp(16), ui.small->line },
                     "Tap, then slide to drag", ui.text3);
+    gfx_text_center(c, ui.small, (rect_t){ t.x + dp(8), cy + ui.title->line + dp(6) + 2 * ui.small->line, t.w - dp(16), ui.small->line },
+                    "Two fingers to scroll", ui.text3);
     /* the scroll strip */
     rect_t s = pad_scroll();
     gfx_rrect(c, s, dp(18), sh.pad_pressed == PO_SCROLL ? RGBA(255, 255, 255, 26) : RGBA(255, 255, 255, 12));
@@ -1820,6 +1823,26 @@ static void pad_pointer(const event_t *e) {
         if (e->type == EV_UP && in_rect(pad_rect(owner), e->x, e->y)) act = owner;
         break;
     case PO_TOUCH:
+        /* two fingers: the gesture scrolls, like a laptop's touchpad (fingers move the page) */
+        if (e->type != EV_UP && e->fingers >= 2 && !sh.tp_drag && !sh.tp_hold) {
+            if (!sh.tp_two) { sh.tp_two = 1; sh.tp_two_steps = 0; sh.tp_acc = 0; sh.tp_ly = e->y; sh.tp_down = 1; }
+            else {
+                sh.tp_acc += e->y - sh.tp_ly;
+                sh.tp_ly = e->y;
+                int step = dp(22);
+                while (sh.tp_acc >= step) { scroll--; sh.tp_acc -= step; }         /* fingers down: earlier content */
+                while (sh.tp_acc <= -step) { scroll++; sh.tp_acc += step; }
+                sh.tp_two_steps += scroll;
+            }
+            break;
+        }
+        if (sh.tp_two) {                                   /* back to one finger, or lifted: the gesture is over */
+            if (e->type == EV_UP) {
+                klog("shell: touchpad two-finger scroll, %d steps", sh.tp_two_steps);
+                sh.tp_two = 0; sh.tp_down = 0; sh.tp_last_tap = 0;
+            }
+            break;
+        }
         if (e->type == EV_DOWN) {
             sh.tp_down = 1; sh.tp_lx = e->x; sh.tp_ly = e->y; sh.tp_moved = 0; sh.tp_t0 = now;
             if (now - sh.tp_last_tap < 350 && !sh.tp_hold) { sh.tp_drag = 1; press = 1; }   /* tap, then slide: drag */
@@ -1879,7 +1902,7 @@ static void desk_enter(void) {
     sh.power_open = 0;
     sh.owner = OWN_NONE;
     sh.pad_owner = sh.pad_pressed = PO_NONE;
-    sh.tp_hold = sh.tp_drag = sh.tp_down = 0;
+    sh.tp_hold = sh.tp_drag = sh.tp_down = sh.tp_two = 0;
     osk_pin(1);
     relayout();
     sh.mx = ui.W / 2.0f; sh.my = ui.H / 2.0f;

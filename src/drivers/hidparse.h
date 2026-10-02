@@ -41,6 +41,8 @@ typedef struct {
     /* primary-contact tracking */
     int tracking, track_id, down;
     int x, y;            /* 0..65535 */
+    u8 tips[16];         /* contacts touching, by contact id (mod 16) */
+    int fingers;         /* how many there are */
     u32 reports, empty_reads, errors;
 } i2chid_t;
 

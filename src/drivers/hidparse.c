@@ -116,14 +116,24 @@ int hid_touch_update(i2chid_t *h, const u8 *rep, int len) {
         else if (f->usage == U_Y) { fg[f->finger].y = (i32)v; fg[f->finger].has_y = 1; }
     }
 
+    /* every contact the report speaks of: down or up (for the finger count) */
+    int before = h->fingers;
+    for (int i = 0; i < nfg; i++)
+        if (fg[i].has_x) h->tips[(fg[i].cid < 0 ? i : fg[i].cid) & 15] = (u8)fg[i].tip;
+    h->fingers = 0;
+    for (int i = 0; i < 16; i++) h->fingers += h->tips[i];
+    int count_changed = h->fingers != before;
+
     int pick = -1;
     if (h->tracking) {
         for (int i = 0; i < nfg; i++)
             if (fg[i].has_x && fg[i].cid == h->track_id) { pick = i; break; }
-        if (pick < 0) return 0;          /* report is about other fingers (hybrid mode) */
+        if (pick < 0) return count_changed;   /* report is about other fingers (hybrid mode) */
         if (!fg[pick].tip) {             /* our finger lifted */
             h->tracking = 0;
             h->down = 0;
+            for (int i = 0; i < 16; i++) h->tips[i] = 0;   /* the gesture is over */
+            h->fingers = 0;
             return 1;
         }
     } else {
@@ -136,7 +146,7 @@ int hid_touch_update(i2chid_t *h, const u8 *rep, int len) {
     i32 xr = h->xmax - h->xmin, yr = h->ymax - h->ymin;
     int nx = (int)((i64)(CLAMP(fg[pick].x, h->xmin, h->xmax) - h->xmin) * 65535 / (xr ? xr : 1));
     int ny = (int)((i64)(CLAMP(fg[pick].y, h->ymin, h->ymax) - h->ymin) * 65535 / (yr ? yr : 1));
-    int changed = !h->down || nx != h->x || ny != h->y;
+    int changed = !h->down || nx != h->x || ny != h->y || count_changed;
     h->down = 1; h->x = nx; h->y = ny;
     return changed;
 }

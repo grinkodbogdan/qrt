@@ -158,7 +158,7 @@ touch back up on its own:
 - **Settings → Kernel mode** switches between native and firmware for the
   next boot.
 
-On 32-bit UEFI (Venue 8 Pro 5830) QRT always runs in firmware mode.
+QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830 is gone.
 
 ## Native QRT programs (0.8.0)
 
@@ -350,9 +350,16 @@ from linux-firmware, under Intel's redistribution licence; see
 
 ## Browser
 
-**Browser** opens web pages over http:// and https://, as text and links.
-There are no images, CSS or scripts. Its purpose is reading simple pages
-and testing the network.
+Since 0.9.0 the dock's **Browser** is **Ladybird**, ported natively (not through the
+Linux layer): full HTML, CSS and JavaScript, images and fonts, rendered with Skia on the
+CPU, with OpenSSL checking certificates. Its window has back, forward, reload, an address
+bar and a keyboard button. A finger drag scrolls the page and a tap clicks. The
+on-screen keyboard opens when a text field takes the focus. In desk mode, the mouse and
+the two-finger touchpad scroll work too. See [docs/ladybird.md](docs/ladybird.md).
+
+The rest of this section describes the built-in text browser. It is the fallback when
+the image is built without Ladybird. It shows pages over http:// and https:// as text
+and links, with no images, CSS or scripts.
 
 - **Address bar.** Tap it and type an address. Anything that is not an
   address is searched on [FrogFind](http://frogfind.com/), a search engine
@@ -561,6 +568,8 @@ cursor. The tablet's screen becomes the controller:
 
 - a **touchpad**: slide to move the pointer, tap to click, tap and then slide
   to drag (lists scroll by dragging, as with a finger);
+  **slide two fingers to scroll** like a laptop touchpad (0.9.0; fingers down scrolls
+  down);
 - a **scroll strip** beside it, like a mouse wheel;
 - **Click**, **Hold to drag** (the button stays down until tapped again) and
   **Apps** (the launcher);
@@ -590,9 +599,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.8.0.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.9.0.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.8.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.9.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.
@@ -603,15 +612,14 @@ Your Windows install on the eMMC is not touched: QRT runs entirely from the stic
 
 You need:
 - `clang`, `lld`, `mtools`, `dosfstools` and `gdisk`
-- `qemu-system-x86`, `ovmf` and `ovmf-ia32`, for `make run` and `make test`
+- `qemu-system-x86` and `ovmf`, for `make run` and `make test`
 - `gcc`, `musl-tools` and `busybox-static`, for the Linux programs in `/bin`
 - Pillow, only to regenerate the fonts
 
 ```sh
-make            # build/BOOTIA32.EFI, build/BOOTX64.EFI, build/qrt.img
-make run64      # boot in QEMU on 64-bit UEFI (native mode, 4 cores)
-make run        # boot in QEMU on 32-bit UEFI (like a 5830)
-make test       # headless boot on both, scripted walkthrough, screenshots in build/shots/
+make            # build/BOOTX64.EFI, build/qrt.img
+make run        # boot in QEMU on 64-bit UEFI (native mode, 4 cores)
+make test       # headless boot, scripted walkthrough, screenshots in build/shots/
 make check      # host tests: HID parser, crypto vectors (WPA2 and TLS 1.3), WPA2 client vs a simulated AP,
                 #             URL/HTTP parsing, HTML reader
 make check-tls  # the TLS 1.3 client against a local OpenSSL server (needs openssl and python3)

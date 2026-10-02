@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.8.0"
+#define QRT_VERSION "0.9.0"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8
@@ -103,6 +103,7 @@ typedef struct {
     u16 scan;          /* EV_KEY */
     c16 ch;            /* EV_KEY */
     int from_mouse;    /* pointer came from a relative device (draw a cursor) */
+    int fingers;       /* EV_DOWN/MOVE/UP from a touchscreen: contacts down now (0: unknown, 1 finger) */
 } event_t;
 
 #define TOUCH_SWAP_XY 1

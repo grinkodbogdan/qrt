@@ -5,10 +5,10 @@ QMP, and save screenshots to build/shots/.
 
 usage: tools/qemu-test.py [ia32|x64] [--keep]    (exit status 0 = pass)
 """
-import json, os, socket, subprocess, sys, time
+import json, os, re, socket, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ARCH = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "ia32"
+ARCH = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "x64"
 SHOTS = os.path.join(ROOT, "build", "shots")
 W, H = 1280, 800
 
@@ -293,9 +293,14 @@ def native_test(q, shots):
         header = im.getpixel((700, 170))             # the test page's blue-purple header band
         if not (header[2] > 150 and header[0] < 160):
             raise RuntimeError("native: Ladybird's window did not show the page (pixel %s)" % (header,))
+        # the page's text field takes the focus: the on-screen keyboard comes up by itself
+        q.tap(1000, 181, settle=6)
+        if "window shows the keyboard" not in slog():
+            raise RuntimeError("native: a text field in Ladybird did not bring up the keyboard")
+        shots.append(q.shot("08-ladybird-keyboard"))
         q.tap(1141, 66, settle=4)                    # close it: QRT_EV_CLOSE, Ladybird exits
         q.tap(1226, 170, settle=2)                   # back to the Terminal
-        progs.append("Ladybird in the shell (dock, address bar, a page)")
+        progs.append("Ladybird in the shell (dock, address bar, a page, the keyboard for a text field)")
     q.keys(*"hello-window", settle=0.2)
     q.keys("ret", settle=1)
     for _ in range(40):
@@ -338,6 +343,15 @@ def desk_test(q, shots, dock):
         q.tap(*pad_key(ch), settle=0.3)
     q.tap(*pad_key("enter"), settle=1.5)
     q.drag([(400, 250)] + [(400 + i * 30, 250 + i * 8) for i in range(1, 10)], settle=0.5)   # the touchpad
+    # two fingers on the touchpad scroll (upper-case packets: two contacts)
+    q._pkt("D", 400, 200); time.sleep(0.1)
+    for i in range(1, 12):
+        q._pkt("M", 400, 200 + i * 20); time.sleep(0.05)
+    q._pkt("U", 400, 420); time.sleep(0.8)
+    serial = os.path.join(ROOT, "build", f"serial-{ARCH}.log")
+    m = re.findall(r"two-finger scroll, (-?\d+) steps", open(serial, errors="replace").read())
+    if not m or int(m[-1]) >= 0:
+        raise RuntimeError("desk: a two-finger drag down the touchpad did not scroll (%s)" % m)
     q.tap(600, 300, settle=0.8)                     # tap: a click on the monitor
     q.keys("powerlong", settle=1.0)
     shots.append(q.shot("22-desk-power"))

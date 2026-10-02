@@ -180,6 +180,7 @@ int ntouch_poll(event_t *out, int max) {
      * newest position; touch-down and lift are never dropped.
      */
     int pending_move = 0, mx = 0, my = 0;
+    static int fingers = 1;                          /* the count the last event carried */
     for (int i = 0; i < 64 && n < max - 2; i++) {    /* a report can emit two events */
         u8 rep[64];
         int len = i2chid_read(h, rep, sizeof rep);
@@ -204,11 +205,20 @@ int ntouch_poll(event_t *out, int max) {
         int x = (int)((i64)ax * (k.fb_w - 1) / 65535), y = (int)((i64)ay * (k.fb_h - 1) / 65535);
         if (k.touch_map & TOUCH_FLIP_X) x = (int)k.fb_w - 1 - x;
         if (k.touch_map & TOUCH_FLIP_Y) y = (int)k.fb_h - 1 - y;
-        if (h->down && was_down) { pending_move = 1; mx = x; my = y; continue; }
-        if (pending_move) { out[n++] = (event_t){ .type = EV_MOVE, .x = mx, .y = my }; pending_move = 0; }
-        out[n++] = (event_t){ .type = h->down ? EV_DOWN : EV_UP, .x = x, .y = y };
+        int f = h->fingers ? h->fingers : 1;
+        if (h->down && was_down) {
+            if (f != fingers) {                         /* a finger more or less: say so now */
+                out[n++] = (event_t){ .type = EV_MOVE, .x = x, .y = y, .fingers = f };
+                fingers = f; pending_move = 0;
+                continue;
+            }
+            pending_move = 1; mx = x; my = y; continue;
+        }
+        if (pending_move) { out[n++] = (event_t){ .type = EV_MOVE, .x = mx, .y = my, .fingers = fingers }; pending_move = 0; }
+        out[n++] = (event_t){ .type = h->down ? EV_DOWN : EV_UP, .x = x, .y = y, .fingers = h->down ? f : 0 };
+        fingers = h->down ? f : 1;
     }
-    if (pending_move && n < max) out[n++] = (event_t){ .type = EV_MOVE, .x = mx, .y = my };
+    if (pending_move && n < max) out[n++] = (event_t){ .type = EV_MOVE, .x = mx, .y = my, .fingers = fingers };
     return n;
 }
 

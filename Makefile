@@ -1,9 +1,9 @@
-# QRT - build the kernel as UEFI applications for both firmware flavours and
-# pack them into one bootable GPT disk image.
+# QRT - build the kernel as a 64-bit UEFI application and pack it into a bootable GPT
+# disk image (since 0.9.0 x86-64 only: the Venue 8 Pro 5855; the 32-bit build for the
+# 5830 can still be made with `make build/BOOTIA32.EFI`, but it is not tested or shipped).
 #
 #   make            -> build/qrt.img  (write this to a USB stick / microSD)
-#   make run        -> boot it in QEMU with 32-bit UEFI (like the Venue 8 Pro 5830)
-#   make run64      -> boot it in QEMU with 64-bit UEFI (like the Venue 8 Pro 5855)
+#   make run        -> boot it in QEMU with 64-bit UEFI (like the Venue 8 Pro 5855)
 #   make test       -> headless boot + scripted touch test + screenshots
 
 ifeq ($(origin CC),default)
@@ -49,7 +49,7 @@ OVMF64VAR := $(OVMF_DIR)/OVMF_VARS_4M.fd
 
 all: build/qrt.img
 
-efi: build/BOOTIA32.EFI build/BOOTX64.EFI
+efi: build/BOOTX64.EFI
 
 src/ui/fontdata.c: tools/mkfont.py
 	$(PYTHON) tools/mkfont.py assets $@
@@ -218,17 +218,13 @@ build/rootfs/bin/busybox:
 	    cp $(BUSYBOX) $@; cp tools/BUSYBOX.txt build/rootfs/bin/BUSYBOX.txt; \
 	else echo "no static busybox on this host (apt install busybox-static) - skipping"; touch $@; fi
 
-build/qrt.img: build/BOOTIA32.EFI build/BOOTX64.EFI tools/mkimage.sh $(wildcard image/*) $(wildcard firmware/*) $(ROOTFS)
-	tools/mkimage.sh $@ build/BOOTIA32.EFI build/BOOTX64.EFI build/rootfs
+build/qrt.img: build/BOOTX64.EFI tools/mkimage.sh $(wildcard image/*) $(wildcard firmware/*) $(ROOTFS)
+	tools/mkimage.sh $@ build/BOOTX64.EFI build/rootfs
 
-run: build/qrt.img
-	tools/run-qemu.sh ia32
-
-run64: build/qrt.img
+run run64: build/qrt.img
 	tools/run-qemu.sh x64
 
 test: build/qrt.img
-	$(PYTHON) tools/qemu-test.py ia32
 	$(PYTHON) tools/qemu-test.py x64
 
 check:

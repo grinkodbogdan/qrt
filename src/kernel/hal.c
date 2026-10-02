@@ -114,7 +114,7 @@ static int scale_axis(u64 v, u64 lo, u64 hi, u32 size) {
 /*
  * Touch injection over the console, for automated testing in emulators
  * whose firmware has no pointer drivers (stock OVMF).  A packet is
- *   Ctrl-T  <d|m|u>  <x> , <y>  ;
+ *   Ctrl-T  <d|m|u>  <x> , <y>  ;      (D, M, U: two fingers)
  * in physical pixels and becomes EV_DOWN / EV_MOVE / EV_UP exactly as if a
  * touchscreen had produced it.  Returns 1 while consuming a packet.
  */
@@ -139,7 +139,11 @@ static int inject_key(c16 ch, event_t *out) {
     if (buf[0] == 'v') { display_virtual(x, y); return 1; }   /* tests: plug a monitor of x by y (0: unplug) */
     out->x = CLAMP(x, 0, (int)k.fb_w - 1);
     out->y = CLAMP(y, 0, (int)k.fb_h - 1);
-    out->type = buf[0] == 'd' ? EV_DOWN : buf[0] == 'u' ? EV_UP : EV_MOVE;
+    /* upper case: the same with two fingers on the glass (D, M, U) */
+    char c = buf[0] >= 'A' && buf[0] <= 'Z' ? (char)(buf[0] + 32) : buf[0];
+    out->type = c == 'd' ? EV_DOWN : c == 'u' ? EV_UP : EV_MOVE;
+    out->fingers = buf[0] >= 'A' && buf[0] <= 'Z' ? 2 : 1;
+    if (out->type == EV_UP) out->fingers = 0;
     return 1;
 }
 
