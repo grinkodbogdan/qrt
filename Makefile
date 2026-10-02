@@ -78,7 +78,7 @@ BUSYBOX ?= /bin/busybox
 RUST_MUSL := $(shell d=$$(rustc --print sysroot 2>/dev/null)/lib/rustlib/x86_64-unknown-linux-musl; [ -d "$$d" ] && echo yes)
 RUST_HELLO := $(if $(RUST_MUSL),build/rootfs/bin/rust-hello)
 ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
-          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/hello-window $(RUST_HELLO) build/rootfs/lib64/ld-linux-x86-64.so.2
+          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/hello-window build/rootfs/bin/cxx-test $(RUST_HELLO) build/rootfs/lib64/ld-linux-x86-64.so.2
 
 # Dynamically linked programs and the host's glibc / libstdc++ they run with
 # (ld.so in /lib64, the libraries in /lib/x86_64-linux-gnu, as on Debian/Ubuntu)
@@ -117,6 +117,16 @@ build/sdk/.stamp: $(SDK_SRC)
 	touch $@
 
 sdk: build/sdk/.stamp
+
+# C++ for QRT: LLVM 20's libc++, libc++abi, libunwind, compiler-rt (sdk/build-cxx.sh)
+QRT_CXX := build/sdk/bin/qrt-c++
+build/sdk/.cxxstamp: sdk/build-cxx.sh build/sdk/.stamp
+	sh sdk/build-cxx.sh build/sdk
+	touch $@
+
+build/rootfs/bin/cxx-test: sdk/examples/cxx-test.cpp build/sdk/.cxxstamp
+	@mkdir -p $(dir $@)
+	$(QRT_CXX) -std=c++23 -O2 -s -o $@ $<
 
 build/rootfs/bin/native-test: sdk/examples/native-test.c build/sdk/.stamp
 	@mkdir -p $(dir $@)

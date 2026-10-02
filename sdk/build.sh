@@ -28,6 +28,12 @@ python3 "$here/patch_musl.py" "$here/syscalls.txt" "$out/src/musl"
   make DESTDIR="$sys" install >/dev/null &&
   cp syscall.public.h "$sys/usr/include/bits/syscall.h" )
 
+# Linux's UAPI headers (linux/, asm/, asm-generic/): QRT keeps Linux's interfaces (futex,
+# epoll, ioctl numbers...), and libc++ and many libraries include them.  Their __NR_ numbers
+# are Linux's, like the public <sys/syscall.h>: syscall() translates them.
+for d in linux asm-generic; do cp -r "/usr/include/$d" "$sys/usr/include/"; done
+cp -r /usr/include/x86_64-linux-gnu/asm "$sys/usr/include/asm"
+
 # 2. the QRT note, linked into crt1.o so that every program has it
 cat > "$out/src/qrtnote.S" <<'EOF'
     .section .note.qrt, "a", @note

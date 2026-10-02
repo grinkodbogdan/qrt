@@ -228,7 +228,7 @@ def native_test(q, shots):
     C test, the Rust one, and a window - tapped, typed into, drawn on, then closed."""
     serial = os.path.join(ROOT, "build", f"serial-{ARCH}.log")
     slog = lambda: open(serial, errors="replace").read()
-    progs = ["native-test"] + (["rust-hello"] if os.path.exists(os.path.join(ROOT, "build", "rootfs", "bin", "rust-hello")) else [])
+    progs = ["native-test", "cxx-test"] + (["rust-hello"] if os.path.exists(os.path.join(ROOT, "build", "rootfs", "bin", "rust-hello")) else [])
     for cmd in progs:
         q.keys(*cmd, settle=0.2)
         q.keys("ret", settle=8)
