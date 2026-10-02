@@ -12,6 +12,8 @@ i64  fd_install_obj(proc_t *p, kobj_t *o, int flags);     /* a new descriptor fo
 
 /* shared memory: memfd_create, /dev/shm (shm_open), MAP_SHARED */
 kobj_t *shm_new(const char *name);
+kobj_t *shm_wrap(u64 bytes, void **mem);                  /* contiguous kernel memory as a shared object */
+i64  map_shared(proc_t *p, kobj_t *o, u64 len);          /* map o read-write somewhere free (linux.c) */
 u64  shm_frame(kobj_t *o, u64 page);                      /* the frame of a page, allocated on first use (0: beyond the size) */
 u64  shm_size(kobj_t *o);
 i64  shm_truncate(kobj_t *o, u64 size);

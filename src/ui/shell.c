@@ -26,8 +26,10 @@ const u32 accent_palette[N_ACCENTS] = {
 };
 const char *accent_names[N_ACCENTS] = { "Blue", "Teal", "Green", "Orange", "Red", "Purple" };
 
-static const app_t *apps[] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_bluetooth, &app_settings, &app_system, &app_clock, &app_sketch };
-#define N_APPS ((int)ARRAY_LEN(apps))
+/* the built-in apps, then slots for the windows of native QRT programs (src/ui/clientwin.c) */
+static const app_t *apps[16] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_bluetooth, &app_settings, &app_system, &app_clock, &app_sketch };
+#define N_BUILTIN 9
+#define N_APPS 16
 
 typedef enum { VIEW_HOME, VIEW_APP } view_t;
 
@@ -724,7 +726,7 @@ static rect_t work_rect(void) { rect_t c = content_rect(); if (!sh.desk) c.h -= 
 /* ---- dock ------------------------------------------------------------------- */
 static const app_t *const pinned[] = { &app_files, &app_terminal, &app_browser, &app_wifi, &app_sketch, &app_settings };
 
-static int app_index(const app_t *a) { for (int i = 0; i < N_APPS; i++) if (apps[i] == a) return i; return -1; }
+static int app_index(const app_t *a) { for (int i = 0; i < N_APPS; i++) if (a && apps[i] == a) return i; return -1; }
 
 /* pinned apps first, then apps that were opened and are not pinned */
 static int dock_items(int *out) {
@@ -849,7 +851,7 @@ static const suggestion_t actions[] = {
 static int match_apps(int *out) {
     int n = 0;
     for (int i = 0; i < N_APPS; i++)
-        if (!sh.query[0] || str_icontains(apps[i]->name, sh.query) || str_icontains(apps[i]->blurb, sh.query)) out[n++] = i;
+        if (apps[i] && (!sh.query[0] || str_icontains(apps[i]->name, sh.query) || str_icontains(apps[i]->blurb, sh.query))) out[n++] = i;
     return n;
 }
 static int match_actions(int *out) {
@@ -981,7 +983,7 @@ static void draw_app(canvas_t *c) {
 }
 
 /* ---- open apps: thumbnails, closing, the overview grid ------------------------------ */
-static int cur_index(void) { for (int i = 0; i < N_APPS; i++) if (apps[i] == sh.app) return i; return -1; }
+static int cur_index(void) { for (int i = 0; i < N_APPS; i++) if (apps[i] && apps[i] == sh.app) return i; return -1; }
 
 /* a small picture of the app window, from the frame last shown */
 static void capture_thumb(void) {
@@ -1207,6 +1209,22 @@ void shell_go_home(void) {
     osk_hide();
     sh.dirty = 1;
 }
+
+/* the windows of native programs come and go as apps */
+int shell_app_add(const app_t *a) {
+    for (int i = N_BUILTIN; i < N_APPS; i++) if (!apps[i]) { apps[i] = a; sh.dirty = 1; return i; }
+    return -1;
+}
+void shell_app_remove(const app_t *a) {
+    int i = app_index(a);
+    if (i < 0) return;
+    if (sh.running & (1u << i)) close_app(i);
+    if (sh.thumbs[i].px) canvas_free(&sh.thumbs[i]);
+    apps[i] = NULL;
+    sh.dirty = 1;
+}
+void shell_app_open(const app_t *a) { int i = app_index(a); if (i >= 0) open_app(i); }
+int  shell_app_showing(const app_t *a) { return a && sh.app == a && sh.view == VIEW_APP && !sh.overview && !sh.launcher_open && !sh.locked; }
 
 void shell_keyboard(int show) {
     if (sh.desk) return;                         /* the controller's keyboard is always there */
@@ -2095,6 +2113,7 @@ void shell_main(void) {
         for (int i = 0; i < nr; i++) key_event(&rep[i]);
         if (sh.bench_pending) { sh.bench_pending = 0; run_benchmark(); }
         if (sh.keyboard_pending) { sh.keyboard_pending = 0; shell_keyboard(!osk_visible()); }
+        clientwin_poll();                              /* windows of native programs */
         fling_step();
         sh.app_damaged = 0;
         if (sh.view == VIEW_APP && sh.app->tick && sh.app->tick(now) && !sh.app_damaged) shell_damage(app_area());

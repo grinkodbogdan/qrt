@@ -1,31 +1,37 @@
-# Roadmap: Firefox, GPU drawing, audio and Bluetooth on Tessera
+# Roadmap: a native browser, GPU drawing, audio and Bluetooth on Tessera
 
-QRT keeps its own kernel (Tessera) and its own drivers. Linux programs run
-through Tessera's Linux system-call layer, not on a Linux kernel. Each goal
-below is a series of milestones, each one shipped and tested on its own.
-This page says where each one stands and does not promise dates.
+QRT keeps its own kernel (Tessera) and its own drivers. Each goal below is a series of
+milestones, each one shipped and tested on its own. This page says where each one stands
+and does not promise dates.
 
-## 1. Firefox through the Linux layer
+## 1. A modern browser, ported natively: Ladybird
 
-Firefox is a large, multi-process, multi-threaded C++/Rust program on top of
-glibc and GTK 3, which draws through Wayland or X11. "A custom port" here
-means the official Linux build (or one built with fewer dependencies), with
-QRT supplying the system calls and a display server.
+The browser is a **native QRT program**: built with the QRT SDK, on QRT's own system
+calls, with its window in the QRT shell. It is not a Linux binary in the Linux layer.
+The engine is Ladybird. Why Ladybird and not Firefox, what it needs, and the steps are
+in [ladybird.md](ladybird.md).
+
+| Step | What it brings | State |
+|---|---|---|
+| L1. Native programs | the native personality, the SDK (musl on QRT system calls, `qrt-cc`, `qrt-cargo`), `libqrt` windows, Rust std | **done in 0.8.0** ([sdk.md](sdk.md)) |
+| L2. C++ | LLVM 21; libc++, libc++abi, libunwind, compiler-rt for QRT | next |
+| L3. Ladybird's base | AK, LibCore, LibJS + ICU and friends: the `js` shell runs | |
+| L4. Rendering | LibWeb, LibGfx with Skia (CPU), FreeType, HarfBuzz, image libraries: a page rendered to PNG | |
+| L5. Network, processes | RequestServer (curl, OpenSSL), WebContent and ImageDecoder processes: a real HTTPS site loads | |
+| L6. The QRT front-end | tabs, address bar, touch, keyboard, desk mode; a bigger image read on demand: the default browser | |
+
+### What the Linux layer brought (and still serves)
+
+These were planned as the road for Firefox *through* the Linux layer. They are kernel
+services both personalities use, so the native browser builds on them.
 
 | Milestone | What it brings | State |
 |---|---|---|
-| 1. Dynamic programs and threads | `PT_INTERP` + ld.so, file-backed `mmap`/`MAP_FIXED`, `munmap` that frees ranges, `clone` threads, `futex` | **done in 0.6.0** |
-| 2. Processes | `fork`/`vfork` (copy of the address space), `execve`, `wait4`, pipes, `dup2`, `kill`; shells and pipelines work | **done in 0.6.3**; signal handlers **done in 0.7.0** |
-| 3. Memory | page protections (`mprotect`, W^X for the JS JIT), a user address space larger than 1 GiB (Firefox reserves several GiB), shared memory (`memfd_create`, `MAP_SHARED`, `/dev/shm`) | **done in 0.7.0** (448 GiB of `mmap` space, NX, `PROT_NONE` reservations, `mremap`) |
-| 4. Event loops | `epoll`, `eventfd`, `timerfd`, `signalfd`, Unix sockets with `SCM_RIGHTS` (Firefox's processes talk over them), `socketpair`, `listen`/`accept` | **done in 0.7.0** |
-| 5. Files | a writable file system that survives reboots (native eMMC/SD driver), `/proc/self/maps`, `/sys` entries glibc and GTK read, fonts and fontconfig files | |
-| 6. A display server | a minimal Wayland compositor inside the QRT shell: `wl_compositor`, `xdg_shell`, `wl_shm` buffers composited by the GPU, `wl_seat` for touch and keyboard; each Linux window becomes a QRT window | |
-| 7. The GTK stack | glib, cairo, pango, harfbuzz, fontconfig, GTK 3 with its Wayland backend; a GTK demo runs | |
-| 8. Firefox | Firefox with `MOZ_ENABLE_WAYLAND=1` and software WebRender; then the GPU (milestone 2 of section 2) for WebRender | |
-
-The image grows with these: Firefox and the GTK stack are about 250 MB, so
-the image will need to grow from 64 MB, and the files will have to be read
-from the stick on demand instead of being copied into RAM at boot.
+| Dynamic programs and threads | `PT_INTERP` + ld.so, file-backed `mmap`/`MAP_FIXED`, `munmap`, `clone` threads, `futex` | **done in 0.6.0** |
+| Processes | `fork`/`vfork`, `execve`, `wait4`, pipes, `dup2`, `kill`; shells and pipelines | **done in 0.6.3**, signal handlers **0.7.0** |
+| Memory | page protections (NX, `mprotect`, W^X for a JIT), 448 GiB of address space, shared memory (`memfd_create`, `MAP_SHARED`, `/dev/shm`) | **done in 0.7.0** |
+| Event loops | `epoll`, `eventfd`, `timerfd`, `signalfd`, Unix sockets with `SCM_RIGHTS`, `socketpair`, `listen`/`accept` | **done in 0.7.0** |
+| Files | a writable file system that survives reboots (eMMC/SD or USB storage), files read on demand | needed for L6 |
 
 ## 2. The GPU draws everything
 
@@ -35,7 +41,7 @@ from the stick on demand instead of being copied into RAM at boot.
 | Scrolling moves pixels instead of redrawing | **done in 0.5.9** (CPU) |
 | GPU fills, rounded rectangles and blits with alpha blending, batched per frame | next |
 | Text from a glyph atlas texture; the wallpaper and app windows as textures; transitions blended on the GPU | |
-| Wayland client buffers composited as textures (feeds section 1, milestone 6) | |
+| Native windows composited as textures (the browser's pages) | |
 | A Mesa-compatible path for Linux programs (`/dev/dri`, i915 ioctls) | long term |
 | External monitors on the USB-C port (DP Alt Mode): modeset of pipe B/C, mirroring scaled by the GPU | **0.6.4**, works on the tablet |
 | Desk mode: the shell on the monitor, the tablet as its touchpad and keyboard; USB mice | **0.6.5** |
@@ -56,7 +62,7 @@ is set up register by register over I2C.
 | Codec power-up, headphone and speaker paths and volume over the DesignWare I2C driver (the volume keys already drive a mock control) | next |
 | SST DSP: load the firmware into its memory, the IPC mailbox, start an SSP (I2S) port to the codec | |
 | PCM playback: a ring buffer the DSP reads by DMA, a beep from the shell, then sounds | |
-| `/dev/snd` (ALSA PCM ioctls) for Linux programs, which Firefox needs for sound | |
+| A sound API for native programs (the browser's audio), and `/dev/snd` for Linux ones | |
 
 ## 4. Bluetooth (Intel Wireless 8260)
 

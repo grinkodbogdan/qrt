@@ -46,6 +46,7 @@ typedef struct {
     u64 cap;                                 /* entries in frames */
     char name[64];
     int named;                               /* listed under /dev/shm (holds a reference) */
+    void *ext;                               /* shm_wrap: the frames are this kernel allocation's */
 } shm_t;
 
 #define MAX_NAMED 64
@@ -61,7 +62,8 @@ kobj_t *shm_new(const char *name) {
 
 static void shm_free(kobj_t *o) {
     shm_t *s = (shm_t *)o;
-    for (u64 i = 0; i < s->cap; i++) if (s->frames[i]) pmm_free(s->frames[i]);
+    if (s->ext) kfree(s->ext);
+    else for (u64 i = 0; i < s->cap; i++) if (s->frames[i]) pmm_free(s->frames[i]);
     if (s->frames) kfree(s->frames);
     kfree(s);
 }
@@ -79,6 +81,21 @@ static int shm_reserve(shm_t *s, u64 pages) {
     return 1;
 }
 
+/* bytes of contiguous kernel memory, page aligned, shareable with programs (window
+ * buffers: the shell reads the pixels where the program draws them); freed with the object */
+kobj_t *shm_wrap(u64 bytes, void **mem) {
+    u64 pages = (bytes + PAGE - 1) / PAGE;
+    u8 *raw = kalloc((usize)(pages + 1) * PAGE);
+    u8 *al = (u8 *)(((usize)raw + PAGE - 1) & ~(usize)(PAGE - 1));
+    shm_t *s = (shm_t *)shm_new("window");
+    s->ext = raw;
+    shm_reserve(s, pages);
+    for (u64 i = 0; i < pages; i++) s->frames[i] = (u64)(usize)al + i * PAGE;
+    s->size = pages * PAGE;
+    *mem = al;
+    return &s->h;
+}
+
 u64 shm_frame(kobj_t *o, u64 page) {
     shm_t *s = (shm_t *)o;
     /* a mapping may run past the end of the object (Linux: SIGBUS); give it a page anyway */
@@ -89,6 +106,7 @@ u64 shm_frame(kobj_t *o, u64 page) {
 
 i64 shm_truncate(kobj_t *o, u64 size) {
     shm_t *s = (shm_t *)o;
+    if (s->ext) return size <= s->size ? 0 : -EPERM;         /* a window buffer has its size */
     u64 pages = (size + PAGE - 1) / PAGE;
     if (!shm_reserve(s, pages)) return -ENOMEM;
     if (size < s->size) {

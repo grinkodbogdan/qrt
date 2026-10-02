@@ -160,6 +160,26 @@ touch back up on its own:
 
 On 32-bit UEFI (Venue 8 Pro 5830) QRT always runs in firmware mode.
 
+## Native QRT programs (0.8.0)
+
+QRT has its own kind of program now, built with the **QRT SDK** (`sdk/`, `make sdk`):
+- musl as the C library, compiled for QRT's own system-call numbers (`sdk/syscalls.txt`);
+- `libqrt` for windows, input and drawing;
+- `qrt-cc` for C, `qrt-cargo` for Rust.
+
+A native program carries a `QRT` ELF note, and the kernel runs it with the native
+personality, not as a Linux binary. Its windows are apps in the shell: they appear in the
+dock and the overview, follow rotation, the keyboard and desk mode, and get touches,
+mouse clicks and keys as events.
+
+`/bin` has three examples:
+- `native-test` (C library),
+- `rust-hello` (Rust's standard library),
+- `hello-window` (a window).
+
+The QEMU test runs all three. This is step L1 of porting a modern browser, **Ladybird**,
+natively: see [docs/sdk.md](docs/sdk.md) and [docs/ladybird.md](docs/ladybird.md).
+
 ## Linux programs
 
 Open **Terminal**. It runs x86-64 Linux ELF programs, unmodified, through
@@ -214,7 +234,7 @@ files run as busybox applets), `wait4`, `pipe`/`pipe2`, `dup`/`dup2`/`dup3`,
 `ls /bin | wc -l` or `cat /proc/cpuinfo > /tmp/cpu; wc -l /tmp/cpu` work.
 `procs` tests fork, pipes, exec, `posix_spawn`, `popen` and `kill`.
 
-Since 0.7.0 (Firefox milestones 2 to 4, see [docs/roadmap.md](docs/roadmap.md)):
+Since 0.7.0 (kernel services that native programs use too, see [docs/roadmap.md](docs/roadmap.md)):
 
 - **Signals** (`src/arch/x64/signal.c`): `rt_sigaction` with and without
   `SA_SIGINFO`, per-thread masks, pending sets, `sigaltstack`, `kill`,
@@ -253,8 +273,8 @@ Writing to `/dev/kmsg` puts a line in QRT's boot log (System Monitor → Log).
 
 Not supported yet:
 - IPv6
-- keyboard input to programs, and any graphical program (a Wayland compositor
-  is milestone 6)
+- keyboard input to Linux programs, and graphical Linux programs (graphical programs
+  are native QRT programs now: see above)
 - writes that survive a reboot (milestone 5)
 
 ## Wi-Fi and networking
@@ -566,9 +586,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.7.0.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.8.0.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.7.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.8.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

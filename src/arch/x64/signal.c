@@ -174,7 +174,7 @@ static int restartable(u64 nr) {
 }
 
 /* nr: the system call that is returning (ret its result), or ~0 after an interrupt */
-void sig_deliver_pending(proc_t *p, frame_t *f, u64 nr, i64 *ret) {
+void sig_deliver_pending(proc_t *p, frame_t *f, u64 nr, u64 entry_nr, i64 *ret) {
     thread_t *t = thread_current();
     u64 pend = sig_deliverable(p);
     while (pend) {
@@ -186,7 +186,7 @@ void sig_deliver_pending(proc_t *p, frame_t *f, u64 nr, i64 *ret) {
         if (h == 1 || (h == 0 && default_ignored(s))) continue;
         if (h == 0) die(p, s);                                           /* default: end the process */
         if (ret && *ret == -EINTR && nr != ~0ull && restartable(nr) && (p->sa[s].flags & SA_RESTART)) {
-            f->rax = nr;                                                 /* run the call again after the handler */
+            f->rax = entry_nr;                                           /* run the call again after the handler */
             f->rip -= 2;
         }
         if (!setup_frame(p, f, s, &info, 0, 0)) die(p, 11);
@@ -200,7 +200,7 @@ static void on_user_return(frame_t *f) {
     if (!p || p->killed || p->exited) return;
     thread_t *t = thread_current();
     if (!t || t->state == T_DEAD) return;
-    if (sig_deliverable(p)) sig_deliver_pending(p, f, ~0ull, NULL);
+    if (sig_deliverable(p)) sig_deliver_pending(p, f, ~0ull, ~0ull, NULL);
 }
 
 /* a CPU exception in user mode: the program's handler, if it has one that is not blocked */

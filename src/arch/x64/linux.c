@@ -11,6 +11,7 @@
 #include "proc.h"
 #include "lsock.h"
 #include "lfile.h"
+#include "native_sys.h"
 #include "../../net/crypto.h"
 #include "mm.h"
 
@@ -459,6 +460,14 @@ static i64 do_mmap(proc_t *p, u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u6
     return (i64)va;
 }
 
+i64 map_shared(proc_t *p, kobj_t *o, u64 len) {
+    len = (len + PAGE - 1) & ~(PAGE - 1);
+    u64 va = proc_find_free(p, len);
+    if (!va) return -ENOMEM;
+    if (proc_add_vma_prot(p, va, va + len, PROT_READ | PROT_WRITE, o, 0)) return -ENOMEM;
+    return (i64)va;
+}
+
 /* mremap: shrink in place, grow in place when the range after is free, else move the pages */
 static i64 do_mremap(proc_t *p, u64 old, u64 olen, u64 nlen, u64 flags, u64 naddr) {
     if ((old & (PAGE - 1)) || !nlen || (flags & ~7ull)) return -EINVAL;
@@ -612,9 +621,9 @@ static i64 do_uname(proc_t *p, u64 buf) {
     if (!UOK(buf, 65 * 6)) return -EFAULT;
     char *u = (char *)(usize)buf;
     memset(u, 0, 65 * 6);
-    strlcpy(u + 0, "Linux", 65);                        /* the ABI we speak */
+    strlcpy(u + 0, p->native ? "QRT" : "Linux", 65);    /* the ABI we speak */
     strlcpy(u + 65, k.is_venue ? "venue" : "qrt", 65);
-    strlcpy(u + 130, "6.1.0-qrt", 65);                  /* static glibc refuses kernels < 3.2 */
+    strlcpy(u + 130, p->native ? QRT_VERSION : "6.1.0-qrt", 65);   /* (static glibc refuses kernels < 3.2) */
     strlcpy(u + 195, "#1 QRT " QRT_VERSION " (Tessera)", 65);
     strlcpy(u + 260, "x86_64", 65);
     strlcpy(u + 325, "(none)", 65);
@@ -746,10 +755,19 @@ static i64 unix_mmsg(proc_t *p, ufile_t *f, u64 vec, u32 n, int flags, int send)
 void syscall_dispatch(frame_t *f) {
     proc_t *p = proc_current();
     u64 nr = f->rax, a0 = f->rdi, a1 = f->rsi, a2 = f->rdx, a3 = f->r10, a4 = f->r8, a5 = f->r9;
+    u64 entry_nr = nr;
     i64 r = -ENOSYS;
     thread_t *me = thread_current();
     p->syscalls++;
     me->in_sys = 1;
+    /* native QRT programs: QRT's own numbers (sdk/syscalls.txt); the QRT-only calls,
+     * and the rest mapped onto the kernel service with the same semantics */
+    if (p->native) {
+        if (nr >= 1024) {
+            r = qrt_call(p, nr, a0, a1, a2, a3, a4);
+            nr = ~0ull;
+        } else nr = nr <= QRT_NR_LINUX_TOP ? qrt_to_linux[nr] : 0xffff;
+    }
     switch (nr) {
     case 0:  r = do_read(p, (int)a0, a1, a2); break;
     case 1:  r = do_write(p, (int)a0, a1, a2); break;
@@ -933,7 +951,12 @@ void syscall_dispatch(frame_t *f) {
     case 273: r = 0; break;                             /* set_robust_list: accepted */
     case 334: r = -ENOSYS; break;                       /* rseq: glibc copes */
     case 16:                                            /* ioctl */
-        if (fdp(p, a0) && p->fd[a0].type == F_OBJ) {
+        if (fdp(p, a0) && p->fd[a0].type == F_TTY && !(p->fd[a0].flags & KMSG) && (a1 == 0x5401 || a1 == 0x5413)) {
+            /* the Terminal is a terminal: TCGETS (so isatty() is true and stdout is line-buffered), TIOCGWINSZ */
+            if (a1 == 0x5401 && UOK(a2, 60)) { memset((void *)(usize)a2, 0, 60); ((u32 *)(usize)a2)[1] = 5; ((u32 *)(usize)a2)[3] = 0x8a3b; r = 0; }
+            else if (a1 == 0x5413 && UOK(a2, 8)) { u16 *ws = (u16 *)(usize)a2; ws[0] = 40; ws[1] = 100; ws[2] = ws[3] = 0; r = 0; }
+            else r = -EFAULT;
+        } else if (fdp(p, a0) && p->fd[a0].type == F_OBJ) {
             if (a1 == 0x541b && UOK(a2, 4)) { *(i32 *)(usize)a2 = is_unix(p, a0) ? (i32)unix_available(&p->fd[a0]) : 0; r = 0; }
             else if (a1 == 0x5421 && UOK(a2, 4)) { p->fd[a0].flags = (p->fd[a0].flags & ~04000) | (*(i32 *)(usize)a2 ? 04000 : 0); r = 0; }
             else if (a1 == 0x5451 || a1 == 0x5450) { p->fd[a0].cloexec = a1 == 0x5451; r = 0; }          /* FIOCLEX, FIONCLEX */
@@ -1113,10 +1136,11 @@ void syscall_dispatch(frame_t *f) {
     case 111: case 121: case 124: r = p->pid; break;            /* getpgrp, getpgid, getsid */
     case 60: me->in_sys = 0; proc_thread_exit((int)(a0 & 0xff)); break;   /* exit: this thread */
     case 231: me->in_sys = 0; proc_exit((int)(a0 & 0xff)); break;         /* exit_group */
-    default: log_unknown(nr); break;
+    case ~0ull: break;                                          /* a QRT-only call, already done */
+    default: log_unknown(nr == 0xffff ? entry_nr | 0x10000 : nr); break;   /* 0x1xxxx: a native number */
     }
     f->rax = (u64)r;
     me->in_sys = 0;
     if (p->killed) proc_thread_exit(137);                       /* the process is going (Stop, exit_group) */
-    sig_deliver_pending(p, f, nr, &r);                          /* a handler to run (or a call to restart) */
+    sig_deliver_pending(p, f, nr, entry_nr, &r);                /* a handler to run (or a call to restart) */
 }

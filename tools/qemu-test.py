@@ -223,6 +223,36 @@ def pad_key(label, s=800 / 680):
     raise KeyError(label)
 
 
+def native_test(q, shots):
+    """Native QRT programs (built with the SDK: musl on QRT's own system calls): the
+    C test, the Rust one, and a window - tapped, typed into, drawn on, then closed."""
+    serial = os.path.join(ROOT, "build", f"serial-{ARCH}.log")
+    slog = lambda: open(serial, errors="replace").read()
+    progs = ["native-test"] + (["rust-hello"] if os.path.exists(os.path.join(ROOT, "build", "rootfs", "bin", "rust-hello")) else [])
+    for cmd in progs:
+        q.keys(*cmd, settle=0.2)
+        q.keys("ret", settle=8)
+    for cmd in progs:
+        if not any(f"proc: {cmd} (pid" in l and "exited with 0," in l for l in slog().splitlines()):
+            raise RuntimeError(f"native: {cmd} did not exit cleanly\n  " + "\n  ".join(l for l in slog().splitlines() if "native" in l or "rust" in l)[-1200:])
+    q.keys(*"hello-window", settle=0.2)
+    q.keys("ret", settle=1)
+    for _ in range(40):
+        if "opened window" in slog():
+            break
+        time.sleep(0.5)
+    time.sleep(1.5)
+    q.tap(122, 368, settle=0.6)                    # the program's "Tap me" button
+    q.keys("h", "i", settle=0.8)
+    q.drag([(200 + i * 40, 600 + (i % 4) * 25) for i in range(15)], settle=1)
+    shots.append(q.shot("05-native-window"))
+    q.tap(1141, 66, settle=2.5)                    # close: the program gets QRT_EV_CLOSE and exits
+    if not any("proc: hello-window (pid" in l and "exited with 0," in l for l in slog().splitlines()):
+        raise RuntimeError("native: hello-window did not close cleanly")
+    print("native: %s and a window (tap, keys, drawing, close) work" % " and ".join(progs))
+    q.tap(1226, 170, settle=1.5)                   # back to the Terminal
+
+
 def desk_test(q, shots, dock):
     """A USB mouse (QEMU's usb-tablet, an absolute pointer) clicks a dock icon; then a
     virtual monitor is plugged in (QEMU has no DisplayPort): the shell moves to it and
@@ -316,6 +346,7 @@ def default_script(q, shots):
                 print(f"FAIL: {prog} did not exit cleanly\n  " + "\n  ".join(lines))
                 sys.exit(1)
         print("linux: dynhello, threads, cxx, procs, signals, memory and events ran and exited with 0")
+        native_test(q, shots)
         # the USB keyboard through QRT's own xHCI driver: type "hello" + Enter
         for k in ["h", "e", "l", "l", "o", "ret"]:
             q.cmd("send-key", keys=[{"type": "qcode", "data": k}])

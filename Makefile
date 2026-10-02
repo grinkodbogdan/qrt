@@ -16,7 +16,7 @@ HOSTCC  ?= gcc
 SRC := src/kernel/kernel.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
        src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c src/drivers/backlight.c src/drivers/audio.c src/drivers/e1000.c \
        src/drivers/iwm/iwm.c src/drivers/i915/gpu.c src/drivers/i915/display.c src/drivers/usb/xhci.c src/drivers/bt/hci.c src/drivers/bt/btusb.c src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
-       src/ui/gfx.c src/ui/shell.c src/ui/fontdata.c \
+       src/ui/gfx.c src/ui/shell.c src/ui/clientwin.c src/ui/fontdata.c \
        src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c \
        src/apps/settings.c src/apps/life.c src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/apps/browser.c src/apps/bluetooth.c src/apps/html.c src/ui/osk.c \
        src/drivers/dwi2c.c src/drivers/i2chid.c src/drivers/hidparse.c src/drivers/hidmouse.c src/drivers/touch.c
@@ -33,7 +33,7 @@ LDFLAGS := -subsystem:efi_application -entry:efi_main -nodefaultlib
 
 # the native kernel (ExitBootServices, own MM/interrupts/SMP) is 64-bit only
 X64_SRC := src/arch/x64/mm.c src/arch/x64/cpu.c src/arch/x64/apic.c src/arch/x64/native.c \
-           src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c src/arch/x64/lsock.c src/arch/x64/signal.c src/arch/x64/lfile.c src/arch/x64/unix.c
+           src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c src/arch/x64/lsock.c src/arch/x64/signal.c src/arch/x64/lfile.c src/arch/x64/unix.c src/arch/x64/qrtcall.c
 X64_ASM := src/arch/x64/isr.S src/arch/x64/entry.S src/arch/x64/trampoline.S
 
 IA32_OBJ := $(SRC:src/%.c=build/ia32/%.o)
@@ -74,8 +74,11 @@ build/BOOTX64.EFI: $(X64_OBJ)
 
 # Linux programs shipped in /bin (run by the native kernel's Linux layer)
 BUSYBOX ?= /bin/busybox
+# Rust for QRT (needs: rustup target add x86_64-unknown-linux-musl); skipped without it
+RUST_MUSL := $(shell d=$$(rustc --print sysroot 2>/dev/null)/lib/rustlib/x86_64-unknown-linux-musl; [ -d "$$d" ] && echo yes)
+RUST_HELLO := $(if $(RUST_MUSL),build/rootfs/bin/rust-hello)
 ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
-          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/lib64/ld-linux-x86-64.so.2
+          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/hello-window $(RUST_HELLO) build/rootfs/lib64/ld-linux-x86-64.so.2
 
 # Dynamically linked programs and the host's glibc / libstdc++ they run with
 # (ld.so in /lib64, the libraries in /lib/x86_64-linux-gnu, as on Debian/Ubuntu)
@@ -105,6 +108,31 @@ build/rootfs/bin/signals: tests/linux/signals.c
 build/rootfs/bin/memory: tests/linux/memory.c
 	@mkdir -p $(dir $@)
 	$(HOSTCC) -O2 -s -o $@ $<
+
+# The QRT SDK (musl for QRT's native system calls, libqrt, qrt-cc) and native programs
+SDK_SRC := sdk/build.sh sdk/patch_musl.py sdk/syscalls.txt sdk/musl-1.2.6.tar.gz sdk/libqrt/qrt.c sdk/libqrt/qrt.h sdk/libqrt/genfont.py
+QRT_CC := build/sdk/bin/qrt-cc
+build/sdk/.stamp: $(SDK_SRC)
+	sh sdk/build.sh build/sdk
+	touch $@
+
+sdk: build/sdk/.stamp
+
+build/rootfs/bin/native-test: sdk/examples/native-test.c build/sdk/.stamp
+	@mkdir -p $(dir $@)
+	$(QRT_CC) -O2 -s -o $@ $<
+
+build/rootfs/bin/hello-window: sdk/examples/hello-window.c build/sdk/.stamp
+	@mkdir -p $(dir $@)
+	$(QRT_CC) -O2 -s -o $@ $< -lqrt
+
+build/rootfs/bin/rust-hello: sdk/examples/rust-hello/src/main.rs sdk/examples/rust-hello/Cargo.toml build/sdk/.stamp
+	@mkdir -p $(dir $@)
+	cd sdk/examples/rust-hello && CARGO_TARGET_DIR=$(CURDIR)/build/rust-hello $(CURDIR)/build/sdk/bin/qrt-cargo build --release -q
+	cp build/rust-hello/x86_64-unknown-linux-musl/release/rust-hello $@
+
+src/arch/x64/native_sys.h: sdk/syscalls.txt tools/gen_native_sys.py
+	$(PYTHON) tools/gen_native_sys.py $< $@
 
 build/rootfs/bin/events: tests/linux/events.c
 	@mkdir -p $(dir $@)

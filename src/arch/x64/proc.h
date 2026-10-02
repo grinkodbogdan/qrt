@@ -81,6 +81,7 @@ typedef struct proc {
     u64 sig_pending;              /* signals for any thread */
     ksiginfo_t sig_info[NSIG];    /* who sent each pending signal */
     u64 alarm_us, alarm_every_us; /* ITIMER_REAL: next SIGALRM (k_now_us), period */
+    int native;                   /* a native QRT program (QRT system-call numbers), not a Linux one */
 } proc_t;
 
 #define USER_STACK_TOP   USER_TOP
@@ -121,6 +122,10 @@ int     proc_interrupted(proc_t *p);              /* a blocking call should stop
 proc_t *proc_at(int i);                           /* every process ever started, NULL past the end */
 thread_t *proc_thread(proc_t *p, int tid);        /* a thread of p by tid (0: any live one) */
 
+/* qrtcall.c: the system calls only native QRT programs have (windows, input) */
+i64     qrt_call(proc_t *p, u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4);
+void    qrt_proc_gone(proc_t *p);                 /* its windows close */
+
 /* signal.c */
 void    sig_init(void);
 i64     sig_action(proc_t *p, int sig, u64 act, u64 old, u64 size);
@@ -135,7 +140,7 @@ i64     sig_setitimer(proc_t *p, int which, u64 nv, u64 ov);
 i64     sig_getitimer(proc_t *p, int which, u64 cur);
 i64     sig_alarm(proc_t *p, u64 seconds);
 void    sig_post(proc_t *p, thread_t *t, int sig, int code, int pid, u64 addr);  /* t NULL: the process */
-void    sig_deliver_pending(proc_t *p, frame_t *f, u64 nr, i64 *ret);         /* before returning to user mode */
+void    sig_deliver_pending(proc_t *p, frame_t *f, u64 nr, u64 entry_nr, i64 *ret);   /* before returning to user mode; entry_nr: what RAX held */
 int     sig_fault(proc_t *p, frame_t *f);                                     /* 1: a handler takes the fault */
 int     sig_take(proc_t *p, u64 mask, ksiginfo_t *info);                      /* dequeue one of mask (signalfd, sigtimedwait) */
 u64     sig_deliverable(proc_t *p);

@@ -324,7 +324,19 @@ static void put_user(proc_t *p, u64 va, const void *src, u64 len) {
     }
 }
 
-typedef struct { u64 entry, phdr, hi, base; u16 phnum; char interp[96]; } image_t;
+typedef struct { u64 entry, phdr, hi, base; u16 phnum; char interp[96]; int native; } image_t;
+
+/* a native QRT program carries a note named "QRT" (type 1), put there by the SDK's crt */
+static int has_qrt_note(const u8 *img, u64 size, const phdr_t *ph) {
+    u64 o = ph->offset, end = ph->offset + ph->filesz;
+    if (end > size) return 0;
+    while (o + 12 <= end) {
+        u32 nsz = *(const u32 *)(img + o), dsz = *(const u32 *)(img + o + 4), type = *(const u32 *)(img + o + 8);
+        if (nsz == 4 && type == 1 && o + 16 <= end && !memcmp(img + o + 12, "QRT", 4)) return 1;
+        o += 12 + ((nsz + 3) & ~3u) + ((dsz + 3) & ~3u);
+    }
+    return 0;
+}
 
 /* Load one ELF image: an executable (ET_EXEC at its own addresses, ET_DYN at
  * USER_PIE_BASE) or, with base != 0, a shared object such as ld.so. */
@@ -346,6 +358,7 @@ static int load_elf(proc_t *p, const u8 *img, u64 size, u64 base, image_t *out, 
             out->interp[n] = 0;
         }
         if (ph->type == 6) out->phdr = base + ph->vaddr;          /* PT_PHDR */
+        if (ph->type == 4 && has_qrt_note(img, size, ph)) out->native = 1;   /* PT_NOTE */
         if (ph->type != 1) continue;
         u64 va = base + ph->vaddr, end = va + ph->memsz;
         if (!range_user(va & ~(PAGE - 1), end) || ph->offset + ph->filesz > size) { fmt(err, cap, "segment at %llx does not fit", va); return 0; }
@@ -470,6 +483,7 @@ proc_t *proc_spawn(const char *path, int argc, const char *const *argv, term_t *
         if (ok) { p->interp_base = ibase; p->start = ii.entry; }
     } else p->start = im.entry;
     if (!ok) { as_destroy(p->cr3); kfree(p); return NULL; }
+    p->native = im.native;
     p->entry = im.entry;
     p->brk_start = p->brk = (im.hi + PAGE - 1) & ~(PAGE - 1);
     proc_add_vma(p, p->brk_start, p->brk);
@@ -519,6 +533,7 @@ static i64 proc_fork(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 
     strlcpy(c->cwd, p->cwd, sizeof c->cwd);
     c->term = p->term;
     c->entry = p->entry; c->start = p->start; c->interp_base = p->interp_base;
+    c->native = p->native;
     c->brk_start = p->brk_start; c->brk = p->brk; c->mmap_next = p->mmap_next;
     memcpy(c->vma, p->vma, sizeof c->vma);
     c->nvma = p->nvma;
@@ -596,6 +611,7 @@ static void teardown(proc_t *p, int code) {
     as_destroy(p->cr3);
     p->exit_code = code;
     p->exited = 1;
+    qrt_proc_gone(p);
     notify_parent(p);
     klog("proc: %s (pid %d) exited with %d, %llu system calls", p->name, p->pid, code, p->syscalls);
     p->term->serial++;
@@ -758,6 +774,7 @@ i64 proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, ch
         return -8;
     }
     for (int i = 0; i < old_nvma; i++) if (old_vma[i].obj) kobj_put(old_vma[i].obj);
+    p->native = im.native;                                     /* the new image decides the personality */
     kfree(old_vma);
     for (int i = 0; i < NSIG; i++) if (p->sa[i].handler > 1) p->sa[i] = (ksigaction_t){ 0 };   /* caught -> default; ignored stays */
     me->alt_sp = me->alt_size = 0; me->alt_flags = 0;

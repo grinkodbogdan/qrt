@@ -35,6 +35,11 @@ void shell_redraw(void);                /* redraw the whole screen */
 void shell_damage(rect_t r);            /* redraw only r (logical coords); call from event/tick */
 rect_t shell_app_area(void);            /* where the open app draws */
 void shell_keyboard(int show);          /* show/hide the on-screen keyboard (call when a text field is tapped) */
+int  shell_app_add(const app_t *a);     /* a native program's window joins the apps (slot, or -1) */
+void shell_app_remove(const app_t *a);
+void shell_app_open(const app_t *a);
+int  shell_app_showing(const app_t *a); /* it is the app on screen */
+void clientwin_poll(void);              /* clientwin.c: once a frame, on the shell thread */
 const char *shell_net_status(void);     /* one line about the network for the home screen, or NULL */
 /* Wall-clock time of the frame being drawn.  draw() callbacks may run on any
  * CPU core, so they must use this instead of k_walltime() and must not
