@@ -26,10 +26,15 @@ static int workers;
 
 int native_smp_workers(void) { return workers; }
 
-static void work(void) {
-    smp_job_t job = J.job;
-    void *arg = J.arg;
-    int count = J.count;
+/* The job is handed over under a small lock: the boot core publishes a job only when no
+ * worker is inside one, and a worker takes a consistent snapshot (job, argument, count)
+ * and marks itself active in the same step.  Without it a worker that woke late could
+ * read the next job's function with the last one's argument while it was being written. */
+static volatile int jlock;
+static void jl_lock(void) { while (__atomic_exchange_n(&jlock, 1, __ATOMIC_ACQUIRE)) pause(); }
+static void jl_unlock(void) { __atomic_store_n(&jlock, 0, __ATOMIC_RELEASE); }
+
+static void work(smp_job_t job, void *arg, int count) {
     for (;;) {
         int i = __atomic_fetch_add(&J.next, 1, __ATOMIC_SEQ_CST);
         if (i >= count) break;
@@ -48,20 +53,28 @@ static void ap_main(void *arg) {
     for (;;) {
         cli();
         if (__atomic_load_n(&J.gen, __ATOMIC_ACQUIRE) == seen) { sti_hlt(); continue; }
-        __atomic_fetch_add(&J.active, 1, __ATOMIC_SEQ_CST);
+        jl_lock();
         seen = J.gen;
+        smp_job_t job = J.job;
+        void *jarg = J.arg;
+        int count = J.count;
+        __atomic_fetch_add(&J.active, 1, __ATOMIC_SEQ_CST);
+        jl_unlock();
         sti();
-        work();
+        work(job, jarg, count);
         __atomic_fetch_sub(&J.active, 1, __ATOMIC_SEQ_CST);
     }
 }
 
 void native_smp_run(smp_job_t job, void *arg, int count) {
+    jl_lock();
+    while (__atomic_load_n(&J.active, __ATOMIC_ACQUIRE)) { jl_unlock(); pause(); jl_lock(); }   /* no worker in an old job */
     J.job = job; J.arg = arg; J.count = count;
     J.next = 0; J.done = 0;
     __atomic_fetch_add(&J.gen, 1, __ATOMIC_RELEASE);
+    jl_unlock();
     if (workers) lapic_broadcast_ipi(VEC_WAKE);
-    work();                                           /* the boot core helps */
+    work(job, arg, count);                            /* the boot core helps */
     while (__atomic_load_n(&J.done, __ATOMIC_ACQUIRE) < count || __atomic_load_n(&J.active, __ATOMIC_ACQUIRE))
         pause();
 }

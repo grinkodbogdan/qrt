@@ -66,8 +66,13 @@ On the page:
   window.
 
 Not yet: tabs (links that open a new tab load in the background), file downloads, and
-the GPU. A known problem: in QEMU the machine has sometimes reset while Ladybird starts.
-The cause hasn't been found yet; a run with full logging never reproduces it.
+the GPU. A known problem: in QEMU the machine has sometimes reset (a triple fault) while
+Ladybird starts, in a few runs out of ten. Two kernel races found while hunting it are
+fixed: a process killed while its last thread was tearing it down got its descriptors
+released twice, and the shell's render jobs could reach a worker core half-written. The
+reset itself still hides: it doesn't happen with QEMU's logging, a gdb breakpoint on the
+double-fault entry never hits, and when it happens every CPU is found in low-memory
+startup code.
 
 ## Building it
 

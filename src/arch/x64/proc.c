@@ -663,6 +663,7 @@ void proc_thread_exit(int code) {
     cli();
     release_tid(p, t);
     if (--p->nthreads > 0) thread_exit();
+    p->exiting = 1;                            /* from here this thread finishes the job: a kill() */
     sti();                                     /* socket cleanup takes the network lock */
     fds_release_all(p);
     cli();
@@ -688,6 +689,7 @@ void proc_exit(int code) {
         p->nthreads--;
     }
     if (--p->nthreads > 0) thread_exit();
+    p->exiting = 1;
     sti();
     fds_release_all(p);
     cli();
@@ -699,7 +701,10 @@ void proc_kill(proc_t *p) {
     if (!p) return;
     for (int i = 0; i < nprocs; i++)                  /* its children first (pipelines under a shell) */
         if (procs[i]->ppid == p->pid && procs[i] != p && !procs[i]->exited) proc_kill(procs[i]);
-    if (p->exited) return;
+    /* a process whose last thread is already tearing it down (with interrupts on, while
+     * its descriptors close) finishes by itself: killing it now would mark that thread
+     * dead mid-way and release everything a second time */
+    if (p->exited || p->exiting) return;
     u64 fl = irq_save();
     int by_signal = p->sig != 0;                     /* kill() from a program: no message */
     if (!p->killed && !by_signal) term_append(p->term, "\n[stopping]\n", 13);

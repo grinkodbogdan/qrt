@@ -305,21 +305,24 @@ int user_high_range(u64 start, u64 end) {
 /* the next user address at or after va that is in a region (0: none) */
 static u64 next_user(u64 va) { return va < USER_HIGH_BASE ? USER_HIGH_BASE : va < USER_HOLE_END ? USER_HOLE_END : 0; }
 
+#define PML4_USER_FIRST 2                 /* pml4[2..255]: [1 TiB, 128 TiB) */
+#define PML4_USER_END   256
+
 u64 as_create(void) {
     u64 *k4 = tbl(kpml4_phys), *kp = tbl(k4[0]);
     u64 *pml4 = (u64 *)(usize)pmm_alloc(1), *pdpt = (u64 *)(usize)pmm_alloc(1);
     memcpy(pml4, k4, PAGE);
+    for (int i = PML4_USER_FIRST; i < PML4_USER_END; i++) pml4[i] = 0;   /* the user's own, always */
     memcpy(pdpt, kp, PAGE);
     pdpt[0] = pmm_alloc(1) | PTE_P | PTE_W | PTE_U;      /* the user's first GiB */
     pml4[0] = (u64)(usize)pdpt | PTE_P | PTE_W | PTE_U;
     return (u64)(usize)pml4;
 }
 
-#define PML4_USER_FIRST 2                 /* pml4[2..255]: [1 TiB, 128 TiB) */
-#define PML4_USER_END   256
 
 /* the pdpt that covers va (pml4[0]'s is shared with the kernel's entries); create: make it */
 static u64 *pdpt_of(u64 cr3, u64 va, int create) {
+    if (cr3 == kpml4_phys) { klog("mm: user mapping asked of the kernel's tables (va %llx)", va); return NULL; }
     u64 *e4 = &tbl(cr3)[(va >> 39) & 511];
     if (!(*e4 & PTE_P)) { if (!create) return NULL; *e4 = pmm_alloc(1) | PTE_P | PTE_W | PTE_U; }
     return tbl(*e4);
