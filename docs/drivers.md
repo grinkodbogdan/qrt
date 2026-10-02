@@ -87,19 +87,22 @@ Not there yet:
 
 ## Linux compatibility
 
-QRT has **Linux application** compatibility today. Static x86-64 ELF
-programs run unmodified. `src/arch/x64/linux.c` implements the part of the
-Linux system-call ABI that glibc, musl and busybox need:
+QRT has **Linux application** compatibility: x86-64 ELF programs, static or
+dynamically linked against glibc, run unmodified. `src/arch/x64/` implements the
+part of the Linux system-call ABI they need:
 
-- files, directories, `mmap`/`brk`
-- TLS (`arch_prctl`)
-- time, `uname`, `sysinfo`
-- `getrandom`
-- `AF_INET` sockets (TCP, UDP, ICMP), `poll`, `select` (`lsock.c`)
+- files, directories, `unlink`/`rename` (`linux.c`, on the in-memory VFS)
+- processes and threads: `fork`, `execve`, `wait4`, `clone`, `futex`, pipes (`proc.c`)
+- memory: two user regions (the first GiB and 64-512 GiB), lazy pages with
+  real protections (NX, read-only, `PROT_NONE`), `mremap`, shared memory (`proc.c`, `mm.c`)
+- signals: handlers, masks, `sigaltstack`, faults as signals, timers (`signal.c`)
+- descriptor objects: memfd and `/dev/shm`, eventfd, timerfd, signalfd, epoll (`lfile.c`)
+- sockets: `AF_INET` over QRT's network stack (`lsock.c`), `AF_UNIX` with
+  `SCM_RIGHTS` (`unix.c`)
+- TLS (`arch_prctl`), time, `uname`, `sysinfo`, `getrandom`
 
-The Terminal app starts these programs, and the image includes a static
-busybox. Still missing: `fork`/`exec`/`clone` (so no shell pipelines or
-threads), signals, listening sockets, and dynamic linking.
+The Terminal starts these programs; the image includes a static busybox, glibc
+and libstdc++. What is still missing is in docs/roadmap.md (Firefox milestones 5-8).
 
 ## Networking
 

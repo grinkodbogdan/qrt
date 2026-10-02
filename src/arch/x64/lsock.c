@@ -119,6 +119,12 @@ void lsock_close(proc_t *p, int fd) {
 }
 
 void lsock_dup(proc_t *p, int fd) { lsock_t *s = get(p, fd); if (s) s->refs++; }
+/* a reference held outside any descriptor table (a socket in flight over SCM_RIGHTS) */
+void lsock_ref(int idx, int delta) {
+    if (idx < 0 || idx >= NSOCKS || !socks[idx].used) return;
+    socks[idx].refs += delta;
+    if (socks[idx].refs <= 0) sock_release(&socks[idx]);
+}
 
 void lsock_exit(proc_t *p) {
     for (int fd = 0; fd < MAX_FDS; fd++) if (p->fd[fd].type == F_SOCK) lsock_close(p, fd);
@@ -133,7 +139,7 @@ static int wait_for(proc_t *p, lsock_t *s, cond_fn c, u64 ms) {
         int ok = c(s);
         net_unlock();
         if (ok) return 0;
-        if (p->killed) return -EINTR;
+        if (proc_interrupted(p)) return -EINTR;
         if (k_now_ms() >= end) return -ETIMEDOUT;
         thread_sleep_ms(5);
     }

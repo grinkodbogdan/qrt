@@ -19,6 +19,11 @@ typedef struct thread {
     u64 clear_tid;              /* CLONE_CHILD_CLEARTID / set_tid_address: zeroed and woken at exit */
     volatile int in_sys;        /* inside a system call: may hold kernel locks */
     u64 cpu_ticks;              /* ticks spent running */
+    u64 sig_mask, sig_pending;  /* blocked signals; signals sent to this thread */
+    u64 sig_saved_mask;         /* rt_sigsuspend: the mask to restore after the handler */
+    int sig_suspended;
+    u64 alt_sp, alt_size;       /* sigaltstack */
+    int alt_flags;
     struct thread *next;
     u8 fpu[512] __attribute__((aligned(16)));
 } thread_t;

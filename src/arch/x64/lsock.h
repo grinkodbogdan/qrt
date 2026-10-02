@@ -19,4 +19,5 @@ i64  lsock_available(proc_t *p, int fd);
 void lsock_set_nonblock(proc_t *p, int fd, int on);
 void lsock_close(proc_t *p, int fd);
 void lsock_dup(proc_t *p, int fd);
+void lsock_ref(int idx, int delta);
 void lsock_exit(proc_t *p);

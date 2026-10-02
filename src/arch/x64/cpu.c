@@ -89,6 +89,8 @@ static const char *exc_name(u64 v) {
 int (*user_fault_hook)(frame_t *f);
 int (*page_fault_hook)(frame_t *f);      /* demand paging of user memory */
 
+void (*user_return_hook)(frame_t *f);
+
 void isr_dispatch(frame_t *f) {
     u64 v = f->vector;
     if (v < 32) {
@@ -100,4 +102,5 @@ void isr_dispatch(frame_t *f) {
      * must not leave this vector in service while another thread runs */
     if (v != VEC_SPURIOUS) lapic_eoi();
     if (handlers[v]) handlers[v](f);
+    if ((f->cs & 3) && user_return_hook) user_return_hook(f);   /* signals for a thread interrupted in user mode */
 }

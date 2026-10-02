@@ -272,6 +272,29 @@ void mm_uncached(u64 base, u64 size) {
 }
 
 
+/* ---- user address spaces ---------------------------------------------------------
+ * Two regions per process: the first GiB (pdpt[0]: classic ELF addresses, brk, the
+ * stack) and [64 GiB, 512 GiB) (pdpt[64..511]: mmap - Firefox reserves gigabytes).
+ * The identity map stops at 64 GiB of physical addresses, so the second region never
+ * shadows kernel memory.  Every user pdpt entry carries PTE_U; kernel ones do not.
+ * PTE bit 9 (free for software) marks frames of shared objects (memfd, MAP_SHARED):
+ * they belong to the object, not to the mapping. */
+#define PTE_SOFT_SHARED 0x200ull
+#define PTE_SOFT_PARKED 0x400ull       /* PROT_NONE: not present, but the frame (and its contents) is kept */
+#define PTE_HAS(e) ((e) & (PTE_P | PTE_SOFT_PARKED))
+#define PTE_NX (1ull << 63)
+static u64 nx_bit;
+
+void mm_enable_nx(void) {
+    u32 r[4];
+    cpuid(0x80000001, 0, r);
+    if (!(r[3] & (1u << 20))) return;
+    wrmsr(MSR_EFER, rdmsr(MSR_EFER) | (1ull << 11));
+    nx_bit = PTE_NX;
+}
+
+int user_va(u64 va) { return va < USER_TOP || (va >= USER_HIGH_BASE && va < USER_HIGH_END); }
+
 u64 as_create(void) {
     u64 *k4 = tbl(kpml4_phys), *kp = tbl(k4[0]);
     u64 *pml4 = (u64 *)(usize)pmm_alloc(1), *pdpt = (u64 *)(usize)pmm_alloc(1);
@@ -282,67 +305,147 @@ u64 as_create(void) {
     return (u64)(usize)pml4;
 }
 
-static u64 *user_pd(u64 cr3) { return tbl(tbl(tbl(cr3)[0])[0]); }
+static u64 *user_pdpt(u64 cr3) { return tbl(tbl(cr3)[0]); }
+
+/* the page table entry for va, or NULL; create: build the missing levels */
+static u64 *pte_of(u64 cr3, u64 va, int create) {
+    if (!user_va(va)) return NULL;
+    u64 *e3 = &user_pdpt(cr3)[(va >> 30) & 511];
+    if (!(*e3 & PTE_P)) { if (!create) return NULL; *e3 = pmm_alloc(1) | PTE_P | PTE_W | PTE_U; }
+    else if (!(*e3 & PTE_U)) return NULL;                 /* the kernel's (a device mapped up here) */
+    u64 *e2 = &tbl(*e3)[(va >> 21) & 511];
+    if (!(*e2 & PTE_P)) { if (!create) return NULL; *e2 = pmm_alloc(1) | PTE_P | PTE_W | PTE_U; }
+    return &tbl(*e2)[(va >> 12) & 511];
+}
+
+static u64 pte_bits(int prot) {
+    return PTE_P | PTE_U | ((prot & AS_W) ? PTE_W : 0) | ((prot & AS_X) ? 0 : nx_bit) | ((prot & AS_SHARED) ? PTE_SOFT_SHARED : 0);
+}
+
+static void flush(u64 cr3, u64 va) { if (read_cr3() == cr3) __asm__ volatile("invlpg (%0)" : : "r"((usize)va) : "memory"); }
 
 u64 as_clone(u64 src) {
     u64 dst = as_create();
-    u64 *spd = user_pd(src), *dpd = user_pd(dst);
-    for (int i = 0; i < 512; i++) {
-        if (!(spd[i] & PTE_P)) continue;
-        u64 *spt = tbl(spd[i]);
-        u64 dpt = pmm_alloc(1);
-        dpd[i] = dpt | PTE_P | PTE_W | PTE_U;
-        for (int j = 0; j < 512; j++) {
-            if (!(spt[j] & PTE_P)) continue;
-            u64 f = pmm_alloc(0);
-            /* user frames are low: copy them with the kernel's tables loaded */
-            u64 fl = irq_save(), cr3 = read_cr3();
-            if (cr3 != kpml4_phys) write_cr3(kpml4_phys);
-            memcpy((void *)(usize)f, (void *)(usize)(spt[j] & PTE_ADDR), PAGE);
-            if (cr3 != kpml4_phys) write_cr3(cr3);
-            irq_restore(fl);
-            tbl(dpt)[j] = f | (spt[j] & (PTE_P | PTE_W | PTE_U));
+    u64 *sp3 = user_pdpt(src), *dp3 = user_pdpt(dst);
+    for (int g = 0; g < 512; g++) {
+        if (!(sp3[g] & PTE_P) || !(sp3[g] & PTE_U)) continue;
+        u64 *spd = tbl(sp3[g]);
+        if (!(dp3[g] & PTE_P)) dp3[g] = pmm_alloc(1) | PTE_P | PTE_W | PTE_U;
+        u64 *dpd = tbl(dp3[g]);
+        for (int i = 0; i < 512; i++) {
+            if (!(spd[i] & PTE_P)) continue;
+            u64 *spt = tbl(spd[i]);
+            u64 dpt = pmm_alloc(1);
+            dpd[i] = dpt | PTE_P | PTE_W | PTE_U;
+            for (int j = 0; j < 512; j++) {
+                u64 e = spt[j];
+                if (!PTE_HAS(e)) continue;
+                if (e & PTE_SOFT_SHARED) { tbl(dpt)[j] = e; continue; }   /* shared memory stays shared */
+                u64 f = pmm_alloc(0);
+                /* user frames are low: copy them with the kernel's tables loaded */
+                u64 fl = irq_save(), cr3 = read_cr3();
+                if (cr3 != kpml4_phys) write_cr3(kpml4_phys);
+                memcpy((void *)(usize)f, (void *)(usize)(e & PTE_ADDR), PAGE);
+                if (cr3 != kpml4_phys) write_cr3(cr3);
+                irq_restore(fl);
+                tbl(dpt)[j] = f | (e & ~PTE_ADDR);
+            }
         }
     }
     return dst;
 }
 
-int as_map(u64 cr3, u64 va, u64 frame, int writable) {
-    if (va >= USER_TOP) return -1;
-    u64 *pd = user_pd(cr3);
-    u64 *pde = &pd[(va >> 21) & 511];
-    if (!(*pde & PTE_P)) *pde = pmm_alloc(1) | PTE_P | PTE_W | PTE_U;
-    u64 *pt = tbl(*pde);
-    pt[(va >> 12) & 511] = (frame & PTE_ADDR) | PTE_P | PTE_U | (writable ? PTE_W : 0);
-    if (read_cr3() == cr3) __asm__ volatile("invlpg (%0)" : : "r"((usize)va) : "memory");
+int as_map(u64 cr3, u64 va, u64 frame, int prot) {
+    u64 *pte = pte_of(cr3, va, 1);
+    if (!pte) return -1;
+    if (PTE_HAS(*pte) && !(*pte & PTE_SOFT_SHARED) && (*pte & PTE_ADDR) != (frame & PTE_ADDR)) pmm_free(*pte & PTE_ADDR);
+    *pte = (frame & PTE_ADDR) | pte_bits(prot);
+    flush(cr3, va);
     return 0;
 }
 
 u64 as_translate(u64 cr3, u64 va) {
-    if (va >= USER_TOP) return 0;
-    u64 pde = user_pd(cr3)[(va >> 21) & 511];
-    if (!(pde & PTE_P)) return 0;
-    u64 pte = tbl(pde)[(va >> 12) & 511];
-    return (pte & PTE_P) ? (pte & PTE_ADDR) | (va & 0xfff) : 0;
+    u64 *pte = pte_of(cr3, va, 0);
+    return pte && (*pte & PTE_P) ? (*pte & PTE_ADDR) | (va & 0xfff) : 0;
+}
+
+int as_pte_writable(u64 cr3, u64 va) {
+    u64 *pte = pte_of(cr3, va, 0);
+    return pte && (*pte & PTE_P) && (*pte & PTE_W);
 }
 
 void as_unmap(u64 cr3, u64 va) {
-    u64 pde = user_pd(cr3)[(va >> 21) & 511];
-    if (!(pde & PTE_P)) return;
-    u64 *pte = &tbl(pde)[(va >> 12) & 511];
-    if (*pte & PTE_P) { pmm_free(*pte & PTE_ADDR); *pte = 0; }
-    if (read_cr3() == cr3) __asm__ volatile("invlpg (%0)" : : "r"((usize)va) : "memory");
+    u64 *pte = pte_of(cr3, va, 0);
+    if (!pte || !PTE_HAS(*pte)) return;
+    if (!(*pte & PTE_SOFT_SHARED)) pmm_free(*pte & PTE_ADDR);
+    *pte = 0;
+    flush(cr3, va);
 }
 
-void as_destroy(u64 cr3) {
-    u64 *pml4 = tbl(cr3), *pdpt = tbl(pml4[0]), *pd = tbl(pdpt[0]);
-    for (int i = 0; i < 512; i++) {
-        if (!(pd[i] & PTE_P)) continue;
-        u64 *pt = tbl(pd[i]);
-        for (int j = 0; j < 512; j++) if (pt[j] & PTE_P) pmm_free(pt[j] & PTE_ADDR);
-        pmm_free(pd[i] & PTE_ADDR);
+void as_protect(u64 cr3, u64 va, int prot) {
+    u64 *pte = pte_of(cr3, va, 0);
+    if (!pte || !PTE_HAS(*pte)) return;
+    u64 keep = *pte & (PTE_ADDR | PTE_SOFT_SHARED);
+    *pte = (prot & AS_NONE) ? keep | PTE_SOFT_PARKED : (*pte & PTE_ADDR) | pte_bits(prot | ((*pte & PTE_SOFT_SHARED) ? AS_SHARED : 0));
+    flush(cr3, va);
+}
+
+int as_parked(u64 cr3, u64 va) { u64 *pte = pte_of(cr3, va, 0); return pte && (*pte & PTE_SOFT_PARKED) && !(*pte & PTE_P); }
+
+int as_move(u64 cr3, u64 from, u64 to) {
+    u64 *ps = pte_of(cr3, from, 0);
+    if (!ps || !PTE_HAS(*ps)) return 0;
+    u64 e = *ps;
+    *ps = 0;
+    flush(cr3, from);
+    u64 *pd = pte_of(cr3, to, 1);
+    if (!pd) { if (!(e & PTE_SOFT_SHARED)) pmm_free(e & PTE_ADDR); return 0; }
+    *pd = e;
+    flush(cr3, to);
+    return 1;
+}
+
+/* walk the present (or parked) pages of [start, end), skipping empty tables in bulk */
+static void as_walk(u64 cr3, u64 start, u64 end, void (*fn)(u64 cr3, u64 *pte, u64 va, int arg), int arg) {
+    u64 va = start & ~(PAGE - 1);
+    while (va < end) {
+        if (!user_va(va)) { if (va < USER_HIGH_BASE) { va = USER_HIGH_BASE; continue; } break; }
+        u64 e3 = user_pdpt(cr3)[(va >> 30) & 511];
+        if (!(e3 & PTE_P) || !(e3 & PTE_U)) { va = (va + (1ull << 30)) & ~((1ull << 30) - 1); continue; }
+        u64 e2 = tbl(e3)[(va >> 21) & 511];
+        if (!(e2 & PTE_P)) { va = (va + (2ull << 20)) & ~((2ull << 20) - 1); continue; }
+        u64 *pte = &tbl(e2)[(va >> 12) & 511];
+        if (PTE_HAS(*pte)) fn(cr3, pte, va, arg);
+        va += PAGE;
     }
-    pmm_free(pdpt[0] & PTE_ADDR);
+}
+static void unmap_fn(u64 cr3, u64 *pte, u64 va, int arg) {
+    (void)arg;
+    if (!(*pte & PTE_SOFT_SHARED)) pmm_free(*pte & PTE_ADDR);
+    *pte = 0;
+    flush(cr3, va);
+}
+static void protect_fn(u64 cr3, u64 *pte, u64 va, int prot) {
+    u64 keep = *pte & (PTE_ADDR | PTE_SOFT_SHARED);
+    *pte = (prot & AS_NONE) ? keep | PTE_SOFT_PARKED : (*pte & PTE_ADDR) | pte_bits(prot | ((*pte & PTE_SOFT_SHARED) ? AS_SHARED : 0));
+    flush(cr3, va);
+}
+void as_unmap_range(u64 cr3, u64 start, u64 end) { as_walk(cr3, start, end, unmap_fn, 0); }
+void as_protect_range(u64 cr3, u64 start, u64 end, int prot) { as_walk(cr3, start, end, protect_fn, prot); }
+
+void as_destroy(u64 cr3) {
+    u64 *pml4 = tbl(cr3), *pdpt = tbl(pml4[0]);
+    for (int g = 0; g < 512; g++) {
+        if (!(pdpt[g] & PTE_P) || !(pdpt[g] & PTE_U)) continue;
+        u64 *pd = tbl(pdpt[g]);
+        for (int i = 0; i < 512; i++) {
+            if (!(pd[i] & PTE_P)) continue;
+            u64 *pt = tbl(pd[i]);
+            for (int j = 0; j < 512; j++) if (PTE_HAS(pt[j]) && !(pt[j] & PTE_SOFT_SHARED)) pmm_free(pt[j] & PTE_ADDR);
+            pmm_free(pd[i] & PTE_ADDR);
+        }
+        pmm_free(pdpt[g] & PTE_ADDR);
+    }
     pmm_free(pml4[0] & PTE_ADDR);
     pmm_free(cr3);
 }

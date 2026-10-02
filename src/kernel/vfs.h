@@ -20,6 +20,8 @@ void     vfs_relocate(void);              /* native: move everything into the ke
 vnode_t *vfs_root(void);
 vnode_t *vfs_lookup(const char *path);    /* absolute path; NULL if missing */
 vnode_t *vfs_create(const char *path, int dir);
+int      vfs_unlink(const char *path, int dir);   /* 0 or -errno (rmdir with dir) */
+int      vfs_rename(const char *from, const char *to);
 vnode_t *vfs_child_at(vnode_t *dir, int index);
 int      vfs_children(vnode_t *dir);
 u64      vfs_size(vnode_t *n);

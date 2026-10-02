@@ -214,14 +214,48 @@ files run as busybox applets), `wait4`, `pipe`/`pipe2`, `dup`/`dup2`/`dup3`,
 `ls /bin | wc -l` or `cat /proc/cpuinfo > /tmp/cpu; wc -l /tmp/cpu` work.
 `procs` tests fork, pipes, exec, `posix_spawn`, `popen` and `kill`.
 
-Not supported yet (see [docs/roadmap.md](docs/roadmap.md)):
-- signal handlers: a signal that would end a program ends it; handlers are
-  never called (busybox `ping` sends only one packet: use the built-in `ping`)
-- memory protection (`mprotect` is accepted but pages stay writable)
-- listening sockets, Unix sockets, `epoll`, `eventfd`
-- more than 1 GiB of address space per process
+Since 0.7.0 (Firefox milestones 2 to 4, see [docs/roadmap.md](docs/roadmap.md)):
+
+- **Signals** (`src/arch/x64/signal.c`): `rt_sigaction` with and without
+  `SA_SIGINFO`, per-thread masks, pending sets, `sigaltstack`, `kill`,
+  `tgkill` (`raise`, `pthread_kill`), `sigsuspend`/`pause`, `sigtimedwait`,
+  `alarm`/`setitimer`, `SIGCHLD`, `SIGPIPE`, and the default actions. A
+  handler runs on Linux's own `rt_sigframe` layout (so glibc's and musl's
+  `siglongjmp`, `ucontext` and restorers work). It is called when the thread
+  next returns to user mode: after a system call, after an interrupt (so a
+  busy loop gets its `SIGALRM`), or on a fault. Faults become signals: a store
+  to a read-only page or a jump into data gives `SIGSEGV` with the address,
+  division by zero `SIGFPE`. Blocking calls return `EINTR`, or start again
+  under `SA_RESTART`.
+- **Memory**: every process now has its first GiB plus 448 GiB more (64 to
+  512 GiB) for `mmap`, so reservations of several GiB, as Firefox makes for
+  its JIT and WebAssembly, fit. Pages have real protections:
+  - read-only and no-execute (NX) pages;
+  - `PROT_NONE` reservations committed piece by piece with `mprotect`;
+  - a JIT's write-then-execute.
+
+  Shared memory works through `memfd_create`, `/dev/shm` (`shm_open`) and
+  `MAP_SHARED`, also anonymous and across `fork`. `mremap`,
+  `MADV_DONTNEED`, `unlink`/`rename` and 256 descriptors per process are
+  supported too.
+- **Event loops**: `epoll`, `eventfd`, `timerfd`, `signalfd`, and Unix
+  sockets (`src/arch/x64/unix.c`):
+  - stream, datagram and seqpacket types; `socketpair`;
+  - path and abstract names; `listen`/`accept`;
+  - descriptors passed with `SCM_RIGHTS`; `SO_PEERCRED`;
+  - hang-up through `poll`/`epoll`.
+
+  This is what Wayland and Firefox's own IPC run on.
+
+`signals`, `memory` and `events` in `/bin` test all of this, and the QEMU test
+runs them. They pass on Linux too, so a failure means QRT differs from it.
+Writing to `/dev/kmsg` puts a line in QRT's boot log (System Monitor → Log).
+
+Not supported yet:
 - IPv6
-- keyboard input to programs, and any graphical program
+- keyboard input to programs, and any graphical program (a Wayland compositor
+  is milestone 6)
+- writes that survive a reboot (milestone 5)
 
 ## Wi-Fi and networking
 
@@ -532,9 +566,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.6.5.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.7.0.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.6.5.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.7.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

@@ -34,6 +34,19 @@ static int next_pid = 100;
 static proc_t *procs[MAX_PROCS];
 static int nprocs;
 static void proc_register(proc_t *p) { if (nprocs < MAX_PROCS) procs[nprocs++] = p; }
+proc_t *proc_at(int i) { return i >= 0 && i < nprocs ? procs[i] : NULL; }
+
+thread_t *proc_thread(proc_t *p, int tid) {
+    thread_t *all[64];
+    int n = sched_threads(all, 64);
+    for (int i = 0; i < n; i++)
+        if (all[i]->proc == p && all[i]->state != T_DEAD && (!tid || all[i]->tid == tid)) return all[i];
+    return NULL;
+}
+
+/* a blocking system call should give up: the process is going, or a signal waits for a handler */
+int proc_interrupted(proc_t *p) { return p->killed || sig_deliverable(p) != 0; }
+
 proc_t *proc_by_pid(int pid) {
     for (int i = nprocs - 1; i >= 0; i--) if (procs[i]->pid == pid) return procs[i];
     return NULL;
@@ -94,31 +107,56 @@ int proc_user_supported(const char **why) {
     return 1;
 }
 
-int proc_add_vma(proc_t *p, u64 start, u64 end) {
-    for (int i = 0; i < p->nvma; i++)
-        if (p->vma[i].end == start) { p->vma[i].end = end; return 0; }   /* extend (brk) */
+/* ---- the address space: VMAs ---------------------------------------------------------
+ * Each VMA has Linux's PROT_* bits and, for shared memory, the object whose pages it
+ * shows.  Pages appear lazily on the first touch, with the VMA's protection: no
+ * PROT_WRITE - read-only, no PROT_EXEC - no-execute, PROT_NONE - every access faults
+ * (Firefox reserves gigabytes that way and commits pieces with mprotect). */
+static int as_prot(u32 prot, int shared) {
+    return ((prot & PROT_WRITE) ? AS_W : 0) | ((prot & PROT_EXEC) ? AS_X : 0) | (shared ? AS_SHARED : 0);
+}
+
+int proc_add_vma_prot(proc_t *p, u64 start, u64 end, u32 prot, kobj_t *obj, u64 off) {
+    if (!obj)
+        for (int i = 0; i < p->nvma; i++)                   /* extend a private neighbour (brk) */
+            if (p->vma[i].end == start && !p->vma[i].obj && p->vma[i].prot == prot) { p->vma[i].end = end; return 0; }
     if (p->nvma == MAX_VMAS) return -1;
-    p->vma[p->nvma++] = (vma_t){ start, end };
+    p->vma[p->nvma++] = (vma_t){ start, end, prot, obj != NULL, obj, off };
+    if (obj) kobj_get(obj);
     return 0;
 }
 
-static int in_vma(proc_t *p, u64 a) {
-    if (a >= USER_STACK_TOP - USER_STACK_SIZE && a < USER_STACK_TOP) return 1;
-    for (int i = 0; i < p->nvma; i++) if (a >= p->vma[i].start && a < p->vma[i].end) return 1;
-    return 0;
+int proc_add_vma(proc_t *p, u64 start, u64 end) { return proc_add_vma_prot(p, start, end, PROT_READ | PROT_WRITE, NULL, 0); }
+
+vma_t *proc_vma(proc_t *p, u64 a) {
+    for (int i = 0; i < p->nvma; i++) if (a >= p->vma[i].start && a < p->vma[i].end) return &p->vma[i];
+    return NULL;
+}
+
+static int in_stack(u64 a) { return a >= USER_STACK_TOP - USER_STACK_SIZE && a < USER_STACK_TOP; }
+
+void proc_vmas_release(proc_t *p) {
+    for (int i = 0; i < p->nvma; i++) if (p->vma[i].obj) { kobj_put(p->vma[i].obj); p->vma[i].obj = NULL; }
+    p->nvma = 0;
+}
+
+static int range_user(u64 start, u64 end) {
+    if (end <= start) return 0;
+    if (end <= USER_STACK_TOP - USER_STACK_SIZE) return start >= PAGE;
+    return start >= USER_HIGH_BASE && end <= USER_HIGH_END;
 }
 
 int proc_range_free(proc_t *p, u64 start, u64 end) {
-    if (start < USER_MMAP_BASE || end > USER_MMAP_END || end <= start) return 0;
+    if (!range_user(start, end)) return 0;
+    if (start < p->brk + (64ull << 20) && end > p->brk_start) return 0;     /* leave brk room to grow */
     for (int i = 0; i < p->nvma; i++) if (start < p->vma[i].end && p->vma[i].start < end) return 0;
     return 1;
 }
 
-/* first fit in the mmap window, one guard page after every mapping */
-u64 proc_find_free(proc_t *p, u64 len) {
-    u64 a = USER_MMAP_BASE;
-    for (int pass = 0; pass < MAX_VMAS + 1; pass++) {
-        if (a + len > USER_MMAP_END) return 0;
+static u64 find_in(proc_t *p, u64 lo, u64 hi, u64 len) {
+    u64 a = lo;
+    for (int pass = 0; pass < MAX_VMAS + 2; pass++) {
+        if (a + len > hi) return 0;
         int moved = 0;
         for (int i = 0; i < p->nvma; i++)
             if (a < p->vma[i].end + PAGE && p->vma[i].start < a + len + PAGE) { a = p->vma[i].end + PAGE; moved = 1; }
@@ -127,45 +165,122 @@ u64 proc_find_free(proc_t *p, u64 len) {
     return 0;
 }
 
-/* munmap: free the pages, cut the VMAs (splitting one that spans the hole) */
-void proc_unmap(proc_t *p, u64 start, u64 end) {
-    for (u64 a = start; a < end && a < USER_TOP; a += PAGE) as_unmap(p->cr3, a);
+/* first fit in the mmap window, one guard page after every mapping */
+u64 proc_find_free(proc_t *p, u64 len) { return find_in(p, USER_MMAP_BASE, USER_MMAP_END, len); }
+u64 proc_find_free_low(proc_t *p, u64 len) { return find_in(p, USER_LOW_MMAP, USER_STACK_TOP - USER_STACK_SIZE - (1ull << 20), len); }
+
+/* cut [start, end) out of the VMAs: returns how many pieces were removed or trimmed */
+static void vma_cut(proc_t *p, u64 start, u64 end) {
     for (int i = 0; i < p->nvma; i++) {
         vma_t *v = &p->vma[i];
         if (end <= v->start || start >= v->end) continue;
-        if (start <= v->start && end >= v->end) { *v = p->vma[--p->nvma]; i--; continue; }
-        if (start > v->start && end < v->end) {                    /* split */
-            if (p->nvma < MAX_VMAS) p->vma[p->nvma++] = (vma_t){ end, v->end };
+        if (start <= v->start && end >= v->end) {             /* all of it */
+            if (v->obj) kobj_put(v->obj);
+            *v = p->vma[--p->nvma];
+            i--;
+            continue;
+        }
+        if (start > v->start && end < v->end) {               /* a hole: split */
+            if (p->nvma < MAX_VMAS) {
+                vma_t tail = *v;
+                tail.off += end - v->start;
+                tail.start = end;
+                if (tail.obj) kobj_get(tail.obj);
+                p->vma[p->nvma++] = tail;
+            }
             v->end = start;
             continue;
         }
-        if (start <= v->start) v->start = end; else v->end = start;
+        if (start <= v->start) { v->off += end - v->start; v->start = end; }
+        else v->end = start;
     }
 }
 
-static int fault_in(proc_t *p, u64 a) {
-    if (a >= USER_TOP || !in_vma(p, a)) return 0;
-    if (as_translate(p->cr3, a)) return 1;
-    as_map(p->cr3, a & ~(PAGE - 1), pmm_alloc(0), 1);
+/* munmap: free the pages, cut the VMAs (splitting one that spans the hole) */
+void proc_unmap(proc_t *p, u64 start, u64 end) {
+    as_unmap_range(p->cr3, start, end);
+    vma_cut(p, start, end);
+}
+
+/* mprotect: split the VMAs at the edges, give the inside the new protection */
+i64 proc_protect(proc_t *p, u64 start, u64 end, u32 prot) {
+    /* every page of the range must be mapped (Linux: ENOMEM otherwise) */
+    for (u64 a = start; a < end;) {
+        vma_t *v = proc_vma(p, a);
+        if (!v) { if (in_stack(a)) { a += PAGE; continue; } return -12; }
+        a = v->end;
+    }
+    for (int i = 0; i < p->nvma; i++) {
+        vma_t *v = &p->vma[i];
+        if (end <= v->start || start >= v->end || v->prot == prot) continue;
+        if (p->nvma + 2 > MAX_VMAS) return -12;
+        if (v->start < start) {                               /* the part before keeps its protection */
+            vma_t head = *v;
+            head.end = start;
+            if (head.obj) kobj_get(head.obj);
+            v->off += start - v->start;
+            v->start = start;
+            p->vma[p->nvma++] = head;
+            v = &p->vma[i];
+        }
+        if (v->end > end) {                                   /* and the part after */
+            vma_t tail = *v;
+            tail.off += end - v->start;
+            tail.start = end;
+            if (tail.obj) kobj_get(tail.obj);
+            v->end = end;
+            p->vma[p->nvma++] = tail;
+            v = &p->vma[i];
+        }
+        v->prot = prot;
+    }
+    as_protect_range(p->cr3, start, end, prot ? as_prot(prot, 0) : AS_NONE);   /* PROT_NONE keeps the contents */
+    return 0;
+}
+
+u64 shm_frame(kobj_t *o, u64 page);                           /* linux.c: a page of a shared object */
+
+/* map the page at a for an access (write: a store); 0 if the program may not */
+static int fault_in_access(proc_t *p, u64 a, int write) {
+    if (!user_va(a)) return 0;
+    vma_t *v = proc_vma(p, a);
+    u64 page = a & ~(PAGE - 1);
+    if (!v) {
+        if (!in_stack(a)) return 0;
+        if (!as_translate(p->cr3, a)) as_map(p->cr3, page, pmm_alloc(0), AS_W);
+        return 1;
+    }
+    if (!v->prot || (write && !(v->prot & PROT_WRITE))) return 0;
+    if (as_translate(p->cr3, a)) return !write || as_pte_writable(p->cr3, a);
+    if (v->obj) {
+        u64 f = shm_frame(v->obj, (page - v->start + v->off) / PAGE);
+        if (!f) return 0;
+        as_map(p->cr3, page, f, as_prot(v->prot, 1));
+    } else as_map(p->cr3, page, pmm_alloc(0), as_prot(v->prot, 0));
     return 1;
 }
 
 int proc_user_ok(proc_t *p, u64 addr, u64 len) {
-    if (!p || addr >= USER_TOP || len > USER_TOP || addr + len > USER_TOP) return 0;
+    if (!p || len > USER_HIGH_END || !user_va(addr) || (len && !user_va(addr + len - 1))) return 0;
+    if (addr < USER_TOP && addr + len > USER_TOP) return 0;
     for (u64 a = addr & ~(PAGE - 1); a < addr + len; a += PAGE)
-        if (!as_translate(p->cr3, a) && !fault_in(p, a)) return 0;
+        if (!as_translate(p->cr3, a) && !fault_in_access(p, a, 0)) return 0;
     return 1;
 }
 
 /* ---- faults ------------------------------------------------------------------ */
+/* a page fault: not present - map it if a VMA allows the access; present - a protection
+ * violation (a store to a read-only page, a jump into data): the program's fault */
 static int on_page_fault(frame_t *f) {
     proc_t *p = proc_current();
-    return p && f->vector == 14 && fault_in(p, read_cr2());
+    if (!p || f->vector != 14 || (f->err & 1)) return 0;
+    return fault_in_access(p, read_cr2(), (f->err & 2) != 0);
 }
 
 static int on_user_fault(frame_t *f) {
     proc_t *p = proc_current();
     if (!p) return 0;
+    if (sig_fault(p, f)) return 1;                            /* the program handles it (SIGSEGV...) */
     char msg[160];
     fmt(msg, sizeof msg, "\n[%s: %s at %llx, address %llx - killed]\n", p->name,
         f->vector == 14 ? "segmentation fault" : f->vector == 6 ? "illegal instruction" :
@@ -178,6 +293,13 @@ static int on_user_fault(frame_t *f) {
 void proc_init(void) {
     page_fault_hook = on_page_fault;
     user_fault_hook = on_user_fault;
+    mm_enable_nx();                       /* PROT_EXEC means something now */
+    /* the kernel writes into user buffers after checking them (proc_user_ok); a read-only
+     * page there must not panic it (Linux would copy with a fault fixup) */
+    u64 cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 & ~(1ull << 16)));
+    sig_init();
     /* SYSCALL/SYSRET: kernel CS 0x08 (SS 0x10); SYSRET derives user CS/SS from 0x18 */
     wrmsr(MSR_EFER, rdmsr(MSR_EFER) | 1);
     wrmsr(MSR_STAR, (0x18ull << 48) | (0x08ull << 32));
@@ -226,14 +348,22 @@ static int load_elf(proc_t *p, const u8 *img, u64 size, u64 base, image_t *out, 
         if (ph->type == 6) out->phdr = base + ph->vaddr;          /* PT_PHDR */
         if (ph->type != 1) continue;
         u64 va = base + ph->vaddr, end = va + ph->memsz;
-        if (end > USER_STACK_TOP - USER_STACK_SIZE || ph->offset + ph->filesz > size) { fmt(err, cap, "segment at %llx does not fit", va); return 0; }
+        if (!range_user(va & ~(PAGE - 1), end) || ph->offset + ph->filesz > size) { fmt(err, cap, "segment at %llx does not fit", va); return 0; }
         for (u64 a = va & ~(PAGE - 1); a < end; a += PAGE)
             if (!as_translate(p->cr3, a)) as_map(p->cr3, a, pmm_alloc(0), 1);
         put_user(p, va, img + ph->offset, ph->filesz);
         if (!out->phdr && ph->offset <= e->phoff && e->phoff < ph->offset + ph->filesz)
             out->phdr = va + (e->phoff - ph->offset);
         if (end > out->hi) out->hi = end;
-        proc_add_vma(p, va & ~(PAGE - 1), (end + PAGE - 1) & ~(PAGE - 1));
+        /* the segment's own protection; a page shared with the previous segment gets both */
+        u32 prot = ((ph->flags & 4) ? PROT_READ : 0) | ((ph->flags & 2) ? PROT_WRITE : 0) | ((ph->flags & 1) ? PROT_EXEC : 0);
+        u64 s0 = va & ~(PAGE - 1), e0 = (end + PAGE - 1) & ~(PAGE - 1);
+        vma_t *prev = proc_vma(p, s0);
+        if (prev) { prev->prot |= prot; as_protect_range(p->cr3, s0, s0 + PAGE, as_prot(prev->prot, 0)); s0 += PAGE; }
+        if (s0 < e0) {
+            proc_add_vma_prot(p, s0, e0, prot, NULL, 0);
+            as_protect_range(p->cr3, s0, e0, as_prot(prot, 0));
+        }
     }
     out->entry = base + e->entry;
     out->base = base;
@@ -392,6 +522,8 @@ static i64 proc_fork(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 
     c->brk_start = p->brk_start; c->brk = p->brk; c->mmap_next = p->mmap_next;
     memcpy(c->vma, p->vma, sizeof c->vma);
     c->nvma = p->nvma;
+    for (int i = 0; i < c->nvma; i++) if (c->vma[i].obj) kobj_get(c->vma[i].obj);   /* shared memory stays shared */
+    memcpy(c->sa, p->sa, sizeof c->sa);                    /* handlers are inherited, pending signals are not */
     c->cr3 = as_clone(p->cr3);
     memcpy(c->fd, p->fd, sizeof c->fd);
     for (int i = 0; i < MAX_FDS; i++) fd_addref(c, i);
@@ -413,6 +545,8 @@ static i64 proc_fork(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 
     t->tid = c->pid;
     t->fs_base = (flags & CLONE_SETTLS) ? tls : thread_current()->fs_base;
     t->clear_tid = (flags & CLONE_CHILD_CLEARTID) ? ctid : 0;
+    t->sig_mask = thread_current()->sig_mask;
+    t->alt_sp = thread_current()->alt_sp; t->alt_size = thread_current()->alt_size; t->alt_flags = thread_current()->alt_flags;
     c->th = t;
     irq_restore(fl);
     if (flags & CLONE_VFORK)
@@ -436,6 +570,7 @@ i64 proc_clone(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 ctid, 
     t->tid = tid;
     t->fs_base = (flags & CLONE_SETTLS) ? tls : thread_current()->fs_base;
     t->clear_tid = (flags & CLONE_CHILD_CLEARTID) ? ctid : 0;
+    t->sig_mask = thread_current()->sig_mask;
     p->nthreads++;
     irq_restore(fl);
     return tid;
@@ -447,12 +582,21 @@ static void release_tid(proc_t *p, thread_t *t) {
     futex_wake(p, t->clear_tid, 1);
 }
 
+/* SIGCHLD for the parent (ignored unless it installed a handler) */
+static void notify_parent(proc_t *p) {
+    proc_t *pp = proc_by_pid(p->ppid);
+    if (pp && !pp->exited && pp->sa[17].handler > 1)
+        sig_post(pp, NULL, 17, p->sig ? 2 : 1, p->pid, (u64)(p->sig ? p->sig : p->exit_code & 0xff));
+}
+
 static void teardown(proc_t *p, int code) {
     write_cr3(kernel_cr3());                   /* leave the address space before freeing it */
     thread_current()->cr3 = kernel_cr3();
+    proc_vmas_release(p);
     as_destroy(p->cr3);
     p->exit_code = code;
     p->exited = 1;
+    notify_parent(p);
     klog("proc: %s (pid %d) exited with %d, %llu system calls", p->name, p->pid, code, p->syscalls);
     p->term->serial++;
 }
@@ -523,8 +667,10 @@ void proc_kill(proc_t *p) {
         irq_restore(fl);
         fds_release_all(p);                         /* nothing of it runs any more: its sockets are free to close */
         fl = irq_save();
+        proc_vmas_release(p);
         as_destroy(p->cr3);
         p->exited = 1;
+        notify_parent(p);
         if (!by_signal) term_append(p->term, "\n[stopped]\n", 11);
         klog("proc: %s (pid %d) stopped", p->name, p->pid);
     }
@@ -611,7 +757,10 @@ i64 proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, ch
         klog("proc: exec %s failed: %s", resolved, err);
         return -8;
     }
+    for (int i = 0; i < old_nvma; i++) if (old_vma[i].obj) kobj_put(old_vma[i].obj);
     kfree(old_vma);
+    for (int i = 0; i < NSIG; i++) if (p->sa[i].handler > 1) p->sa[i] = (ksigaction_t){ 0 };   /* caught -> default; ignored stays */
+    me->alt_sp = me->alt_size = 0; me->alt_flags = 0;
     p->entry = im.entry;
     p->brk_start = p->brk = (im.hi + PAGE - 1) & ~(PAGE - 1);
     proc_add_vma(p, p->brk_start, p->brk);
@@ -661,22 +810,31 @@ i64 proc_wait(proc_t *p, int pid, u64 ustatus, int options) {
         }
         if (!have) return -10;                                 /* ECHILD */
         if (options & 1) return 0;                             /* WNOHANG */
-        if (p->killed) return -4;                              /* EINTR */
+        if (proc_interrupted(p)) return -4;                    /* EINTR */
         thread_sleep_ms(2);
     }
 }
 
-/* no signal handlers yet: every catchable signal that would end a process ends it */
+/* kill(): signals with a handler (or blocked) are queued for the process; SIGKILL and
+ * signals whose default action ends the process end it at once */
+static int sig_default_ignored(int sig) { return sig == 17 || sig == 18 || sig == 23 || sig == 28 || sig == 19 || sig == 20 || sig == 21 || sig == 22; }
+
 i64 proc_signal(proc_t *p, int pid, int sig) {
+    if (sig < 0 || sig >= NSIG) return -22;
     int n = 0;
     for (int i = 0; i < nprocs; i++) {
         proc_t *t = procs[i];
         if (t->exited) continue;
         if (pid > 0 ? t->pid != pid : pid == -1 ? t == p : t->ppid != p->pid && t != p) continue;
         n++;
-        if (!sig || sig == 17 || sig == 18 || sig == 23 || sig == 28) continue;   /* 0, CHLD, CONT, URG, WINCH */
+        if (!sig) continue;
+        u64 h = t->sa[sig].handler;
+        thread_t *main = t->th && t->th->state != T_DEAD ? t->th : proc_thread(t, 0);
+        int blocked = main && (main->sig_mask >> (sig - 1)) & 1;
+        if (sig != 9 && (h > 1 || blocked)) { sig_post(t, NULL, sig, 0, p->pid, 0); continue; }
+        if (sig != 9 && (h == 1 || sig_default_ignored(sig))) continue;    /* SIG_IGN, or ignored by default */
         t->sig = sig;
-        if (t == p) { p->exit_code = 128 + sig; proc_exit(128 + sig); }
+        if (t == p) { p->exit_code = 128 + sig; thread_current()->in_sys = 0; proc_exit(128 + sig); }
         proc_kill(t);
     }
     return n ? 0 : -3;                                         /* ESRCH */

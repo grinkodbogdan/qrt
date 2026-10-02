@@ -62,6 +62,58 @@ static vnode_t *walk(const char *path, int create, int dir) {
 }
 
 vnode_t *vfs_lookup(const char *path) { return walk(path, 0, 0); }
+
+static void detach(vnode_t *n) {
+    vnode_t *d = n->parent;
+    for (vnode_t **pp = &d->child; *pp; pp = &(*pp)->sibling)
+        if (*pp == n) { *pp = n->sibling; n->sibling = NULL; return; }
+}
+
+/* Unlink: the name goes; an open file keeps its node (its memory is not reclaimed - a
+ * small leak, in exchange for never pulling data from under an open descriptor). */
+int vfs_unlink(const char *path, int dir) {
+    vnode_t *n = walk(path, 0, 0);
+    if (!n || n == root) return -2;                   /* ENOENT */
+    if (dir && !n->dir) return -20;                   /* ENOTDIR */
+    if (!dir && n->dir) return -21;                   /* EISDIR */
+    if (dir && n->child) return -39;                  /* ENOTEMPTY */
+    detach(n);
+    return 0;
+}
+
+int vfs_rename(const char *from, const char *to) {
+    vnode_t *n = walk(from, 0, 0);
+    if (!n || n == root) return -2;
+    vnode_t *old = walk(to, 0, 0);
+    if (old == n) return 0;
+    if (old) {
+        if (old->dir && !n->dir) return -21;
+        if (!old->dir && n->dir) return -20;
+        if (old->dir && old->child) return -39;
+    }
+    /* the new parent: everything up to the last '/' */
+    char dpath[256];
+    strlcpy(dpath, to, sizeof dpath);
+    char *slash = NULL;
+    for (char *c = dpath; *c; c++) if (*c == '/') slash = c;
+    if (!slash) return -2;
+    const char *base = slash + 1;
+    if (!*base) return -22;
+    char name[64];
+    strlcpy(name, base, sizeof name);
+    *slash = 0;
+    vnode_t *d = walk(dpath[0] ? dpath : "/", 0, 0);
+    if (!d || !d->dir) return -2;
+    for (vnode_t *a = d; a && a != root; a = a->parent) if (a == n) return -22;   /* into itself */
+    if (old) detach(old);
+    detach(n);
+    strlcpy(n->name, name, sizeof n->name);
+    n->parent = d;
+    vnode_t **pp = &d->child;
+    while (*pp) pp = &(*pp)->sibling;
+    *pp = n;
+    return 0;
+}
 vnode_t *vfs_create(const char *path, int dir) { return walk(path, 1, dir); }
 
 int vfs_children(vnode_t *d) { int n = 0; for (vnode_t *c = d ? d->child : NULL; c; c = c->sibling) n++; return n; }

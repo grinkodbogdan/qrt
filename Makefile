@@ -33,7 +33,7 @@ LDFLAGS := -subsystem:efi_application -entry:efi_main -nodefaultlib
 
 # the native kernel (ExitBootServices, own MM/interrupts/SMP) is 64-bit only
 X64_SRC := src/arch/x64/mm.c src/arch/x64/cpu.c src/arch/x64/apic.c src/arch/x64/native.c \
-           src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c src/arch/x64/lsock.c
+           src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c src/arch/x64/lsock.c src/arch/x64/signal.c src/arch/x64/lfile.c src/arch/x64/unix.c
 X64_ASM := src/arch/x64/isr.S src/arch/x64/entry.S src/arch/x64/trampoline.S
 
 IA32_OBJ := $(SRC:src/%.c=build/ia32/%.o)
@@ -75,7 +75,7 @@ build/BOOTX64.EFI: $(X64_OBJ)
 # Linux programs shipped in /bin (run by the native kernel's Linux layer)
 BUSYBOX ?= /bin/busybox
 ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
-          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/lib64/ld-linux-x86-64.so.2
+          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/lib64/ld-linux-x86-64.so.2
 
 # Dynamically linked programs and the host's glibc / libstdc++ they run with
 # (ld.so in /lib64, the libraries in /lib/x86_64-linux-gnu, as on Debian/Ubuntu)
@@ -95,6 +95,18 @@ build/rootfs/bin/threads: tests/linux/threads.c
 	$(HOSTCC) -O2 -s -o $@ $< -lpthread
 
 build/rootfs/bin/procs: tests/linux/procs.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -s -o $@ $<
+
+build/rootfs/bin/signals: tests/linux/signals.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -s -o $@ $< -lpthread
+
+build/rootfs/bin/memory: tests/linux/memory.c
+	@mkdir -p $(dir $@)
+	$(HOSTCC) -O2 -s -o $@ $<
+
+build/rootfs/bin/events: tests/linux/events.c
 	@mkdir -p $(dir $@)
 	$(HOSTCC) -O2 -s -o $@ $<
 

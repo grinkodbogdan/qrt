@@ -15,9 +15,9 @@ QRT supplying the system calls and a display server.
 | Milestone | What it brings | State |
 |---|---|---|
 | 1. Dynamic programs and threads | `PT_INTERP` + ld.so, file-backed `mmap`/`MAP_FIXED`, `munmap` that frees ranges, `clone` threads, `futex` | **done in 0.6.0** |
-| 2. Processes | `fork`/`vfork` (copy of the address space), `execve`, `wait4`, pipes, `dup2`, `kill`; shells and pipelines work | **done in 0.6.3** (signal handlers still to come) |
-| 3. Memory | page protections (`mprotect`, W^X for the JS JIT), a user address space larger than 1 GiB (Firefox reserves several GiB), shared memory (`memfd_create`, `MAP_SHARED`, `/dev/shm`) | |
-| 4. Event loops | `epoll`, `eventfd`, `timerfd`, `signalfd`, Unix sockets with `SCM_RIGHTS` (Firefox's processes talk over them), `socketpair`, `listen`/`accept` | |
+| 2. Processes | `fork`/`vfork` (copy of the address space), `execve`, `wait4`, pipes, `dup2`, `kill`; shells and pipelines work | **done in 0.6.3**; signal handlers **done in 0.7.0** |
+| 3. Memory | page protections (`mprotect`, W^X for the JS JIT), a user address space larger than 1 GiB (Firefox reserves several GiB), shared memory (`memfd_create`, `MAP_SHARED`, `/dev/shm`) | **done in 0.7.0** (448 GiB of `mmap` space, NX, `PROT_NONE` reservations, `mremap`) |
+| 4. Event loops | `epoll`, `eventfd`, `timerfd`, `signalfd`, Unix sockets with `SCM_RIGHTS` (Firefox's processes talk over them), `socketpair`, `listen`/`accept` | **done in 0.7.0** |
 | 5. Files | a writable file system that survives reboots (native eMMC/SD driver), `/proc/self/maps`, `/sys` entries glibc and GTK read, fonts and fontconfig files | |
 | 6. A display server | a minimal Wayland compositor inside the QRT shell: `wl_compositor`, `xdg_shell`, `wl_shm` buffers composited by the GPU, `wl_seat` for touch and keyboard; each Linux window becomes a QRT window | |
 | 7. The GTK stack | glib, cairo, pango, harfbuzz, fontconfig, GTK 3 with its Wayland backend; a GTK demo runs | |
