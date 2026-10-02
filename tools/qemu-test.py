@@ -273,6 +273,29 @@ def native_test(q, shots):
             raise RuntimeError("native: Ladybird did not render the test page\n  " + "\n  ".join(l for l in slog().splitlines() if "ladybird" in l)[-1500:])
         shots.append(png)
         progs.append("Ladybird (a page rendered by its processes)")
+        # Ladybird as the shell's browser (L6): the dock's Browser opens its window; a URL
+        # typed into its address bar loads and paints; the title reaches the shell
+        q.tap(1226, 246, settle=2)
+        for _ in range(120):
+            if "ladybird (pid" in slog() and "opened window" in slog().split("browser: started Ladybird")[-1]:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("native: Ladybird's window did not open\n  " + "\n  ".join(l for l in slog().splitlines() if "ladybird" in l or "browser:" in l)[-1200:])
+        time.sleep(20)
+        q.tap(700, 120, settle=1)                    # its address bar
+        q.keys(*"file:///share/tests/page.html", settle=0.3)
+        q.keys("ret", settle=40)
+        shot = q.shot("07-ladybird-window")
+        shots.append(shot)
+        from PIL import Image
+        im = Image.open(shot).convert("RGB")
+        header = im.getpixel((700, 170))             # the test page's blue-purple header band
+        if not (header[2] > 150 and header[0] < 160):
+            raise RuntimeError("native: Ladybird's window did not show the page (pixel %s)" % (header,))
+        q.tap(1141, 66, settle=4)                    # close it: QRT_EV_CLOSE, Ladybird exits
+        q.tap(1226, 170, settle=2)                   # back to the Terminal
+        progs.append("Ladybird in the shell (dock, address bar, a page)")
     q.keys(*"hello-window", settle=0.2)
     q.keys("ret", settle=1)
     for _ in range(40):

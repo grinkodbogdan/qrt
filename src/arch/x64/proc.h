@@ -82,6 +82,7 @@ typedef struct proc {
     ksiginfo_t sig_info[NSIG];    /* who sent each pending signal */
     u64 alarm_us, alarm_every_us; /* ITIMER_REAL: next SIGALRM (k_now_us), period */
     int native;                   /* a native QRT program (QRT system-call numbers), not a Linux one */
+    kobj_t *qrt_events;           /* QRT_SYS_EVENT_FD: an eventfd signalled when a window event is queued */
     int trace;                    /* QRT_TRACE=1 in its environment: failing system calls go to the kernel log */
 } proc_t;
 

@@ -51,6 +51,24 @@ Each step is a release with its own test, as with everything else in QRT.
 | L6 | The QRT front-end (`UI/QRT`, on `libqrt`): a window with tabs, an address bar, touch scrolling, the on-screen keyboard, desk mode with the mouse; the bigger image read on demand | Ladybird is the default browser on the tablet |
 | L7 | Later: media (ffmpeg; sound once the RT5670/SST driver exists), the GPU (Skia on Vulkan/GL needs a Mesa-class driver), sandboxing | |
 
+## Using it (L6, first version)
+
+The dock's **Browser** is Ladybird when the image has it (`/bin/ladybird`); the old
+built-in text browser remains for the 32-bit kernel. The window has:
+- back, forward, and reload (stop while loading);
+- a keyboard button (the on-screen keyboard);
+- the address bar: tap it, type, and press Enter.
+
+On the page:
+- a finger drag scrolls, and a tap clicks;
+- the mouse and the keyboard go to the page;
+- the window follows the shell (rotation, the keyboard, desk mode) like any native
+  window.
+
+Not yet: tabs (links that open a new tab load in the background), file downloads, and
+the GPU. A known problem: in QEMU the machine has sometimes reset while Ladybird starts.
+The cause hasn't been found yet; a run with full logging never reproduces it.
+
 ## Building it
 
 ```sh

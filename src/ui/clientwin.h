@@ -17,4 +17,6 @@ int  cw_next_event(proc_t *p, qrt_event_t *e);
 int  cw_has_event(proc_t *p);
 void cw_keyboard(proc_t *p, int show);
 void cw_proc_gone(proc_t *p);
+struct app;
+const struct app *cw_app_of(int pid);     /* the shell app of a window of process pid, or NULL */
 #endif

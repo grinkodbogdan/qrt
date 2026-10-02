@@ -1,7 +1,7 @@
 From 2ea6f69ff48a431417c22d98d52757666aea1d37 Mon Sep 17 00:00:00 2001
 From: grinkodbogdan <grinkod.bogdan@gmail.com>
 Date: Fri, 2 Oct 2026 15:03:34 +0000
-Subject: [PATCH 2/2] UI/QRT: a QRT front-end, the browser and its helpers in
+Subject: [PATCH 2/3] UI/QRT: a QRT front-end, the browser and its helpers in
  one program
 
 QRT (github.com/grinkodbogdan/qrt) runs Ladybird as a native program.

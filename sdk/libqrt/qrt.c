@@ -12,6 +12,7 @@
 #define QRT_SYS_EVENT_WAIT     1028
 #define QRT_SYS_WINDOW_TITLE   1029
 #define QRT_SYS_KEYBOARD       1030
+#define QRT_SYS_EVENT_FD       1031
 
 static long sc(long n, long a, long b, long c, long d, long e) {
     long r = syscall(n, a, b, c, d, e);
@@ -125,3 +126,5 @@ int qrt_text(qrt_buffer *b, int x, int y, const char *s, uint32_t rgb, int size)
     }
     return x;
 }
+
+int qrt_event_fd(void) { return (int)sc(QRT_SYS_EVENT_FD, 0, 0, 0, 0, 0); }

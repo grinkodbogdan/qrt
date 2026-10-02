@@ -81,7 +81,8 @@ RUST_HELLO := $(if $(RUST_MUSL),build/rootfs/bin/rust-hello)
 LADYBIRD := $(if $(wildcard build/ladybird/bin/js),build/rootfs/bin/js build/rootfs/share/tests/js-test.js)
 # the browser (one program: it and its helper processes), its resources, fonts, fontconfig
 LADYBIRD += $(if $(wildcard build/ladybird/bin/Ladybird),build/rootfs/bin/ladybird build/rootfs/share/Lagom/.stamp \
-            build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/render.sh)
+            build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/render.sh \
+            build/rootfs/etc/ssl/certs/ca-certificates.crt)
 FONT_DIRS := /usr/share/fonts/truetype/liberation /usr/share/fonts/truetype/dejavu
 ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
           build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/hello-window build/rootfs/bin/cxx-test $(RUST_HELLO) $(LADYBIRD) build/rootfs/lib64/ld-linux-x86-64.so.2
@@ -154,6 +155,14 @@ build/rootfs/share/fonts/.stamp: tools/fonts.conf
 	for d in $(FONT_DIRS); do cp $$d/*.ttf $(dir $@); done
 	printf 'Liberation fonts: SIL Open Font License 1.1 (github.com/liberationfonts).\nDejaVu fonts: Bitstream Vera licence with DejaVu changes in the public domain (dejavu-fonts.github.io).\n' > $(dir $@)README.txt
 	touch $@
+
+# Mozilla's root certificates for HTTPS (curl reads them here), as packaged by certifi
+# (PyPI) - not the build machine's own store
+CERTIFI_VERSION := 2026.7.22
+build/rootfs/etc/ssl/certs/ca-certificates.crt:
+	@mkdir -p $(dir $@) build/dl
+	[ -f build/dl/certifi-$(CERTIFI_VERSION).whl ] || pip download -q --no-deps -d build/dl/certifi certifi==$(CERTIFI_VERSION) && cp build/dl/certifi/certifi-$(CERTIFI_VERSION)-*.whl build/dl/certifi-$(CERTIFI_VERSION).whl
+	python3 -c "import zipfile,sys; sys.stdout.buffer.write(zipfile.ZipFile('build/dl/certifi-$(CERTIFI_VERSION).whl').read('certifi/cacert.pem'))" > $@
 
 build/rootfs/etc/fonts/fonts.conf: tools/fonts.conf
 	@mkdir -p $(dir $@)

@@ -21,4 +21,4 @@ exec qemu-system-x86_64 \
     -device usb-hub,bus=xhci.0,port=2 -device usb-kbd,bus=xhci.0,port=2.1 \
     -device VGA,xres=1280,yres=800 \
     -rtc base=localtime \
-    "$@"
+    ${QRT_QEMU_EXTRA:-} "$@"

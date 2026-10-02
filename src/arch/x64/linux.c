@@ -815,7 +815,8 @@ void syscall_dispatch(frame_t *f) {
         r = fdp(p, a0) ? 0 : -EBADF; break;
     case 90: case 91: case 92: case 93: case 94: case 260: case 268:   /* chmod, fchmod, chown, fchown, lchown, fchownat, fchmodat */
         r = 0; break;                                   /* one user, no permissions: accepted */
-    case 86: case 265: r = -EPERM; break;               /* link, linkat: no hard links (callers fall back) */
+    case 86: case 265: r = -EPERM; break;
+    case 73: r = fdp(p, a0) ? 0 : -EBADF; break;       /* flock: granted (lock files of one user's programs) */               /* link, linkat: no hard links (callers fall back) */
     case 137: case 138: {                               /* statfs, fstatfs: a tmpfs */
         u64 buf = a1;
         if (!UOK(buf, 120)) { r = -EFAULT; break; }

@@ -64,9 +64,15 @@ i64 qrt_call(proc_t *p, u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4) {
         if (get_str(p, a1, s, sizeof s)) return -EFAULT;
         return cw_title(p, (int)a0, s);
     case QRT_SYS_KEYBOARD: cw_keyboard(p, a0 != 0); return 0;
-    case QRT_SYS_EVENT_FD: return -ENOSYS;           /* reserved: an fd that polls readable with events */
+    case QRT_SYS_EVENT_FD:                           /* an eventfd, readable when window events are queued */
+        if (!p->qrt_events) p->qrt_events = eventfd_new(1, 0);    /* readable at first: drain what is there */
+        kobj_get(p->qrt_events);
+        return fd_install_obj(p, p->qrt_events, 04000 | 02000000);   /* O_NONBLOCK | O_CLOEXEC */
     }
     return -ENOSYS;
 }
 
-void qrt_proc_gone(proc_t *p) { cw_proc_gone(p); }
+void qrt_proc_gone(proc_t *p) {
+    cw_proc_gone(p);
+    if (p->qrt_events) { kobj_put(p->qrt_events); p->qrt_events = NULL; }
+}

@@ -25,6 +25,7 @@ int  shm_list(int i, char *name, usize cap, u64 *size); /* for getdents on /dev/
 
 /* eventfd, timerfd, signalfd */
 kobj_t *eventfd_new(u64 init, int semaphore);
+void    eventfd_signal(kobj_t *o);                         /* counter + 1: readable */
 kobj_t *timerfd_new(int clock);
 i64  timerfd_settime(proc_t *p, kobj_t *o, int flags, u64 nv, u64 ov);
 i64  timerfd_gettime(proc_t *p, kobj_t *o, u64 cur);

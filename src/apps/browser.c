@@ -13,6 +13,9 @@
 #include "../ui/shell.h"
 #include "../net/http.h"
 #include "html.h"
+#if defined(__x86_64__)
+#include "../ui/clientwin.h"
+#endif
 
 typedef struct { int x, y, w, h, node; const font_t *f; } box_t;
 
@@ -391,7 +394,53 @@ static void draw_page(canvas_t *c, rect_t a) {
     }
 }
 
+/* ---- Ladybird ----------------------------------------------------------------------
+ * When the image has Ladybird (/bin/ladybird, a native QRT program), the Browser in the
+ * dock is Ladybird: opening it starts the program, or brings its window back.  This
+ * built-in text browser is what remains without it (the 32-bit kernel, small images). */
+#if defined(__x86_64__)
+static struct { int pid; u64 started; char err[96]; } LB;
+
+static int ladybird_running(void) {
+    if (!LB.pid) return 0;
+    proc_t *p = proc_by_pid(LB.pid);
+    if (!p || p->exited) { LB.pid = 0; return 0; }
+    return 1;
+}
+
+/* 1: Ladybird takes over (its window is shown now, or will be once it has started) */
+static int ladybird_open(void) {
+    if (!vfs_lookup("/bin/ladybird")) return 0;
+    if (ladybird_running()) {
+        const app_t *a = cw_app_of(LB.pid);
+        if (a) shell_app_open(a);
+        return 1;
+    }
+    static const char *const argv[] = { "ladybird", NULL };
+    proc_t *p = proc_spawn("/bin/ladybird", 1, argv, NULL, LB.err, sizeof LB.err);
+    if (!p) { klog("browser: Ladybird did not start: %s", LB.err); return 0; }
+    LB.pid = p->pid;
+    LB.started = k_now_ms();
+    LB.err[0] = 0;
+    klog("browser: started Ladybird (pid %d)", LB.pid);
+    return 1;
+}
+
+static int ladybird_starting(void) { return ladybird_running() && !cw_app_of(LB.pid); }
+#else
+static int ladybird_open(void) { return 0; }
+static int ladybird_starting(void) { return 0; }
+#endif
+
 static void draw(canvas_t *c, rect_t a) {
+    if (ladybird_starting()) {                         /* until its window opens (it opens itself) */
+        gfx_fill(c, a, ui.window);
+        rect_t m = { a.x, a.y + a.h / 2 - dp(40), a.w, dp(40) };
+        gfx_text_center(c, ui.title, m, "Starting Ladybird", ui.text);
+        rect_t n = { a.x, a.y + a.h / 2, a.w, dp(30) };
+        gfx_text_center(c, ui.body, n, "the web browser, running natively on QRT", ui.text2);
+        return;
+    }
     draw_bar(c, a);
     draw_status(c, a);
     draw_page(c, a);
@@ -509,6 +558,7 @@ static void page_arrived(void) {
 
 static int tick(u64 now) {
     (void)now;
+    if (ladybird_starting()) return 0;
     int redraw = 0;
     rect_t a = shell_app_area();
     if (B.req) {
@@ -541,6 +591,7 @@ static int tick(u64 now) {
 }
 
 static void on_open(void) {
+    if (ladybird_open()) return;
     if (!B.url[0] && !B.req) load(HOME_URL, NULL);
 }
 

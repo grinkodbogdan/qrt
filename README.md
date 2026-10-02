@@ -179,6 +179,7 @@ mouse clicks and keys as events.
 - `hello-window` (a window),
 - `js`: **Ladybird's JavaScript engine**, built natively for QRT. Try
   `js /share/tests/js-test.js`, or `js` alone for its prompt.
+- `ladybird`: **the Ladybird web browser**, native on QRT; the dock's Browser opens it.
 
 The QEMU test runs all of them. They are steps L1–L3 of porting a modern browser,
 **Ladybird**, natively: see [docs/sdk.md](docs/sdk.md) and [docs/ladybird.md](docs/ladybird.md).

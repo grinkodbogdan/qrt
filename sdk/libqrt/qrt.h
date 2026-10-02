@@ -37,6 +37,10 @@ int  qrt_window_title(int win, const char *title);
 int  qrt_window_close(int win);
 int  qrt_wait_event(qrt_event *e, int timeout_ms);            /* 1: an event, 0: timed out, -errno; -1 ms waits forever */
 void qrt_keyboard(int show);                                  /* the on-screen keyboard */
+/* a descriptor (non-blocking, close-on-exec) that polls readable when window events are
+ * queued, for programs with their own event loop: read its 8 bytes, then take the events
+ * with qrt_wait_event(&e, 0) until it returns 0 */
+int  qrt_event_fd(void);
 
 /* drawing into a buffer (clipped) */
 void qrt_fill(qrt_buffer *b, int x, int y, int w, int h, uint32_t rgb);

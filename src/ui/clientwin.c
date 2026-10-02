@@ -57,6 +57,7 @@ static void push(cwin_t *w, qrt_event_t e) {
     if (w->qn < QLEN) w->q[(w->qh + w->qn++) % QLEN] = e;
     else if (e.type == QRT_EV_MOVE) { /* full: drop movement */ }
     else w->q[(w->qh + QLEN - 1) % QLEN] = e;                    /* keep the latest important one */
+    if (w->owner && w->owner->qrt_events) eventfd_signal(w->owner->qrt_events);
     UNLOCK;
 }
 
@@ -130,6 +131,12 @@ static void (*const closes[MAX_WIN])(void) = { close_0, close_1, close_2, close_
 static void (*const opens[MAX_WIN])(void) = { open_0, open_1, open_2, open_3, open_4, open_5, open_6 };
 
 /* ---- system calls (program threads) ---------------------------------------------------------- */
+const struct app *cw_app_of(int pid) {
+    for (int i = 0; i < MAX_WIN; i++)
+        if (win[i].used && !win[i].closing && win[i].pid == pid && win[i].slot_ok) return &win[i].app;
+    return NULL;
+}
+
 int cw_create(proc_t *p, const char *title) {
     LOCK;
     int k = -1;

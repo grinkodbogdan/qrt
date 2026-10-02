@@ -530,6 +530,7 @@ proc_t *proc_spawn(const char *path, int argc, const char *const *argv, term_t *
     p->fd[0] = (ufile_t){ F_NULL };                        /* stdin: empty */
     p->fd[1] = (ufile_t){ F_TTY };
     p->fd[2] = (ufile_t){ F_TTY };
+    if (!term) p->fd[1].flags = p->fd[2].flags = 1 << 30;   /* no terminal: output goes to the kernel log (KMSG in linux.c) */
     p->nthreads = 1;
     proc_register(p);
     u64 fl = irq_save();                       /* the thread must not run before it knows its process */

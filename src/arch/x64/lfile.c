@@ -192,6 +192,13 @@ kobj_t *eventfd_new(u64 init, int semaphore) {
     return &e->h;
 }
 
+/* add one to an eventfd's counter (the kernel signalling a program: QRT window events) */
+void eventfd_signal(kobj_t *o) {
+    u64 fl = irq_save();
+    ((eventfd_t *)o)->count++;
+    irq_restore(fl);
+}
+
 static i64 eventfd_read(proc_t *p, ufile_t *f, eventfd_t *e, u64 buf, u64 len) {
     if (len < 8) return -EINVAL;
     if (!UOK(buf, 8)) return -EFAULT;

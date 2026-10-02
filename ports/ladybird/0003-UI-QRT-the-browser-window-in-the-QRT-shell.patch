@@ -1,0 +1,621 @@
+From c14c259511f112b7b393da6e24d2af69d2bc5b39 Mon Sep 17 00:00:00 2001
+From: grinkodbogdan <grinkod.bogdan@gmail.com>
+Date: Fri, 2 Oct 2026 17:40:56 +0000
+Subject: [PATCH 3/3] UI/QRT: the browser window in the QRT shell
+
+A QRT window with a toolbar (back, forward, reload or stop, the on-screen
+keyboard, the address) over the page.  Frames from WebContent are copied
+into the window; touch drags scroll the page, taps click, the mouse and
+keys go to the page or to the address being edited.  The shell's events
+wake Ladybird's event loop through qrt_event_fd().
+---
+ UI/QRT/Application.h     |   4 +-
+ UI/QRT/BrowserWindow.cpp | 436 +++++++++++++++++++++++++++++++++++++++
+ UI/QRT/BrowserWindow.h   |  90 ++++++++
+ UI/QRT/CMakeLists.txt    |   3 +-
+ UI/QRT/main.cpp          |   9 +-
+ 5 files changed, 535 insertions(+), 7 deletions(-)
+ create mode 100644 UI/QRT/BrowserWindow.cpp
+ create mode 100644 UI/QRT/BrowserWindow.h
+
+diff --git a/UI/QRT/Application.h b/UI/QRT/Application.h
+index b312290a..2572f8f0 100644
+--- a/UI/QRT/Application.h
++++ b/UI/QRT/Application.h
+@@ -11,8 +11,8 @@
+ namespace Ladybird {
+ 
+ // The QRT front-end: Ladybird as a native program on QRT (github.com/grinkodbogdan/qrt).
+-// For now it runs headless (--headless=screenshot|text|layout-tree); its window in the QRT
+-// shell comes next.
++// Its window is a QRT window (BrowserWindow); --headless=screenshot|text|layout-tree runs
++// without one.
+ class Application final : public WebView::Application {
+     WEB_VIEW_APPLICATION(Application)
+ 
+diff --git a/UI/QRT/BrowserWindow.cpp b/UI/QRT/BrowserWindow.cpp
+new file mode 100644
+index 00000000..3fde8e5c
+--- /dev/null
++++ b/UI/QRT/BrowserWindow.cpp
+@@ -0,0 +1,436 @@
++/*
++ * Copyright (c) 2026, the QRT developers.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include <AK/LexicalPath.h>
++#include <LibCore/EventLoop.h>
++#include <LibCore/Notifier.h>
++#include <LibCore/System.h>
++#include <LibGfx/Bitmap.h>
++#include <LibGfx/SharedImageBuffer.h>
++#include <LibGfx/SystemTheme.h>
++#include <LibWebView/Application.h>
++#include <LibWebView/Menu.h>
++#include <LibWebView/Utilities.h>
++#include <UI/QRT/BrowserWindow.h>
++
++namespace Ladybird {
++
++// the toolbar, in the shell's colours (src/ui/theme)
++static constexpr u32 toolbar_bg = 0x2b2b2b;
++static constexpr u32 toolbar_line = 0x3c3c3c;
++static constexpr u32 button_fg = 0xe8e8e8;
++static constexpr u32 button_off = 0x6a6a6a;
++static constexpr u32 field_bg = 0x1e1e1e;
++static constexpr u32 field_edit = 0x3a5a8c;
++static constexpr u32 text_fg = 0xf0f0f0;
++static constexpr u32 text_dim = 0x9a9a9a;
++
++// toolbar geometry: four buttons, then the address
++static constexpr int button_w = 48;
++static constexpr int pad = 6;
++enum class ToolbarItem { Back, Forward, Reload, Keyboard, Address, None };
++static constexpr int address_x = pad + 4 * button_w + pad;
++
++static ToolbarItem toolbar_item_at(int x)
++{
++    if (x < pad)
++        return ToolbarItem::None;
++    if (x < address_x - pad)
++        return static_cast<ToolbarItem>((x - pad) / button_w);
++    return ToolbarItem::Address;
++}
++
++NonnullOwnPtr<PageView> PageView::create(Core::AnonymousBuffer theme, Web::DevicePixelSize size)
++{
++    auto view = adopt_own(*new PageView(move(theme), size));
++    view->initialize_client(CreateNewClient::Yes);
++    return view;
++}
++
++RefPtr<Gfx::Bitmap> PageView::frame(Gfx::IntSize& size) const
++{
++    if (!m_client_state.has_usable_bitmap || !m_client_state.front_bitmap.shared_image_buffer)
++        return nullptr;
++    size = m_client_state.front_bitmap.last_painted_size.to_type<int>();
++    return m_client_state.front_bitmap.shared_image_buffer->bitmap_if_present();
++}
++
++ErrorOr<NonnullOwnPtr<BrowserWindow>> BrowserWindow::create(Vector<URL::URL> const& urls)
++{
++    auto window = adopt_own(*new BrowserWindow);
++    TRY(window->initialize(urls));
++    return window;
++}
++
++BrowserWindow::~BrowserWindow()
++{
++    if (m_window >= 0)
++        qrt_window_close(m_window);
++}
++
++ErrorOr<void> BrowserWindow::initialize(Vector<URL::URL> const& urls)
++{
++    m_window = qrt_window_create("Ladybird");
++    if (m_window < 0)
++        return Error::from_errno(-m_window);
++    map_buffer();
++
++    // the shell's events wake the event loop through a descriptor, like Ladybird's sockets
++    m_event_fd = qrt_event_fd();
++    if (m_event_fd < 0)
++        return Error::from_errno(-m_event_fd);
++    m_notifier = Core::Notifier::construct(m_event_fd, Core::Notifier::Type::Read);
++    m_notifier->on_activation = [this] { handle_events(); };
++
++    auto theme_path = LexicalPath::join(::WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
++    auto theme = TRY(Gfx::load_system_theme(theme_path.string()));
++    m_view = PageView::create(move(theme), viewport());
++    m_view->set_system_visibility_state(Web::HTML::VisibilityState::Visible);
++    m_view->set_has_system_focus(true);
++
++    m_view->on_ready_to_paint = [this] {
++        draw_page();
++        qrt_window_present(m_window, 0, content_top(), m_buffer.w, m_buffer.h - content_top());
++    };
++    m_view->on_title_change = [this](auto const& title) {
++        m_title = title.to_byte_string();
++        qrt_window_title(m_window, m_title.is_empty() ? "Ladybird" : ByteString::formatted("{:.60}", m_title).characters());
++    };
++    m_view->on_url_change = [this](URL::URL const& url) {
++        if (!m_editing_address)
++            m_address = url.serialize().to_byte_string();
++        draw_toolbar();
++        qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++    };
++    m_view->on_loading_state_change = [this](bool loading) {
++        m_loading = loading;
++        draw_toolbar();
++        qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++    };
++
++    draw_toolbar();
++    draw_page();
++    present_all();
++
++    auto const& url = urls.is_empty() ? URL::URL(::WebView::Application::settings().new_tab_page_url()) : urls.first();
++    m_address = url.serialize().to_byte_string();
++    m_view->load(url);
++    return {};
++}
++
++void BrowserWindow::map_buffer()
++{
++    qrt_window_buffer(m_window, &m_buffer);
++}
++
++Web::DevicePixelSize BrowserWindow::viewport() const
++{
++    return { max(1, m_buffer.w), max(1, m_buffer.h - content_top()) };
++}
++
++void BrowserWindow::layout_changed()
++{
++    map_buffer();
++    if (m_view)
++        m_view->reset_viewport_size(viewport());
++    draw_toolbar();
++    draw_page();
++    present_all();
++}
++
++void BrowserWindow::present_all()
++{
++    qrt_window_present(m_window, 0, 0, 0, 0);
++}
++
++// ---- drawing ---------------------------------------------------------------------------
++
++void BrowserWindow::draw_toolbar()
++{
++    auto* b = &m_buffer;
++    int h = content_top();
++    qrt_fill(b, 0, 0, b->w, h, toolbar_bg);
++    qrt_fill(b, 0, h - 1, b->w, 1, toolbar_line);
++
++    int cy = h / 2;
++    auto button_x = [](int i) { return pad + i * button_w + button_w / 2; };
++    bool can_back = m_view && m_view->navigate_back_action().enabled();
++    bool can_forward = m_view && m_view->navigate_forward_action().enabled();
++
++    // back and forward: chevrons
++    int bx = button_x(0), fx = button_x(1);
++    u32 back_c = can_back ? button_fg : button_off, forward_c = can_forward ? button_fg : button_off;
++    qrt_line(b, bx + 5, cy - 9, bx - 4, cy, 3, back_c);
++    qrt_line(b, bx - 4, cy, bx + 5, cy + 9, 3, back_c);
++    qrt_line(b, fx - 5, cy - 9, fx + 4, cy, 3, forward_c);
++    qrt_line(b, fx + 4, cy, fx - 5, cy + 9, 3, forward_c);
++
++    // reload (or stop while loading)
++    int rx = button_x(2);
++    if (m_loading) {
++        qrt_line(b, rx - 7, cy - 7, rx + 7, cy + 7, 3, button_fg);
++        qrt_line(b, rx + 7, cy - 7, rx - 7, cy + 7, 3, button_fg);
++    } else {
++        qrt_disc(b, rx, cy, 10, button_fg);
++        qrt_disc(b, rx, cy, 7, toolbar_bg);
++        qrt_fill(b, rx, cy - 11, 11, 9, toolbar_bg);
++        qrt_line(b, rx + 2, cy - 10, rx + 8, cy - 6, 3, button_fg);
++        qrt_line(b, rx + 8, cy - 6, rx + 2, cy - 2, 3, button_fg);
++    }
++
++    // the keyboard
++    int kx = button_x(3);
++    qrt_round_rect(b, kx - 13, cy - 9, 26, 18, 3, m_keyboard ? field_edit : button_fg);
++    for (int row = 0; row < 3; ++row)
++        for (int col = 0; col < 4; ++col)
++            qrt_fill(b, kx - 10 + col * 6, cy - 6 + row * 5, 3, 3, toolbar_bg);
++
++    // the address field
++    int fw = b->w - address_x - pad;
++    qrt_round_rect(b, address_x, pad + 2, fw, h - 2 * pad - 4, (h - 2 * pad - 4) / 2, m_editing_address ? field_edit : field_bg);
++    int th = qrt_text_height(QRT_TEXT_BODY);
++    int tx = address_x + 14, ty = (h - th) / 2;
++    ByteString shown = m_address;
++    if (m_editing_address && !m_replace_address)
++        shown = ByteString::formatted("{}|", m_address);
++    // keep the end of a long address in view while it is edited, the start otherwise
++    while (shown.length() > 1 && qrt_text_width(shown.characters(), QRT_TEXT_BODY) > fw - 28)
++        shown = m_editing_address ? shown.substring(1) : shown.substring(0, shown.length() - 1);
++    qrt_text(b, tx, ty, shown.characters(), m_address.is_empty() ? text_dim : text_fg, QRT_TEXT_BODY);
++}
++
++void BrowserWindow::draw_page()
++{
++    auto* b = &m_buffer;
++    int top = content_top();
++    int vw = b->w, vh = b->h - top;
++    if (vw <= 0 || vh <= 0)
++        return;
++
++    Gfx::IntSize size;
++    auto bitmap = m_view ? m_view->frame(size) : nullptr;
++    int bw = 0, bh = 0;
++    if (bitmap) {
++        bw = min(min(size.width(), bitmap->width()), vw);
++        bh = min(min(size.height(), bitmap->height()), vh);
++        for (int y = 0; y < bh; ++y) {
++            auto const* src = bitmap->scanline(y);
++            u32* dst = b->px + (top + y) * b->stride;
++            for (int x = 0; x < bw; ++x)
++                dst[x] = src[x] & 0xffffff;
++        }
++    }
++    // what the page does not cover yet
++    if (bw < vw)
++        qrt_fill(b, bw, top, vw - bw, vh, 0xffffff);
++    if (bh < vh)
++        qrt_fill(b, 0, top + bh, bw, vh - bh, 0xffffff);
++}
++
++// ---- input ---------------------------------------------------------------------------------
++
++void BrowserWindow::handle_events()
++{
++    u64 count;
++    (void)read(m_event_fd, &count, sizeof count);
++    qrt_event e;
++    while (qrt_wait_event(&e, 0) > 0)
++        handle(e);
++}
++
++void BrowserWindow::send_mouse(Web::MouseEvent::Type type, int x, int y, Web::UIEvents::MouseButton button, Web::UIEvents::MouseButton buttons, double wheel_y)
++{
++    Web::DevicePixelPoint position { x, y - content_top() };
++    Web::MouseEvent event {};
++    event.type = type;
++    event.position = position;
++    event.screen_position = position;
++    event.button = button;
++    event.buttons = buttons;
++    event.wheel_delta_y = wheel_y;
++    event.wheel_delta_precision = wheel_y != 0 ? Web::WheelDeltaPrecision::Precise : Web::WheelDeltaPrecision::Discrete;
++    event.click_count = type == Web::MouseEvent::Type::MouseDown || type == Web::MouseEvent::Type::MouseUp ? 1 : 0;
++    m_view->enqueue_input_event(move(event));
++}
++
++void BrowserWindow::handle(qrt_event const& e)
++{
++    using Type = Web::MouseEvent::Type;
++    auto const primary = Web::UIEvents::MouseButton::Primary;
++    auto const none = Web::UIEvents::MouseButton::None;
++
++    switch (e.type) {
++    case QRT_EV_RESIZE:
++    case QRT_EV_SHOWN:
++        layout_changed();
++        break;
++    case QRT_EV_CLOSE:
++        Core::EventLoop::current().quit(0);
++        break;
++    case QRT_EV_DOWN:
++        if (e.y < content_top()) {
++            tap_toolbar(e.x);
++            break;
++        }
++        if (m_editing_address) {
++            m_editing_address = false;
++            draw_toolbar();
++            qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++        }
++        m_mouse = e.scan == 1;
++        m_finger_down = true;
++        m_dragging = false;
++        m_down_x = m_last_x = e.x;
++        m_down_y = m_last_y = e.y;
++        if (m_mouse)
++            send_mouse(Type::MouseDown, e.x, e.y, primary, primary);
++        break;
++    case QRT_EV_MOVE:
++        if (!m_finger_down) {
++            if (e.y >= content_top())
++                send_mouse(Type::MouseMove, e.x, e.y, none, none);
++            break;
++        }
++        if (m_mouse) {
++            send_mouse(Type::MouseMove, e.x, e.y, none, primary);
++            break;
++        }
++        // a finger: past a few pixels it is a drag, and the page follows it
++        if (!m_dragging && (abs(e.x - m_down_x) > 10 || abs(e.y - m_down_y) > 10))
++            m_dragging = true;
++        if (m_dragging && e.y != m_last_y)
++            send_mouse(Type::MouseWheel, m_down_x, max(m_down_y, content_top()), none, none, m_last_y - e.y);
++        m_last_x = e.x;
++        m_last_y = e.y;
++        break;
++    case QRT_EV_UP:
++        if (!m_finger_down)
++            break;
++        m_finger_down = false;
++        if (m_mouse) {
++            send_mouse(Type::MouseUp, e.x, e.y, primary, none);
++        } else if (!m_dragging) {
++            // a tap: a click where the finger went down
++            send_mouse(Type::MouseMove, m_down_x, m_down_y, none, none);
++            send_mouse(Type::MouseDown, m_down_x, m_down_y, primary, primary);
++            send_mouse(Type::MouseUp, m_down_x, m_down_y, primary, none);
++        }
++        break;
++    case QRT_EV_SCROLL:
++        send_mouse(Type::MouseWheel, m_last_x, max(m_last_y, content_top()), none, none, e.y * 60.0);
++        break;
++    case QRT_EV_KEY:
++        if (m_editing_address)
++            address_key(e.ch, e.scan);
++        else
++            page_key(e.ch, e.scan);
++        break;
++    }
++}
++
++void BrowserWindow::tap_toolbar(int x)
++{
++    switch (toolbar_item_at(x)) {
++    case ToolbarItem::Back:
++        m_view->traverse_the_history_by_delta(-1);
++        break;
++    case ToolbarItem::Forward:
++        m_view->traverse_the_history_by_delta(1);
++        break;
++    case ToolbarItem::Reload:
++        if (m_loading)
++            m_view->stop_loading();
++        else
++            m_view->reload();
++        break;
++    case ToolbarItem::Keyboard:
++        m_keyboard = !m_keyboard;
++        qrt_keyboard(m_keyboard);
++        break;
++    case ToolbarItem::Address:
++        // the first key replaces the whole address, as a browser's selected address bar does
++        m_editing_address = true;
++        m_replace_address = true;
++        m_keyboard = true;
++        qrt_keyboard(1);
++        break;
++    case ToolbarItem::None:
++        break;
++    }
++    draw_toolbar();
++    qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++}
++
++void BrowserWindow::address_key(u32 ch, u32 scan)
++{
++    if (ch == '\r' || ch == '\n') {
++        m_editing_address = false;
++        m_keyboard = false;
++        qrt_keyboard(0);
++        if (!m_address.is_empty())
++            m_view->load_from_user_input(m_address);
++    } else if (scan == QRT_KEY_ESC) {
++        m_editing_address = false;
++        m_address = m_view->url().serialize().to_byte_string();
++    } else if (ch == 8 || ch == 127) {
++        m_address = m_replace_address || m_address.is_empty() ? ByteString {} : m_address.substring(0, m_address.length() - 1);
++        m_replace_address = false;
++    } else if (ch >= 32 && ch < 127) {
++        char c = static_cast<char>(ch);
++        m_address = m_replace_address ? ByteString(&c, 1) : ByteString::formatted("{}{}", m_address, c);
++        m_replace_address = false;
++    }
++    draw_toolbar();
++    qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++}
++
++void BrowserWindow::page_key(u32 ch, u32 scan)
++{
++    using Web::UIEvents::KeyCode;
++    KeyCode key = KeyCode::Key_Invalid;
++    u32 code_point = 0;
++    switch (scan) {
++    case QRT_KEY_UP: key = KeyCode::Key_Up; break;
++    case QRT_KEY_DOWN: key = KeyCode::Key_Down; break;
++    case QRT_KEY_LEFT: key = KeyCode::Key_Left; break;
++    case QRT_KEY_RIGHT: key = KeyCode::Key_Right; break;
++    case QRT_KEY_HOME: key = KeyCode::Key_Home; break;
++    case QRT_KEY_END: key = KeyCode::Key_End; break;
++    case QRT_KEY_PGUP: key = KeyCode::Key_PageUp; break;
++    case QRT_KEY_PGDN: key = KeyCode::Key_PageDown; break;
++    case QRT_KEY_ESC: key = KeyCode::Key_Escape; break;
++    }
++    if (key == KeyCode::Key_Invalid) {
++        if (ch == '\r' || ch == '\n') {
++            key = KeyCode::Key_Return;
++            code_point = '\n';
++        } else if (ch == 8 || ch == 127) {
++            key = KeyCode::Key_Backspace;
++            code_point = 8;
++        } else if (ch == '\t') {
++            key = KeyCode::Key_Tab;
++            code_point = '\t';
++        } else if (ch) {
++            key = Web::UIEvents::code_point_to_key_code(ch);
++            code_point = ch;
++        }
++    }
++    if (key == KeyCode::Key_Invalid && !code_point)
++        return;
++    bool text = code_point >= 32 || code_point == '\n';
++    auto modifiers = (ch >= 'A' && ch <= 'Z') ? Web::UIEvents::Mod_Shift : Web::UIEvents::Mod_None;
++    for (auto type : { Web::KeyEvent::Type::KeyDown, Web::KeyEvent::Type::KeyUp }) {
++        Web::KeyEvent event {};
++        event.type = type;
++        event.key = key;
++        event.modifiers = modifiers;
++        event.code_point = code_point;
++        event.should_insert_text = type == Web::KeyEvent::Type::KeyDown && text;
++        m_view->enqueue_input_event(move(event));
++    }
++}
++
++}
+diff --git a/UI/QRT/BrowserWindow.h b/UI/QRT/BrowserWindow.h
+new file mode 100644
+index 00000000..e1436dbf
+--- /dev/null
++++ b/UI/QRT/BrowserWindow.h
+@@ -0,0 +1,90 @@
++/*
++ * Copyright (c) 2026, the QRT developers.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#include <AK/ByteString.h>
++#include <AK/OwnPtr.h>
++#include <LibCore/Forward.h>
++#include <LibURL/URL.h>
++#include <LibWebView/HeadlessWebView.h>
++
++extern "C" {
++#include <qrt.h>
++}
++
++namespace Ladybird {
++
++// The page: a web view whose frames are copied into the QRT window under the toolbar.
++class PageView final : public ::WebView::HeadlessWebView {
++public:
++    AK_ALLOC_WITH_KMALLOC;
++
++    static NonnullOwnPtr<PageView> create(Core::AnonymousBuffer theme, Web::DevicePixelSize);
++
++    // the last frame WebContent painted, and its size
++    RefPtr<Gfx::Bitmap> frame(Gfx::IntSize& size) const;
++
++private:
++    PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size)
++        : HeadlessWebView(move(theme), size)
++    {
++    }
++};
++
++// Ladybird's window in the QRT shell: a toolbar (back, forward, reload, the address,
++// the on-screen keyboard) and the page.  Touch drags scroll, taps click; the mouse
++// and the keyboard go to the page, or to the address while it is being edited.
++class BrowserWindow {
++public:
++    AK_ALLOC_WITH_KMALLOC;
++
++    static ErrorOr<NonnullOwnPtr<BrowserWindow>> create(Vector<URL::URL> const& urls);
++    ~BrowserWindow();
++
++private:
++    BrowserWindow() = default;
++    ErrorOr<void> initialize(Vector<URL::URL> const& urls);
++
++    void handle_events();
++    void handle(qrt_event const&);
++    void map_buffer();
++    void layout_changed();
++
++    void draw_toolbar();
++    void draw_page();
++    void present_all();
++
++    void tap_toolbar(int x);
++    void address_key(u32 ch, u32 scan);
++    void page_key(u32 ch, u32 scan);
++    void send_mouse(Web::MouseEvent::Type, int x, int y, Web::UIEvents::MouseButton button, Web::UIEvents::MouseButton buttons, double wheel_y = 0);
++
++    int content_top() const { return m_toolbar_height; }
++    Web::DevicePixelSize viewport() const;
++
++    int m_window { -1 };
++    int m_event_fd { -1 };
++    qrt_buffer m_buffer {};
++    int m_toolbar_height { 52 };
++    RefPtr<Core::Notifier> m_notifier;
++    OwnPtr<PageView> m_view;
++
++    ByteString m_title { "Ladybird" };
++    ByteString m_address;
++    bool m_editing_address { false };
++    bool m_replace_address { false };
++    bool m_loading { false };
++    bool m_keyboard { false };
++
++    // a finger on the page: a tap clicks, a drag scrolls
++    bool m_finger_down { false };
++    bool m_dragging { false };
++    bool m_mouse { false };
++    int m_down_x { 0 }, m_down_y { 0 }, m_last_y { 0 }, m_last_x { 0 };
++};
++
++}
+diff --git a/UI/QRT/CMakeLists.txt b/UI/QRT/CMakeLists.txt
+index d548c354..2a0c2e70 100644
+--- a/UI/QRT/CMakeLists.txt
++++ b/UI/QRT/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ # The QRT front-end (github.com/grinkodbogdan/qrt): one static executable that is both the
+ # browser and, started as "ladybird <Helper>", each of its helper processes.
+-add_executable(ladybird main.cpp Application.cpp SandboxQRT.cpp)
++add_executable(ladybird main.cpp Application.cpp BrowserWindow.cpp SandboxQRT.cpp)
+ 
+ set(qrt_helpers Compositor ImageDecoder MediaServer RequestServer WebContent WebWorker)
+ if (ENABLE_CRANELIFT_JIT)
+@@ -26,5 +26,6 @@ if (ENABLE_CRANELIFT_JIT)
+ endif()
+ target_link_libraries(ladybird PRIVATE compositorservice imagedecoderservice mediaserverservice requestserverservice
+     webcontentservice webworkerservice LibSandbox LibThreading LibMedia LibURL LibWeb LibJS LibGC LibUnicode)
++target_link_libraries(ladybird PRIVATE qrt)      # the SDK's libqrt: windows in the QRT shell
+ target_include_directories(ladybird PRIVATE ${LADYBIRD_SOURCE_DIR}/Services ${CMAKE_BINARY_DIR}/Services ${CMAKE_BINARY_DIR})
+ create_ladybird_bundle(ladybird)
+diff --git a/UI/QRT/main.cpp b/UI/QRT/main.cpp
+index 66052fa4..04c39e4f 100644
+--- a/UI/QRT/main.cpp
++++ b/UI/QRT/main.cpp
+@@ -12,6 +12,7 @@
+ #include <LibMain/Main.h>
+ #include <LibWebView/Application.h>
+ #include <UI/QRT/Application.h>
++#include <UI/QRT/BrowserWindow.h>
+ 
+ #define QRT_HELPERS(X) \
+     X(Compositor)      \
+@@ -46,9 +47,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
+     auto app = TRY(Ladybird::Application::create(arguments));
+     if (app->should_exit_after_profile_coordination())
+         return 0;
+-    if (!Ladybird::Application::browser_options().headless_mode.has_value()) {
+-        warnln("ladybird: the QRT window is not there yet; use --headless=screenshot|text|layout-tree");
+-        return 1;
+-    }
++    // a window in the QRT shell (or, with --headless, no window at all)
++    OwnPtr<Ladybird::BrowserWindow> window;
++    if (!Ladybird::Application::browser_options().headless_mode.has_value())
++        window = TRY(Ladybird::BrowserWindow::create(Ladybird::Application::browser_options().urls));
+     return app->execute();
+ }
+-- 
+2.43.0
+
