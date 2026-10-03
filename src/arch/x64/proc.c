@@ -21,6 +21,7 @@
  */
 #include "proc.h"
 #include "lsock.h"
+#include "../../net/netstack.h"
 
 extern void enter_user(u64 rip, u64 rsp);
 extern void syscall_entry(void);
@@ -385,9 +386,44 @@ static int on_user_fault(frame_t *f) {
     return 1;
 }
 
+/* A fault in kernel code while it serves a program's system call (a kernel bug, reached
+ * through what the program asked): stop that program and keep the rest running, as
+ * Linux does with an "oops".  Not in an interrupt handler, not in a kernel thread (the
+ * shell, drivers), not on another core: there the panic screen is the honest answer. */
+static int on_kernel_fault(frame_t *f) {
+    thread_t *t = thread_current();
+    proc_t *p = t ? t->proc : NULL;
+    if (!p || !t->in_sys || t->irq_depth || p->exiting || p->exited) return 0;
+    char at[64], c1[64], c2[64];
+    kernel_symbol(f->rip, at, sizeof at);
+    c1[0] = c2[0] = 0;
+    int n = 0;
+    if (f->rsp > t->kstack && f->rsp < t->kstack_top)
+        for (u64 a = f->rsp & ~7ull; a + 8 <= t->kstack_top && n < 2; a += 8) {   /* two callers, from the stack */
+            char *c = n ? c2 : c1;
+            kernel_symbol(*(u64 *)(usize)a, c, 64);
+            if (c[0] >= '0' && c[0] <= '9') { c[0] = 0; continue; }    /* not code */
+            if (c[0] == 'k' && c[1] == '+') { c[0] = 0; continue; }
+            n++;
+        }
+    if (!n) klog("kernel fault: rsp %llx, stack %llx-%llx", f->rsp, t->kstack, t->kstack_top);
+    klog("kernel fault in a system call of %s (pid %d): %s at %s, address %llx",
+         p->name, p->pid, f->vector == 14 ? "page fault" : "exception", at, f->vector == 14 ? read_cr2() : 0);
+    klog("  called from %s %s - %s stopped, QRT goes on", c1, c2, p->name);
+    char msg[160];
+    fmt(msg, sizeof msg, "\n[%s: a QRT kernel bug stopped it - see System Monitor's log]\n", p->name);
+    term_append(p->term, msg, strlen(msg));
+    net_lock_forfeit(t);
+    t->in_sys = 0;
+    sti();
+    proc_exit(139);                                          /* never returns */
+    return 1;
+}
+
 void proc_init(void) {
     page_fault_hook = on_page_fault;
     user_fault_hook = on_user_fault;
+    kernel_fault_hook = on_kernel_fault;
     mm_enable_nx();                       /* PROT_EXEC means something now */
     /* the kernel writes into user buffers after checking them (proc_user_ok); a read-only
      * page there must not panic it (Linux would copy with a fault fixup) */

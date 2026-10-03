@@ -10,6 +10,7 @@
 /* The stack is single-threaded; the shell thread polls it and Linux
  * programs' socket calls enter it, so both take this lock. */
 static volatile int lock;
+static void *owner;                               /* the thread holding it (native) */
 
 void net_lock(void) {
     while (__atomic_exchange_n(&lock, 1, __ATOMIC_ACQUIRE)) {
@@ -18,8 +19,14 @@ void net_lock(void) {
 #endif
         __asm__ volatile("pause");
     }
+#if defined(__x86_64__)
+    if (k.native) owner = thread_current();
+#endif
 }
-void net_unlock(void) { __atomic_store_n(&lock, 0, __ATOMIC_RELEASE); }
+void net_unlock(void) { owner = NULL; __atomic_store_n(&lock, 0, __ATOMIC_RELEASE); }
+
+/* a thread stopped in the middle of a system call (a kernel fault, proc.c) gives the lock back */
+void net_lock_forfeit(void *thread) { if (thread && owner == thread) net_unlock(); }
 
 void netstack_poll(void) {
     net_lock();

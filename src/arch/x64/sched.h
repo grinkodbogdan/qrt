@@ -19,6 +19,7 @@ typedef struct thread {
     u64 clear_tid;              /* CLONE_CHILD_CLEARTID / set_tid_address: zeroed and woken at exit */
     volatile int in_sys;        /* inside a system call: may hold kernel locks */
     int kbuf;                   /* sendfile: the kernel's own buffer stands in for a user one */
+    int irq_depth;              /* inside interrupt handlers (boot core): a fault there is the kernel's, not the program's */
     u64 cpu_ticks;              /* ticks spent running */
     u64 sig_mask, sig_pending;  /* blocked signals; signals sent to this thread */
     u64 sig_saved_mask;         /* rt_sigsuspend: the mask to restore after the handler */
@@ -36,6 +37,7 @@ void      thread_sleep_ms(u64 ms);
 void      thread_yield(void);
 void      thread_block(void);                       /* until thread_wake() */
 void      thread_wake(thread_t *t);
+void      kernel_symbol(u64 addr, char *out, usize cap);   /* native.c: "function+offset" for a kernel address */
 void      thread_exit(void);                        /* never returns */
 int       sched_threads(thread_t **out, int max);   /* snapshot for the System app */
 u64       sched_idle_ticks(void);

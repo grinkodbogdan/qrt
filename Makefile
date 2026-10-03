@@ -72,8 +72,16 @@ build/x64/%.o: src/%.S
 build/BOOTIA32.EFI: $(IA32_OBJ)
 	$(LINK) $(LDFLAGS) -machine:x86 -out:$@ $^
 
-build/BOOTX64.EFI: $(X64_OBJ)
-	$(LINK) $(LDFLAGS) -machine:x64 -map:build/BOOTX64.map -out:$@ $^
+# two links: the first one's map names the functions (tools/symtab.py) for the crash screen;
+# the table is data placed after the code, so the code does not move in the second
+build/BOOTX64.EFI: $(X64_OBJ) tools/symtab.py
+	@mkdir -p build/x64/sym
+	echo 'const unsigned qrt_nsyms = 0; const unsigned qrt_sym_off[1], qrt_sym_name[1]; const char qrt_sym_str[1];' > build/x64/sym/none.c
+	$(CC) $(CFLAGS) $(X64_CFLAGS) -c build/x64/sym/none.c -o build/x64/sym/none.o
+	$(LINK) $(LDFLAGS) -machine:x64 -map:build/x64/sym/pass1.map -out:build/x64/sym/pass1.efi $(X64_OBJ) build/x64/sym/none.o
+	$(PYTHON) tools/symtab.py build/x64/sym/pass1.map build/x64/sym/symtab.c
+	$(CC) $(CFLAGS) $(X64_CFLAGS) -c build/x64/sym/symtab.c -o build/x64/sym/symtab.o
+	$(LINK) $(LDFLAGS) -machine:x64 -map:build/BOOTX64.map -out:$@ $(X64_OBJ) build/x64/sym/symtab.o
 
 # Linux programs shipped in /bin (run by the native kernel's Linux layer)
 BUSYBOX ?= /bin/busybox

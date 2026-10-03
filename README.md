@@ -176,6 +176,19 @@ touch back up on its own:
 
 QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830 is gone.
 
+### When something goes wrong (0.9.3)
+
+- **A kernel bug hit through a program** (a fault in kernel code while it serves that
+  program's system call, as in the browser page fault reported on 0.9.2) now stops only
+  that program, like Linux's "oops": the browser closes, QRT and the other apps go on, and
+  the log (System Monitor, the serial console) names the kernel function and its callers.
+  The network lock it held is given back.
+- **Anything else** (a fault in an interrupt handler, a driver thread, the shell) still
+  stops QRT, but the "QRT stopped" screen now says what happened in words: the kernel
+  function and its callers (QRT carries its own symbol table), the thread and program,
+  the registers and the last lines of the log.  A photo of that screen is enough to find
+  the bug.
+
 ## Native QRT programs (0.8.0)
 
 QRT has its own kind of program now, built with the **QRT SDK** (`sdk/`, `make sdk`):
@@ -650,9 +663,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.9.2.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.9.3.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.9.2.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.9.3.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

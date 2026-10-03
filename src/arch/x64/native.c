@@ -18,6 +18,8 @@
 #include "../../drivers/pci.h"
 #include "../../drivers/touch.h"
 #include "../../ui/gfx.h"
+#include "sched.h"
+#include "proc.h"
 
 extern void switch_stack(u64 top, void (*fn)(void *), void *arg);
 void native_smp_start(void);
@@ -32,34 +34,77 @@ u64 native_trampoline(void) { return trampoline_page; }
 /* ---- crash screen ---------------------------------------------------------- */
 static int in_panic;
 
+/* the kernel's function names (tools/symtab.py: a table the second link adds) */
+extern const unsigned qrt_nsyms, qrt_sym_off[], qrt_sym_name[];
+extern const char qrt_sym_str[];
+
+/* "thread_wake+0x3" for an address in the kernel, else "" */
+static void sym_of(u64 a, char *out, usize cap);
+void kernel_symbol(u64 a, char *out, usize cap) { sym_of(a, out, cap); if (!out[0]) fmt(out, cap, "%llx", a); }
+static void sym_of(u64 a, char *out, usize cap) {
+    out[0] = 0;
+    if (!k.image_base || a < k.image_base || a >= k.image_base + k.image_size) return;
+    u64 off = a - k.image_base;
+    int lo = 0, hi = (int)qrt_nsyms - 1, best = -1;
+    while (lo <= hi) { int m = (lo + hi) / 2; if (qrt_sym_off[m] <= off) { best = m; lo = m + 1; } else hi = m - 1; }
+    if (best < 0) fmt(out, cap, "k+%llx", off);
+    else fmt(out, cap, "%s+%llx", qrt_sym_str + qrt_sym_name[best], off - qrt_sym_off[best]);
+}
+
 void native_panic(const char *what, frame_t *f) {
     cli();
     if (in_panic++) for (;;) hlt();
-    char line[160];
+    char line[200], sym[64];
     fmt(line, sizeof line, "\n*** QRT kernel panic: %s\n", what);
     uart_write(line);
+    canvas_t c = { (u32 *)(usize)k.fb_base, (int)k.fb_w, (int)k.fb_h, (int)k.fb_stride,
+                   { 0, 0, (int)k.fb_w, (int)k.fb_h }, { 0, 0, (int)k.fb_w, (int)k.fb_h } };
+    const font_t *big = font_pick(F_SEMIBOLD, 40), *sm = font_pick(F_REGULAR, 26);
+    int y = c.h / 10, x = c.w / 14;
+#define OUT(col) do { uart_write(line); uart_write("\n"); if (k.fb_base) { gfx_text_fit(&c, sm, x, y, c.w - 2 * x, line, col); y += sm->line + 4; } } while (0)
     if (k.fb_base) {
-        canvas_t c = { (u32 *)(usize)k.fb_base, (int)k.fb_w, (int)k.fb_h, (int)k.fb_stride,
-                       { 0, 0, (int)k.fb_w, (int)k.fb_h }, { 0, 0, (int)k.fb_w, (int)k.fb_h } };
         gfx_fill(&c, (rect_t){ 0, 0, c.w, c.h }, RGB(0x2a, 0x0a, 0x18));
-        const font_t *big = font_pick(F_SEMIBOLD, 40), *sm = font_pick(F_REGULAR, 20);
-        int y = c.h / 6, x = c.w / 12;
         gfx_text(&c, big, x, y, "QRT stopped", RGB(255, 255, 255));
         y += big->line * 2;
-        gfx_text(&c, sm, x, y, what, RGB(255, 180, 200));
-        y += sm->line * 2;
-        if (f) {
-            fmt(line, sizeof line, "rip %llx  cs %llx  rflags %llx  err %llx", f->rip, f->cs, f->rflags, f->err);
-            gfx_text(&c, sm, x, y, line, RGB(230, 230, 240)); y += sm->line; uart_write(line); uart_write("\n");
-            fmt(line, sizeof line, "rsp %llx  cr2 %llx  vector %llu", f->rsp, read_cr2(), f->vector);
-            gfx_text(&c, sm, x, y, line, RGB(230, 230, 240)); y += sm->line; uart_write(line); uart_write("\n");
-            fmt(line, sizeof line, "rax %llx rbx %llx rcx %llx rdx %llx", f->rax, f->rbx, f->rcx, f->rdx);
-            gfx_text(&c, sm, x, y, line, RGB(180, 180, 200)); y += sm->line;
-            fmt(line, sizeof line, "rsi %llx rdi %llx rbp %llx r12 %llx", f->rsi, f->rdi, f->rbp, f->r12);
-            gfx_text(&c, sm, x, y, line, RGB(180, 180, 200)); y += sm->line * 2;
-        }
-        gfx_text(&c, sm, x, y, "Hold the power button to turn the tablet off.", RGB(200, 200, 210));
     }
+    strlcpy(line, what, sizeof line);
+    OUT(RGB(255, 180, 200));
+    thread_t *t = thread_current();
+    if (t) {
+        proc_t *p = t->proc;
+        fmt(line, sizeof line, "thread %s%s%s (pid %d)", t->name ? t->name : "?", p ? ", process " : "", p ? p->name : "", p ? p->pid : 0);
+        OUT(RGB(230, 230, 240));
+    }
+    if (f) {
+        /* where, by name: the code that faulted, then return addresses found on its stack */
+        sym_of(f->rip, sym, sizeof sym);
+        fmt(line, sizeof line, "at %s  (rip %llx, cr2 %llx, err %llx, vector %llu)", sym[0] ? sym : "?", f->rip, read_cr2(), f->err, f->vector);
+        OUT(RGB(255, 255, 255));
+        fmt(line, sizeof line, "rax %llx rbx %llx rcx %llx rdx %llx rsp %llx", f->rax, f->rbx, f->rcx, f->rdx, f->rsp);
+        OUT(RGB(180, 180, 200));
+        fmt(line, sizeof line, "rsi %llx rdi %llx rbp %llx r8 %llx r12 %llx", f->rsi, f->rdi, f->rbp, f->r8, f->r12);
+        OUT(RGB(180, 180, 200));
+        if ((f->cs & 3) == 0 && t && f->rsp > t->kstack && f->rsp < t->kstack_top) {
+            int n = 0;
+            for (u64 a = f->rsp & ~7ull; a + 8 <= t->kstack_top && n < 8; a += 8) {
+                u64 v = *(u64 *)(usize)a;
+                sym_of(v, sym, sizeof sym);
+                if (!sym[0] || sym[0] == 'k') continue;
+                fmt(line, sizeof line, "  called from %s", sym);
+                OUT(RGB(210, 210, 230));
+                n++;
+            }
+        }
+    }
+    /* what happened just before */
+    y += 8;
+    int first = 0;
+    while (klog_line(first)) first++;
+    for (int i = first > 6 ? first - 6 : 0; i < first; i++) { strlcpy(line, klog_line(i), sizeof line); OUT(RGB(150, 150, 170)); }
+    y += 8;
+    strlcpy(line, "Hold the power button to turn the tablet off. A photo of this screen tells what to fix.", sizeof line);
+    OUT(RGB(200, 200, 210));
+#undef OUT
     for (;;) hlt();
 }
 

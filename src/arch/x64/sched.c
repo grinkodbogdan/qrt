@@ -141,6 +141,11 @@ void thread_block(void) {
 }
 
 void thread_wake(thread_t *t) {
+    if (!t) {                                    /* a bug in the caller: say who, and carry on */
+        static int told;
+        if (!told++) { char w[64]; kernel_symbol((u64)(usize)__builtin_return_address(0), w, sizeof w); klog("sched: thread_wake(NULL) from %s", w); }
+        return;
+    }
     u64 fl = irq_save();
     if (t->state == T_BLOCKED || t->state == T_SLEEPING) { t->state = T_RUNNABLE; wake_pending = 1; }
     irq_restore(fl);

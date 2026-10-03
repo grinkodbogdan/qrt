@@ -6,6 +6,7 @@
  *   0x20 user data   0x28 user code64   0x30 TSS (16 bytes)
  */
 #include "arch.h"
+#include "sched.h"
 
 percpu_t *cpus[MAX_CPUS];
 int ncpus;
@@ -88,6 +89,7 @@ static const char *exc_name(u64 v) {
 /* user-mode faults are handed to the process layer (which kills the process) */
 int (*user_fault_hook)(frame_t *f);
 int (*page_fault_hook)(frame_t *f);      /* demand paging of user memory */
+int (*kernel_fault_hook)(frame_t *f);    /* a kernel fault in a program's system call: stop the program (never returns) */
 
 void (*user_return_hook)(frame_t *f);
 
@@ -96,11 +98,15 @@ void isr_dispatch(frame_t *f) {
     if (v < 32) {
         if (v == 14 && page_fault_hook && page_fault_hook(f)) return;
         if ((f->cs & 3) && user_fault_hook && user_fault_hook(f)) return;
+        if (!(f->cs & 3) && kernel_fault_hook && this_cpu()->index == 0) kernel_fault_hook(f);   /* returns only if it cannot help */
         native_panic(exc_name(v), f);
     }
     /* acknowledge first: a handler may switch threads (the timer does) and
      * must not leave this vector in service while another thread runs */
     if (v != VEC_SPURIOUS) lapic_eoi();
+    struct thread *t = this_cpu()->index == 0 ? thread_current() : NULL;
+    if (t) t->irq_depth++;
     if (handlers[v]) handlers[v](f);
+    if (t) t->irq_depth--;
     if ((f->cs & 3) && user_return_hook) user_return_hook(f);   /* signals for a thread interrupted in user mode */
 }
