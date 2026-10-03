@@ -17,6 +17,7 @@
 #include "i915/gpu.h"
 #include "usb/xhci.h"
 #include "audio.h"
+#include "speaker.h"
 #if defined(__x86_64__)
 #include "../arch/x64/irq.h"
 #endif
@@ -70,12 +71,14 @@ static const char *const codec_acpi[] = { "10EC5672", "10EC5670", "10EC5640", NU
 static const pci_match_t sst_pci[] = { { 0x8086, 0x22a8, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x0f28, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
 static int codec_owner;
 static void codec_status(device_t *d) {
-    if (d->bus == BUS_PCI) strlcpy(d->status, "Intel SST audio DSP: firmware loading not written yet", sizeof d->status);
+    if (d->bus == BUS_PCI) fmt(d->status, sizeof d->status, "Intel audio DSP (speakers): %s", speaker_status());
     else if (d->priv) strlcpy(d->status, audio_status(), sizeof d->status);
     else strlcpy(d->status, "another entry for the same codec slot", sizeof d->status);
 }
 static int codec_probe(device_t *d) {
+    static int started;
     if (d->bus == BUS_ACPI && !codec_owner) { codec_owner = 1; d->priv = d; }
+    if (!started && k.is_venue) { started = 1; speaker_start(); }   /* the DSP may be a PCI device or only in ACPI */
     codec_status(d);
     return 0;
 }

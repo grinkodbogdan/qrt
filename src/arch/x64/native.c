@@ -19,6 +19,7 @@
 #include "../../drivers/touch.h"
 #include "../../drivers/battery.h"
 #include "../../drivers/pmic.h"
+#include "../../drivers/audio.h"
 #include "../../ui/gfx.h"
 #include "sched.h"
 #include "proc.h"
@@ -229,6 +230,7 @@ static void native_main(void *arg) {
     klog("native: %s", nt.status[0] ? nt.status : "touch not present");
     battery_native_resume();
     pmic_native_resume();
+    audio_native_resume();
     strlcpy(k.boot_note, "Native kernel", sizeof k.boot_note);
     irq_init();                            /* I/O APICs from the MADT, every line masked */
     dev_init();                            /* enumerate PCI/ACPI/platform devices, bind drivers */

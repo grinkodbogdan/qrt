@@ -30,9 +30,14 @@ static int read_reg(dwi2c_t *bus, u8 reg, u16 *val) {
     return 0;
 }
 
+static dwi2c_t bus;
+static int codec_found;
+
+dwi2c_t *audio_bus(void) { return codec_found ? &bus : NULL; }
+void audio_native_resume(void) { if (codec_found && dwi2c_restore(&bus, 2)) { codec_found = 0; klog("audio: I2C2 did not come back after the handover"); } }
+
 void audio_probe(void) {
     if (!k.is_venue) { strlcpy(status, "no known codec on this machine", sizeof status); return; }
-    static dwi2c_t bus;
     int e = dwi2c_find(&bus, 0, 0x18, 2);
     if (e) { fmt(status, sizeof status, "I2C2 controller: %s", dwi2c_strerror(e)); klog("audio: %s", status); return; }
     u16 vendor = 0, dev = 0;
@@ -41,7 +46,7 @@ void audio_probe(void) {
     if (e) { fmt(status, sizeof status, "codec at I2C2 0x1c does not answer (%s)", dwi2c_strerror(e)); klog("audio: %s", status); return; }
     const char *name = dev == 0x6271 ? "Realtek RT5670/RT5672" : dev == 0x6231 ? "Realtek RT5640/RT5639" :
                        dev == 0x6281 ? "Realtek RT5651" : NULL;
-    if (name) fmt(status, sizeof status, "%s codec found (I2C2 0x1c, id %04x, vendor %04x); the speaker needs the SST DSP driver, not written yet", name, dev, vendor);
+    if (name) { fmt(status, sizeof status, "%s codec (I2C2 0x1c, id %04x, vendor %04x)", name, dev, vendor); codec_found = dev == 0x6271; dwi2c_save(&bus); }
     else fmt(status, sizeof status, "unknown codec at I2C2 0x1c (id %04x, vendor %04x)", dev, vendor);
     klog("audio: %s", status);
 }
