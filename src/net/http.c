@@ -151,6 +151,7 @@ int http_parse_head(const u8 *buf, usize len, http_head_t *h) {
         if (l > 13 && ci_prefix(line, "content-type:")) header_value(line, l, 13, h->content_type, sizeof h->content_type);
         else if (l > 9 && ci_prefix(line, "location:")) header_value(line, l, 9, h->location, sizeof h->location);
         else if (l > 17 && ci_prefix(line, "content-encoding:")) header_value(line, l, 17, h->encoding, sizeof h->encoding);
+        else if (l > 5 && ci_prefix(line, "date:")) header_value(line, l, 5, h->date, sizeof h->date);
         else if (l > 15 && ci_prefix(line, "content-length:")) {
             header_value(line, l, 15, v, sizeof v);
             long n = 0;
@@ -428,6 +429,36 @@ const char *http_url(http_t *h) { return h->url; }
 const char *http_content_type(http_t *h) { return h->head.content_type; }
 const u8 *http_body(http_t *h, usize *len) { *len = h->body_len; return h->body; }
 int  http_secure(http_t *h) { return h->secure; }
+const char *http_date(http_t *h) { return h->head.date; }
+
+/* RFC 9110's IMF-fixdate, the form every current server sends */
+long long http_date_parse(const char *s) {
+    static const char mon[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    const char *p = s;
+    while (*p && *p != ',') p++;
+    if (*p++ != ',') return -1;
+    while (*p == ' ') p++;
+    int d = 0, y = 0, h = 0, mi = 0, se = 0, m = 0;
+    while (*p >= '0' && *p <= '9') d = d * 10 + (*p++ - '0');
+    if (*p++ != ' ') return -1;
+    for (m = 0; m < 12; m++) if (!memcmp(p, mon + 3 * m, 3)) break;
+    if (m == 12) return -1;
+    p += 3;
+    if (*p++ != ' ') return -1;
+    while (*p >= '0' && *p <= '9') y = y * 10 + (*p++ - '0');
+    if (*p++ != ' ') return -1;
+    for (int *f[3] = { &h, &mi, &se }, i = 0; i < 3; i++) {
+        if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9') return -1;
+        *f[i] = (p[0] - '0') * 10 + (p[1] - '0');
+        p += 2;
+        if (i < 2 && *p++ != ':') return -1;
+    }
+    if (y < 1970 || d < 1 || d > 31 || h > 23 || mi > 59 || se > 60) return -1;
+    long long yy = y - (m < 2), era = yy / 400, yoe = yy - era * 400;
+    long long doy = (153 * (m + (m >= 2 ? -2 : 10)) + 2) / 5 + d - 1;
+    long long days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+    return days * 86400 + h * 3600 + mi * 60 + se;
+}
 
 void http_free(http_t *h) {
     if (!h) return;

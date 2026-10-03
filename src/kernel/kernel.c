@@ -25,15 +25,6 @@ static inline u64 rdtsc(void) {
 u64 k_now_ms(void) { return (rdtsc() - k.tsc_boot) / k.tsc_per_ms; }
 u64 k_now_us(void) { return (rdtsc() - k.tsc_boot) * 1000 / k.tsc_per_ms; }
 
-void k_walltime(EFI_TIME *t) {
-    memset(t, 0, sizeof *t);
-    if (EFI_ERROR(k.rt->GetTime(t, NULL))) {
-        /* no RTC: count from boot so the clock still ticks */
-        u64 s = k_now_ms() / 1000;
-        t->Year = 2026; t->Month = 1; t->Day = 1;
-        t->Hour = (u8)(s / 3600 % 24); t->Minute = (u8)(s / 60 % 60); t->Second = (u8)(s % 60);
-    }
-}
 
 static void calibrate_clock(void) {
     u64 a = rdtsc();
@@ -82,15 +73,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     klog("QRT %s (%s) - Tessera kernel", QRT_VERSION, QRT_ARCH);
     calibrate_clock();
     klog("clock: %llu kHz TSC", k.tsc_per_ms);
-    {   /* Unix epoch at boot, from the RTC (days-from-civil) */
-        EFI_TIME t;
-        k_walltime(&t);
-        i64 y = t.Year - (t.Month <= 2), era = (y >= 0 ? y : y - 399) / 400;
-        i64 yoe = y - era * 400, mp = (t.Month + 9) % 12;
-        i64 doy = (153 * mp + 2) / 5 + t.Day - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        i64 days = era * 146097 + doe - 719468;
-        k.epoch_at_boot = (u64)(days * 86400 + t.Hour * 3600 + t.Minute * 60 + t.Second) - k_now_ms() / 1000;
-    }
+    time_init();                     /* the wall clock, from the RTC (time.c) */
 
     connect_all_drivers();
     klog("firmware: %d handles, %d controllers connected", k.handles, k.drivers_connected);

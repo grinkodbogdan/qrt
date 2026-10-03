@@ -38,10 +38,10 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
 
 typedef struct {
     int x, w;                                   /* the clamped column */
-    int y_look, y_power, y_sound, y_start, y_system, y_about;
-    rect_t accent[N_ACCENTS], rot[4], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], power[3];
+    int y_look, y_power, y_sound, y_time, y_start, y_system, y_about;
+    rect_t accent[N_ACCENTS], rot[4], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], power[3], tz[2];
     rect_t bright, vol;                         /* slider tracks */
-    rect_t g_look, g_power, g_sound, g_start, g_system, g_about;   /* group boxes */
+    rect_t g_look, g_power, g_sound, g_time, g_start, g_system, g_about;   /* group boxes */
     int bottom;
 } lay_t;
 
@@ -77,6 +77,13 @@ static lay_t layout(rect_t a) {
     L.g_sound = (rect_t){ x, y, w, ROW_H };
     L.vol = (rect_t){ x + w / 2, y + ROW_H / 2 - dp(3), w / 2 - pad, dp(6) };
     y += L.g_sound.h + dp(24);
+
+    /* Date & time: the clock, the time zone */
+    L.y_time = y; y += title;
+    L.g_time = (rect_t){ x, y, w, 2 * ROW_H };
+    int tw = MIN(dp(64), w / 6);
+    for (int i = 0; i < 2; i++) L.tz[i] = (rect_t){ x + w - pad - 2 * tw + i * tw, y + ROW_H + dp(11), tw, ROW_H - dp(22) };
+    y += L.g_time.h + dp(24);
 
     /* Startup (64-bit only) */
     L.y_start = y;
@@ -162,6 +169,23 @@ static void draw(canvas_t *c, rect_t a) {
     row_label(c, L.g_sound, 0, "Volume", NULL);
     slider(c, L.vol, shell_volume());
 
+    {
+        static const char *mon[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+        EFI_TIME t;
+        k_walltime(&t);
+        char now[40], zone[48];
+        fmt(now, sizeof now, "%u %s %u  %02u:%02u", t.Day, mon[(t.Month + 11) % 12], t.Year, t.Hour, t.Minute);
+        int z = time_zone();
+        fmt(zone, sizeof zone, "UTC%c%d:%02d%s", z < 0 ? '-' : '+', ABS_I(z) / 3600, ABS_I(z) / 60 % 60, time_zone_known() ? "" : " (not set yet)");
+        group(c, L.g_time, L.y_time, "Date & time", 2);
+        row_label(c, L.g_time, 0, "Date and time", time_synced() ? "Set from the network" : "Waiting for the network (secure sites need the right date)");
+        int vw = text_width(ui.body, now);
+        gfx_text(c, ui.body, L.g_time.x + L.g_time.w - dp(16) - vw, L.g_time.y + (ROW_H - ui.body->line) / 2, now, ui.text2);
+        row_label(c, L.g_time, 1, "Time zone", zone);
+        segment(c, L.tz[0], "-", 0, 1, 0);
+        segment(c, L.tz[1], "+", 0, 0, 1);
+    }
+
     if (sizeof(void *) == 8) {
         int fw = st.fw_mode;                     /* draw() may run on any core: no firmware calls here */
         group(c, L.g_start, L.y_start, "Startup", 4);
@@ -234,6 +258,8 @@ static int event(const event_t *e, rect_t a) {
     for (int i = 0; i < N_ACCENTS; i++) if (in_rect(grab(L.accent[i]), e->x, e->y)) { shell_set_accent(i); return 1; }
     for (int i = 0; i < 4; i++) if (in_rect(L.rot[i], e->x, e->y)) { shell_set_rotation(i); return 1; }
     for (int i = 0; i < N_SLEEP; i++) if (in_rect(L.sleep[i], e->x, e->y)) { shell_set_sleep_after(sleep_secs[i]); return 1; }
+    for (int i = 0; i < 2; i++)
+        if (in_rect(L.tz[i], e->x, e->y)) { time_set_zone(time_zone() + (i ? 1800 : -1800)); shell_redraw(); return 1; }
     if (sizeof(void *) == 8)
         for (int i = 0; i < 2; i++)
             if (in_rect(L.kern[i], e->x, e->y)) { hal_setting_set(u"QrtBootMode", (u32)i); st.fw_mode = i; return 1; }

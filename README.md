@@ -130,17 +130,33 @@ takes over the machine. From then on, everything is QRT's own code:
 | Memory | physical page allocator, kernel heap, 4-level page tables (identity map with 2 MB pages, write-combining framebuffer via PAT) |
 | CPU | per-core GDT/TSS/IDT, exception handling with a crash screen |
 | Interrupts | local APIC (xAPIC/x2APIC); I/O APIC routing from the MADT; MSI for PCI |
-| Time | TSC calibrated at boot, 1 kHz local-APIC timer |
+| Time | TSC calibrated at boot, 1 kHz local-APIC timer; the wall clock from the RTC, set from the network (SNTP, or an HTTP `Date:` header where NTP is blocked) |
 | Scheduling | preemptive threads, 10 ms round-robin; idle cores halt |
 | Multicore | other cores started by QRT itself (INIT/SIPI through a real-mode trampoline) and used for rendering |
 | Files | in-memory file system: the boot stick plus `/proc`, `/etc`, `/tmp`, `/dev` |
 | Processes | ring-3 address spaces, ELF loader, demand paging, `SYSCALL` entry |
 | Linux ABI | the system calls static glibc, musl and busybox programs need, including sockets and poll/select |
-| Network | Ethernet/802.11 → ARP, IPv4, ICMP, UDP, TCP; DHCP client, DNS resolver (`src/net/`) |
+| Network | Ethernet/802.11 → ARP, IPv4, ICMP, UDP, TCP; DHCP client, DNS resolver, SNTP (`src/net/`) |
 | Drivers | a driver model over PCI, ACPI and platform devices; see below |
 
 The firmware is kept only for its *runtime* services: the RTC, NVRAM
 variables (where settings are stored) and reset/power-off.
+
+### The clock
+
+Secure sites need the right date: a certificate is valid only between two dates, so a
+clock in the past makes every https:// page fail with "SSL verification failed". The
+Venue's RTC goes back to a default date (a day in January) when the battery runs
+completely flat. QRT therefore:
+- treats an RTC date before the build as a reset and starts from the build date;
+- sets the time from the network as soon as it has an address: SNTP (`pool.ntp.org`,
+  `time.google.com`, `time.cloudflare.com`), or, when NTP gets no answer, the `Date:`
+  header of `http://www.google.com/generate_204`. It checks again every 6 hours;
+- writes the corrected time back to the RTC, so the next boot starts right even offline.
+
+The RTC holds local time, as Windows keeps it. When it was right, QRT learns the time zone
+from it on the first sync. Otherwise, set the zone in **Settings → Date & time**, which also
+shows whether the time came from the network.
 
 The UI and the apps behave the same in both stages. Underneath, a HAL
 (`src/kernel/hal.c`) hands them either firmware services or native drivers.

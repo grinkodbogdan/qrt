@@ -13,7 +13,7 @@ LINK    := lld-link
 PYTHON  ?= python3
 HOSTCC  ?= gcc
 
-SRC := src/kernel/kernel.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
+SRC := src/kernel/kernel.c src/kernel/time.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
        src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c src/drivers/backlight.c src/drivers/audio.c src/drivers/e1000.c \
        src/drivers/iwm/iwm.c src/drivers/i915/gpu.c src/drivers/i915/display.c src/drivers/usb/xhci.c src/drivers/bt/hci.c src/drivers/bt/btusb.c src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
        src/ui/gfx.c src/ui/shell.c src/ui/clientwin.c src/ui/fontdata.c \
@@ -57,6 +57,9 @@ src/ui/fontdata.c: tools/mkfont.py
 build/ia32/%.o: src/%.c $(wildcard src/*.h src/*/*.h src/*/*/*.h)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(IA32_CFLAGS) -c $< -o $@
+
+# the clock's floor: a date before this commit means the RTC was reset (time.c)
+build/x64/kernel/time.o: CFLAGS += -DQRT_BUILD_EPOCH=$(shell git log -1 --format=%ct 2>/dev/null || echo 1767225600)ull
 
 build/x64/%.o: src/%.c $(wildcard src/*.h src/*/*.h src/*/*/*.h)
 	@mkdir -p $(dir $@)

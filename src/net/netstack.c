@@ -27,6 +27,7 @@ void netstack_poll(void) {
     wlan_poll();
     net_poll();
     net_unlock();
+    net_time_http_poll();
 }
 
 /* the home screen's network line */

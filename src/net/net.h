@@ -1,4 +1,4 @@
-/* net.h - QRT's IPv4 stack: ARP, IPv4, ICMP, UDP, DHCP client, DNS, TCP.
+/* net.h - QRT's IPv4 stack: ARP, IPv4, ICMP, UDP, DHCP client, DNS, SNTP, TCP.
  *
  * Link drivers (Wi-Fi through wlan.c, the e1000 in QEMU) register a netif
  * and hand received Ethernet frames to net_input(); everything runs from
@@ -20,6 +20,7 @@ void net_register(netif_t *n);
 void net_link_changed(netif_t *n);   /* call after changing n->link: starts or stops DHCP */
 void net_input(netif_t *n, const u8 *eth, usize len);
 void net_poll(void);
+void net_time_http_poll(void);       /* the clock's HTTP fallback; call without the network lock */
 netif_t *net_primary(void);          /* the configured interface, if any */
 const char *net_status(void);        /* one line for the UI */
 

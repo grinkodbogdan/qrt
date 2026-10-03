@@ -41,7 +41,7 @@ typedef struct {
     int graphics_up;
     int native;         /* 1 once the firmware's boot services are gone (x86-64) */
     u64 image_base, image_size;
-    u64 epoch_at_boot;  /* Unix time (local RTC) when the kernel started */
+    u64 epoch_at_boot;  /* Unix time (UTC) when k_now_ms() was 0; moves when the network sets the time */
 
     /* display */
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
@@ -89,7 +89,17 @@ extern kernel_t k;
 /* ---- clock ---- */
 u64  k_now_ms(void);
 u64  k_now_us(void);
-void k_walltime(EFI_TIME *t);
+void k_walltime(EFI_TIME *t);       /* local date and time */
+/* the wall clock (time.c): UTC from the RTC, corrected by SNTP once the network is up */
+void time_init(void);
+u64  time_utc(void);
+u64  time_utc_us(void);
+void time_set_utc(u64 utc, const char *source);
+int  time_synced(void);
+u64  time_synced_ago_ms(void);
+int  time_zone(void);               /* local = UTC + this many seconds */
+int  time_zone_known(void);
+void time_set_zone(int offset_s);
 
 /* ---- input: normalised event stream (physical framebuffer coords) ---- */
 /* EV_REL: a mouse report - x, y movement (or, with from_mouse == 2, an absolute

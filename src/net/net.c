@@ -1,5 +1,5 @@
 /*
- * net.c - Ethernet, ARP, IPv4, ICMP, UDP, DHCP and DNS (TCP is in tcp.c).
+ * net.c - Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS and SNTP (TCP is in tcp.c).
  *
  * Deliberately small: one active interface, no IP fragments, no IPv6.
  * Received frames are handled at once; outgoing IP packets wait in a short
@@ -8,6 +8,7 @@
 #include "net.h"
 #include "wifilog.h"
 #include "crypto.h"
+#include "http.h"
 
 #define LOG(...) wifilog("net: " __VA_ARGS__)
 
@@ -486,6 +487,104 @@ static void dns_poll(void) {
     }
 }
 
+/* ---- SNTP: the wall clock from the network (RFC 4330) --------------------------------------- *
+ * Certificates are checked against the clock, so https:// needs the right date.  Once an
+ * interface has an address: ask the servers in turn (every 5 s until one answers), then again
+ * every 6 hours. */
+static const char *const ntp_servers[] = { "pool.ntp.org", "time.google.com", "time.cloudflare.com" };
+static struct {
+    int state;                 /* 0 idle, 1 resolving, 2 waiting for the answer */
+    int server, dq, misses;    /* misses: servers in a row that did not answer */
+    http_t *http;              /* the fallback: an HTTP server's Date: header */
+    int want_http;
+    u16 port;
+    u8 sent[8];                /* our transmit timestamp, echoed back as the originate one */
+    u64 next_ms, sent_ms;
+} ntp;
+
+static void ntp_input(void *ctx, u32 src, u16 sport, const u8 *m, usize len) {
+    (void)ctx; (void)src;
+    if (ntp.state != 2 || sport != 123 || len < 48) return;
+    int mode = m[0] & 7, stratum = m[1];
+    if (mode != 4 || stratum == 0 || stratum > 15 || memcmp(m + 24, ntp.sent, 8)) return;   /* not our answer, or kiss-o'-death */
+    u64 secs = be32(m + 40), frac = be32(m + 44);
+    if (secs < 2208988800ull) return;
+    u64 rtt = k_now_ms() - ntp.sent_ms;
+    u64 utc = secs - 2208988800ull + ((frac * 1000 >> 32) + rtt / 2) / 1000;   /* the server's time, plus half the round trip */
+    udp_unbind(ntp.port);
+    ntp.state = 0;
+    ntp.misses = 0;
+    ntp.next_ms = k_now_ms() + 6 * 3600 * 1000ull;
+    time_set_utc(utc, ntp_servers[ntp.server]);
+}
+
+/* some networks block NTP: a plain-HTTP reply's Date: header is good to a second or two.
+ * http.c takes the network lock itself, so this runs from netstack_poll() outside it. */
+#define DATE_URL "http://www.google.com/generate_204"
+void net_time_http_poll(void) {
+    if (ntp.want_http && !ntp.http) {
+        ntp.want_http = 0;
+        if (net_primary()) ntp.http = http_get(DATE_URL);
+    }
+    if (!ntp.http) return;
+    int r = net_primary() ? http_poll(ntp.http) : -1;
+    if (r == 0) return;
+    long long t = r > 0 ? http_date_parse(http_date(ntp.http)) : -1;
+    if (t <= 0) LOG("SNTP: the HTTP date failed too: %s", r > 0 ? "no usable Date header" : http_error(ntp.http));
+    http_free(ntp.http);
+    ntp.http = NULL;
+    if (t > 0) {
+        ntp.misses = 0;
+        ntp.next_ms = k_now_ms() + 6 * 3600 * 1000ull;
+        time_set_utc((u64)t, "an HTTP Date header");
+    } else ntp.next_ms = k_now_ms() + 30000;
+}
+
+static void ntp_poll(void) {
+    u64 now = k_now_ms();
+    netif_t *n = net_primary();
+    if (!n || !n->ip) {
+        if (ntp.state == 2) udp_unbind(ntp.port);
+        ntp.state = 0;
+        return;
+    }
+    if (ntp.http || ntp.want_http) return;
+    /* not set yet: one silent server is enough to try HTTP too (https:// waits on the date) */
+    if (ntp.state == 0 && now >= ntp.next_ms && ntp.misses >= (time_synced() ? (int)ARRAY_LEN(ntp_servers) : 1)) {
+        ntp.misses = 0;
+        if (!time_synced()) { LOG("SNTP: no answer; asking an HTTP server for the date"); ntp.want_http = 1; }
+        else ntp.next_ms = now + 6 * 3600 * 1000ull;
+        return;
+    }
+    if (ntp.state == 0 && now >= ntp.next_ms) {
+        ntp.dq = dns_start(ntp_servers[ntp.server]);
+        ntp.state = ntp.dq >= 0 ? 1 : 0;
+        ntp.next_ms = now + 5000;
+    } else if (ntp.state == 1) {
+        u32 ip = 0;
+        int r = dns_result(ntp.dq, &ip);
+        if (r == 0) return;
+        ntp.state = 0;
+        if (r < 0 || !ip) { ntp.server = (ntp.server + 1) % (int)ARRAY_LEN(ntp_servers); ntp.misses++; return; }
+        ntp.port = udp_ephemeral();
+        if (!ntp.port || udp_bind(ntp.port, ntp_input, NULL)) return;
+        u8 m[48];
+        memset(m, 0, sizeof m);
+        m[0] = 0x23;                                     /* version 4, client */
+        random_bytes(ntp.sent, sizeof ntp.sent);         /* a nonce for the transmit timestamp */
+        memcpy(m + 40, ntp.sent, 8);
+        ntp.sent_ms = now;
+        udp_send(ip, ntp.port, 123, m, sizeof m);
+        ntp.state = 2;
+        ntp.next_ms = now + 5000;
+    } else if (ntp.state == 2 && now >= ntp.next_ms) {   /* no answer: the next server */
+        udp_unbind(ntp.port);
+        ntp.state = 0;
+        ntp.server = (ntp.server + 1) % (int)ARRAY_LEN(ntp_servers);
+        ntp.misses++;
+    }
+}
+
 /* ---- poll + status ------------------------------------------------------------------------ */
 void net_poll(void) {
     u64 now = k_now_ms();
@@ -498,6 +597,7 @@ void net_poll(void) {
     }
     dhcp_poll();
     dns_poll();
+    ntp_poll();
     tcp_poll();
 }
 

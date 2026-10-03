@@ -14,7 +14,7 @@ void url_encode_component(const char *in, char *out, usize cap);             /* 
 /* the parts of a response QRT uses; body is decoded (chunked) in place */
 typedef struct {
     int code;
-    char content_type[128], location[2048], encoding[32];
+    char content_type[128], location[2048], encoding[32], date[40];
     long content_length;              /* -1 = not given */
     int chunked;
     usize header_len;                 /* bytes up to and including the blank line */
@@ -34,5 +34,7 @@ const char *http_url(http_t *h);            /* after redirects */
 const char *http_content_type(http_t *h);
 const u8 *http_body(http_t *h, usize *len);
 int  http_secure(http_t *h);                /* fetched over TLS */
+const char *http_date(http_t *h);           /* the server's Date: header, "" if none */
+long long http_date_parse(const char *s);  /* "Sun, 06 Nov 1994 08:49:37 GMT" -> Unix time, -1 = bad */
 void http_free(http_t *h);
 #endif
