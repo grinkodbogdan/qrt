@@ -5,6 +5,12 @@
 #include "../drivers/backlight.h"
 #include "../drivers/ish.h"
 #include "../drivers/speaker.h"
+#if defined(__x86_64__)
+int sched_smp_enabled(void);
+static int smp_programs_on(void) { return k.native && sched_smp_enabled(); }
+#else
+static int smp_programs_on(void) { return 0; }
+#endif
 #include "../drivers/i915/gpu.h"
 #include "../drivers/i915/display.h"
 
@@ -43,7 +49,7 @@ typedef struct {
     int x, w;                                   /* the clamped column */
     int y_look, y_power, y_sound, y_time, y_start, y_system, y_about;
     rect_t outsel[5]; int nout; const char *outname[4];
-    rect_t accent[N_ACCENTS], rot[5], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], power[3], tz[2], test;
+    rect_t accent[N_ACCENTS], rot[5], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], cores[2], power[3], tz[2], test;
     rect_t bright, vol;                         /* slider tracks */
     rect_t g_look, g_power, g_sound, g_time, g_start, g_system, g_about;   /* group boxes */
     int bottom;
@@ -99,12 +105,13 @@ static lay_t layout(rect_t a) {
     L.y_start = y;
     if (sizeof(void *) == 8) {
         y += title;
-        L.g_start = (rect_t){ x, y, w, 4 * ROW_H };
+        L.g_start = (rect_t){ x, y, w, 5 * ROW_H };
         int kw = MIN(dp(130), w / 4);
         for (int i = 0; i < 2; i++) L.kern[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + dp(11), kw, ROW_H - dp(22) };
         for (int i = 0; i < 2; i++) L.gpu[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + ROW_H + dp(11), kw, ROW_H - dp(22) };
         for (int i = 0; i < 2; i++) L.ext[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + 2 * ROW_H + dp(11), kw, ROW_H - dp(22) };
         for (int i = 0; i < 2; i++) L.desk[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + 3 * ROW_H + dp(11), kw, ROW_H - dp(22) };
+        for (int i = 0; i < 2; i++) L.cores[i] = (rect_t){ x + w - pad - 2 * kw + i * kw, y + 4 * ROW_H + dp(11), kw, ROW_H - dp(22) };
         y += L.g_start.h + dp(24);
     } else L.g_start = (rect_t){ 0 };
 
@@ -180,7 +187,7 @@ static void draw(canvas_t *c, rect_t a) {
     group(c, L.g_power, L.y_power, "Power", bl() ? 3 : 2);
     row_label(c, L.g_power, 0, "Automatic sleep", "Lock and turn the screen off after");
     for (int i = 0; i < N_SLEEP; i++) segment(c, L.sleep[i], sleep_label[i], sleep_secs[i] == shell_sleep_after(), i == 0, i == N_SLEEP - 1);
-    if (bl()) { row_label(c, L.g_power, 2, "Screen brightness", NULL); slider(c, L.bright, backlight_level()); }
+    if (bl()) { row_label(c, L.g_power, 2, "Screen brightness", backlight_method()); slider(c, L.bright, backlight_level()); }
 
     group(c, L.g_sound, L.y_sound, "Sound", 3);
     row_label(c, L.g_sound, 0, "Volume", NULL);
@@ -227,7 +234,7 @@ static void draw(canvas_t *c, rect_t a) {
 
     if (sizeof(void *) == 8) {
         int fw = st.fw_mode;                     /* draw() may run on any core: no firmware calls here */
-        group(c, L.g_start, L.y_start, "Startup", 4);
+        group(c, L.g_start, L.y_start, "Startup", 5);
         row_label(c, L.g_start, 0, "Kernel mode", k.boot_note[0] ? k.boot_note : "Applies after a restart");
         segment(c, L.kern[0], "Native", !fw, 1, 0);
         segment(c, L.kern[1], "Firmware", fw, 0, 1);
@@ -241,6 +248,10 @@ static void draw(canvas_t *c, rect_t a) {
         row_label(c, L.g_start, 3, "When a monitor is connected", da ? "The tablet becomes its touchpad and keyboard" : "The tablet's screen is mirrored to it");
         segment(c, L.desk[0], "Control", da, 1, 0);
         segment(c, L.desk[1], "Mirror", !da, 0, 1);
+        int allc = (int)hal_setting_get(u"QrtSmpPrograms", 0) != 0;
+        row_label(c, L.g_start, 4, "Programs run on", allc != smp_programs_on() ? "Applies after a restart" : allc ? "All four cores (experimental)" : "One core (the others help drawing)");
+        segment(c, L.cores[0], "One core", !allc, 1, 0);
+        segment(c, L.cores[1], "All cores", allc, 0, 1);
     }
 
     group(c, L.g_system, L.y_system, "System", 1);
@@ -269,7 +280,11 @@ static int slider_value(rect_t t, int x) { return CLAMP((x - t.x) * 100 / MAX(1,
 static rect_t grab(rect_t t) { return (rect_t){ t.x - dp(14), t.y - dp(20), t.w + dp(28), t.h + dp(40) }; }
 
 static void set_slider(int which, int v) {
-    if (which == SL_BRIGHT) { backlight_set_level(v); if (!backlight_available()) shell_redraw(); }   /* software dimming: the whole picture */
+    if (which == SL_BRIGHT) {
+        backlight_set_level(v);
+        static u64 last;                                /* software dimming redraws the whole picture: ~8 times a second */
+        if (!backlight_available() && k_now_ms() - last > 120) { last = k_now_ms(); shell_redraw(); }
+    }
     else if (which == SL_VOL) shell_set_volume(v);
 }
 
@@ -288,7 +303,7 @@ static int event(const event_t *e, rect_t a) {
     if (st.slider) {
         rect_t t = st.slider == SL_BRIGHT ? L.bright : L.vol;
         set_slider(st.slider, slider_value(t, e->x));
-        if (e->type == EV_UP) { st.slider = st.cand = SL_NONE; tap_track(&st.tap, e, dp(12)); }
+        if (e->type == EV_UP) { if (st.slider == SL_BRIGHT && !backlight_available()) shell_redraw(); st.slider = st.cand = SL_NONE; tap_track(&st.tap, e, dp(12)); }
         return 1;
     }
     int scrolled = scroll_event(&st.sc, e, a, dp(48));
@@ -317,6 +332,7 @@ static int event(const event_t *e, rect_t a) {
     if (sizeof(void *) == 8)
         for (int i = 0; i < 2; i++) {
             if (in_rect(L.desk[i], e->x, e->y)) { shell_set_desk_auto(i == 0); shell_redraw(); return 1; }
+            if (in_rect(L.cores[i], e->x, e->y)) { hal_setting_set(u"QrtSmpPrograms", (u32)i); shell_redraw(); return 1; }
             if (in_rect(L.ext[i], e->x, e->y)) {
                 display_set_enabled(i == 0);
                 st.ext_on = display_enabled();

@@ -2149,9 +2149,9 @@ void shell_main(void) {
 
         u64 now = k_now_ms();
         netstack_poll();
+        backlight_tick();                             /* the brightness the slider asked for */
         if (now >= sh.power_next) {                   /* battery, charger and cover (battery.c) */
             sh.power_next = now + 2000;
-            backlight_tick();
             const battery_t *b = battery_get();
             int was_pct = b->percent, was_chg = b->charging, was_ac = b->ac, was_lid = b->lid_closed;
             battery_poll();

@@ -446,6 +446,43 @@ static void draw(canvas_t *c, rect_t a) {
         gfx_text_center(c, ui.title, m, "Starting Ladybird", ui.text);
         rect_t n = { a.x, a.y + a.h / 2, a.w, dp(30) };
         gfx_text_center(c, ui.body, n, "the web browser, running natively on QRT", ui.text2);
+#if defined(__x86_64__)
+        /* taking long: say what its processes are doing (a photo of this tells what went wrong) */
+        if (k_now_ms() - LB.started > 15000) {
+            thread_t *all[256];
+            int nt = sched_threads(all, 256), nth = 0, run = 0, blk = 0, slp = 0, insys = 0, oncpu = 0, procs = 0;
+            u64 sys = 0, tk = 0;
+            int seen[64], ns = 0;
+            for (int i = 0; i < nt; i++) {
+                thread_t *t = all[i];
+                if (!t->proc || strncmp(t->proc->exe, "/bin/ladybird", 13)) continue;
+                nth++;
+                run += t->state == T_RUNNABLE; blk += t->state == T_BLOCKED; slp += t->state == T_SLEEPING;
+                insys += t->in_sys; oncpu += t->on_cpu >= 0; tk += t->cpu_ticks;
+                int j = 0;
+                while (j < ns && seen[j] != t->proc->pid) j++;
+                if (j == ns && ns < 64) { seen[ns++] = t->proc->pid; procs++; sys += t->proc->syscalls; }
+            }
+            char line[200];
+            fmt(line, sizeof line, "%llu s: %d processes, %d threads (%d runnable, %d on a core, %d blocked, %d sleeping, %d in the kernel)",
+                (k_now_ms() - LB.started) / 1000, procs, nth, run, oncpu, blk, slp, insys);
+            int y = a.y + a.h / 2 + dp(50);
+            gfx_text_center(c, ui.body, (rect_t){ a.x, y, a.w, dp(24) }, line, ui.text3);
+            fmt(line, sizeof line, "%llu system calls, %llu ms of CPU; cores: %s", sys, tk, sched_smp_enabled() ? "all" : "one (Settings)");
+            gfx_text_center(c, ui.body, (rect_t){ a.x, y + dp(26), a.w, dp(24) }, line, ui.text3);
+            /* the last log lines about it */
+            const char *pick[5]; int np = 0;
+            for (int i = 0; klog_line(i); i++) {
+                const char *l = klog_line(i);
+                if (strstr(l, "ladybird") || strstr(l, "proc:") || strstr(l, "sched") || strstr(l, "fault") || strstr(l, "smp")) {
+                    if (np == 5) { for (int k2 = 0; k2 < 4; k2++) pick[k2] = pick[k2 + 1]; np = 4; }
+                    pick[np++] = l;
+                }
+            }
+            for (int i = 0; i < np; i++) gfx_text_center(c, ui.body, (rect_t){ a.x + dp(16), y + dp(64) + i * dp(24), a.w - dp(32), dp(24) }, pick[i], ui.text3);
+            shell_redraw();
+        }
+#endif
         return;
     }
     draw_bar(c, a);

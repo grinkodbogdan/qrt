@@ -189,6 +189,19 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.9.7: one core by default, a browser that says why it waits
+
+- Programs run on **one core again by default**: on the tablet the browser still did
+  not start with all cores in 0.9.6.  Settings -> Startup -> **Programs run on: All
+  cores** turns 0.9.5's multi-core scheduling back on (after a restart) to try it.
+- If Ladybird has not opened its window after 15 s, the "Starting Ladybird" screen
+  shows what its processes are doing (threads running, blocked, in the kernel, system
+  calls, CPU time) and the last log lines about it.
+- Brightness: the slider's level reaches the hardware once per frame (the latest one),
+  not once per touch event; software dimming redraws about 8 times a second while
+  dragging.  Settings names the dimming method in use.
+- New threads start with their own FPU state, not the previous thread's.
+
 ## 0.9.6: fixes from the tablet
 
 - **The other three cores ran with their caches off.**  A core started with INIT/SIPI
@@ -722,9 +735,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.9.6.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.9.7.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.9.6.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.9.7.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

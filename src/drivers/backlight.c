@@ -96,15 +96,22 @@ int backlight_level(void) { if (!bl.mode) backlight_init(); return bl.level; }
 /* software dimming: how dark a veil the shell lays over the picture (0 = none) */
 int backlight_dim_alpha(void) { return bl.mode == BL_SOFT && bl.level < 100 ? (100 - bl.level) * 200 / 95 : 0; }
 
+/* the slider sends a level per touch event; the hardware gets the latest one once per frame */
+static int want = -1;
 void backlight_set_level(int pct) {
     if (!bl.mode) backlight_init();
     bl.level = CLAMP(pct, 5, 100);
-    if (bl.on) write_level(bl.level);
+    want = bl.level;
     save_at = k_now_ms() + 1500;            /* NVRAM is flash: once the slider rests, not on every step */
 }
 
 void backlight_tick(void) {
+    if (want >= 0) { if (bl.on) write_level(want); want = -1; }
     if (save_at && k_now_ms() >= save_at) { save_at = 0; hal_setting_set(u"QrtBrightness", (u32)bl.level); }
+}
+
+const char *backlight_method(void) {
+    return bl.mode == BL_LPSS ? "Backlight PWM" : bl.mode == BL_PMIC ? "Power chip PWM" : "Dimmed in software (no backlight control found)";
 }
 
 void backlight_power(int on) {

@@ -188,6 +188,7 @@ static void schedule(void) {
 void thread_first_run(void) {
     finish_switch();
     percpu_t *c = this_cpu();
+    fxrstor(c->cur->fpu);                          /* its own FPU state, not the last thread's on this core */
     if (c->cur != c->idle) bkl_lock();
 }
 
