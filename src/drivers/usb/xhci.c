@@ -435,7 +435,7 @@ int usb_iso_open(udev_t *d, u8 addr, int mps, int binterval, usb_iso_fill fill, 
     u8 *buf = e->buf, *ib = e->iso_buf;
     memset(e, 0, sizeof *e);
     e->ring = keep; e->buf = buf;
-    if (!ring_reset(&e->ring)) return -1;
+    if (!ring_reset(&e->ring)) { klog("usb: port %d: no ring for isochronous endpoint %02x", d->port, addr); return -1; }
     int base = mps & 0x7ff, extra = (mps >> 11) & 3;                   /* high speed: extra transactions per microframe */
     e->iso = 1;
     e->in = 0;
@@ -445,7 +445,8 @@ int usb_iso_open(udev_t *d, u8 addr, int mps, int binterval, usb_iso_fill fill, 
     e->iso_n = 64;
     e->iso_slot = base * (extra + 1);
     e->iso_buf = ib ? ib : hal_dma_alloc(64 * 3072);                   /* up to 3 x 1024 bytes a packet */
-    if (!e->iso_buf) return -1;
+    if (!e->iso_buf) { e->iso_n = 16; e->iso_buf = hal_dma_alloc(16 * 3072); }   /* memory is fragmented: fewer packets in flight */
+    if (!e->iso_buf) { klog("usb: port %d: no DMA memory for an isochronous stream", d->port); return -1; }
     e->fill = fill;
     e->arg = arg;
     /* the interval as 2^n x 125 us: full speed counts frames (1 ms), high speed microframes */
@@ -467,7 +468,12 @@ int usb_iso_open(udev_t *d, u8 addr, int mps, int binterval, usb_iso_fill fill, 
         ictx(d, 0)[0] = 0;                                             /* nothing to drop the first time */
         cc = command(phys(d->in), 0, TRB_TYPE(T_CONFIG_EP) | ((u32)d->slot << 24), NULL);
     }
-    if (cc != CC_SUCCESS) { klog("usb: port %d: isochronous endpoint %02x not configured (cc %d)", d->port, addr, cc); return -1; }
+    if (cc != CC_SUCCESS) {
+        klog("usb: port %d: isochronous endpoint %02x (%d bytes, interval %d) not configured: completion code %d%s", d->port, addr, e->iso_slot, ival, cc,
+             cc == 22 ? " (bandwidth)" : cc == 17 ? " (parameter)" : cc == 23 ? " (no slots)" : cc == 7 ? " (resources)" : cc < 0 ? " (no answer)" : "");
+        e->iso = 0;
+        return -1;
+    }
     e->open = 1;
     return 0;
 }

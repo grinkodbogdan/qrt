@@ -145,30 +145,39 @@ int uaudio_probe(udev_t *d) {
     if (ac < 0) return 0;
     /* UAC2 rates come from the clock source; ask for 48 kHz, then 44.1 */
     for (int i = 0; i < nalts; i++) if (alts[i].v2) { alts[i].nrates = 2; alts[i].rates[0] = 48000; alts[i].rates[1] = 44100; }
-    alt_t *best = NULL;
-    int best_score = -1, best_rate = 0;
-    for (int i = 0; i < nalts; i++) { int r, sc = score(&alts[i], &r); if (sc > best_score) { best_score = sc; best = &alts[i]; best_rate = r; } }
     char prod[48];
     if (usb_product_string(d, prod, sizeof prod) <= 0) strlcpy(prod, "USB audio device", sizeof prod);
-    if (!best) {
-        klog("usb: %s: an audio device with nothing QRT can play (%d streaming settings)", prod, nalts);
-        usb_set_name(d, "USB audio (no playback format QRT supports)");
-        return 1;
-    }
     ua_t *a = NULL;
     for (int i = 0; i < MAX_UA; i++) if (!ua[i].used) { a = &ua[i]; break; }
     if (!a) return 1;
-    memset(a, 0, sizeof *a);
-    a->d = d; a->v2 = best->v2; a->ac_iface = ac; a->as_iface = best->iface; a->alt = best->alt;
-    a->ep = best->ep; a->mps = best->mps; a->binterval = best->ival ? best->ival : 1;
-    a->channels = best->channels; a->subframe = best->subframe; a->bits = best->bits; a->rate = best_rate;
-    a->fu = fu; a->clock = clock;
-    int hs = usb_speed(d) == 3 || usb_speed(d) == 4;
-    a->us_per_packet = (u32)((hs ? 125 : 1000) << (CLAMP(a->binterval, 1, 16) - 1));
-    if (usb_set_interface(d, a->as_iface, a->alt)) { klog("usb: %s: SET_INTERFACE %d/%d failed", prod, a->as_iface, a->alt); return 1; }
-    set_rate(a);
-    unmute(a);
-    if (usb_iso_open(d, a->ep, a->mps, a->binterval, fill, a)) { usb_set_name(d, "USB audio (stream did not start)"); return 1; }
+    /* the settings by preference; one that the controller cannot schedule makes way for the next.
+     * As Linux does: the controller's endpoint first (bandwidth), then SET_INTERFACE */
+    int tried[8] = { 0 }, started = 0, ntry = 0;
+    for (;;) {
+        alt_t *best = NULL;
+        int best_score = -1, best_rate = 0, bi = -1;
+        for (int i = 0; i < nalts; i++) { int r, sc = score(&alts[i], &r); if (!tried[i] && sc > best_score) { best_score = sc; best = &alts[i]; best_rate = r; bi = i; } }
+        if (!best) break;
+        tried[bi] = 1; ntry++;
+        memset(a, 0, sizeof *a);
+        a->d = d; a->v2 = best->v2; a->ac_iface = ac; a->as_iface = best->iface; a->alt = best->alt;
+        a->ep = best->ep; a->mps = best->mps; a->binterval = best->ival ? best->ival : 1;
+        a->channels = best->channels; a->subframe = best->subframe; a->bits = best->bits; a->rate = best_rate;
+        a->fu = fu; a->clock = clock;
+        int hs = usb_speed(d) == 3 || usb_speed(d) == 4;
+        a->us_per_packet = (u32)((hs ? 125 : 1000) << (CLAMP(a->binterval, 1, 16) - 1));
+        if (usb_iso_open(d, a->ep, a->mps, a->binterval, fill, a)) { klog("usb: %s: setting %d/%d (%d Hz, %d ch) did not fit, trying another", prod, a->as_iface, a->alt, a->rate, a->channels); continue; }
+        if (usb_set_interface(d, a->as_iface, a->alt)) { klog("usb: %s: SET_INTERFACE %d/%d failed", prod, a->as_iface, a->alt); continue; }
+        set_rate(a);
+        unmute(a);
+        started = 1;
+        break;
+    }
+    if (!started) {
+        klog("usb: %s: no streaming setting started (%d tried of %d)", prod, ntry, nalts);
+        usb_set_name(d, ntry ? "USB audio (stream did not start - see the log)" : "USB audio (no playback format QRT supports)");
+        return 1;
+    }
     a->used = 1;
     fmt(a->name, sizeof a->name, "USB audio: %s", prod);
     a->out = (snd_output_t){ a->name, a->rate, a->channels, pump, NULL };

@@ -36,6 +36,7 @@
 
 enum { BL_NONE, BL_LPSS, BL_PMIC, BL_SOFT };
 static struct { volatile u32 *ctrl; u32 saved; int level, on, mode; } bl;
+static u64 save_at;
 
 #define CRC_PWM0_CLK_DIV 0x4b
 #define CRC_PWM0_DUTY    0x4e
@@ -99,7 +100,11 @@ void backlight_set_level(int pct) {
     if (!bl.mode) backlight_init();
     bl.level = CLAMP(pct, 5, 100);
     if (bl.on) write_level(bl.level);
-    hal_setting_set(u"QrtBrightness", (u32)bl.level);
+    save_at = k_now_ms() + 1500;            /* NVRAM is flash: once the slider rests, not on every step */
+}
+
+void backlight_tick(void) {
+    if (save_at && k_now_ms() >= save_at) { save_at = 0; hal_setting_set(u"QrtBrightness", (u32)bl.level); }
 }
 
 void backlight_power(int on) {

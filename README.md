@@ -189,6 +189,26 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.9.6: fixes from the tablet
+
+- **The other three cores ran with their caches off.**  A core started with INIT/SIPI
+  comes up with CR0.CD and NW set, and QRT never cleared them (QEMU ignores the bits).
+  Until 0.9.5 those cores only helped draw; in 0.9.5 the browser ran on them,
+  dozens of times slower, holding the kernel lock - the browser never got past
+  "Starting Ladybird" and the whole shell stuttered.  Fixed: caches on at start-up.
+- Sending an IPI took two register writes that an interrupt could split (xAPIC, the
+  tablet's mode; QEMU uses x2APIC): fixed.
+- **Choose where sound plays**: Settings -> Sound -> Play on: Automatic (Bluetooth,
+  then USB, then the speaker) or any output there is.
+- USB audio: the controller's endpoint is configured before the device switches
+  setting (as Linux does), every streaming setting is tried in turn, and the log says
+  why one fails.
+- Bluetooth headphones that connect by themselves but leave the audio to the
+  tablet: QRT starts the audio after 3 s instead of giving up.
+- The brightness slider no longer writes NVRAM on every step (once it rests).
+- Settings shows why the speaker or the sensors are not working, under Output and
+  Screen rotation.
+
 ## 0.9.5: every core, battery, speakers, sensors
 
 - **All four cores run programs.**  Until 0.9.4 the other three cores only helped the
@@ -702,9 +722,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.9.5.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.9.6.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.9.5.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.9.6.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

@@ -74,10 +74,13 @@ static void wait_icr(void) {
 
 static void send_icr(u32 dest, u32 lo) {
     if (x2) { wrmsr(0x830, ((u64)dest << 32) | lo); return; }
+    /* two writes: an interrupt between them that sends its own IPI would retarget this one */
+    u64 fl = irq_save();
     wait_icr();
     wr(R_ICR_HI, dest << 24);
     wr(R_ICR_LO, lo);
     wait_icr();
+    irq_restore(fl);
 }
 
 void lapic_send_ipi(u32 apic_id, u32 vector) { send_icr(apic_id, vector); }

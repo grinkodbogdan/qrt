@@ -4,6 +4,7 @@
 #include "../kernel/sound.h"
 #include "../drivers/backlight.h"
 #include "../drivers/ish.h"
+#include "../drivers/speaker.h"
 #include "../drivers/i915/gpu.h"
 #include "../drivers/i915/display.h"
 
@@ -41,6 +42,7 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
 typedef struct {
     int x, w;                                   /* the clamped column */
     int y_look, y_power, y_sound, y_time, y_start, y_system, y_about;
+    rect_t outsel[5]; int nout; const char *outname[4];
     rect_t accent[N_ACCENTS], rot[5], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], power[3], tz[2], test;
     rect_t bright, vol;                         /* slider tracks */
     rect_t g_look, g_power, g_sound, g_time, g_start, g_system, g_about;   /* group boxes */
@@ -76,10 +78,14 @@ static lay_t layout(rect_t a) {
 
     /* Sound */
     L.y_sound = y; y += title;
-    L.g_sound = (rect_t){ x, y, w, 2 * ROW_H };
+    L.g_sound = (rect_t){ x, y, w, 3 * ROW_H };
     L.vol = (rect_t){ x + w / 2, y + ROW_H / 2 - dp(3), w / 2 - pad, dp(6) };
     int tbw = MIN(dp(110), w / 4);
     L.test = (rect_t){ x + w - pad - tbw, y + ROW_H + dp(10), tbw, ROW_H - dp(20) };
+    /* Play on: Automatic, then each output there is */
+    L.nout = snd_outputs(L.outname, 4);
+    int ow = MIN(dp(140), (w - 2 * pad) / (L.nout + 1));
+    for (int i = 0; i <= L.nout; i++) L.outsel[i] = (rect_t){ x + w - pad - (L.nout + 1) * ow + i * ow, y + 2 * ROW_H + dp(11), ow, ROW_H - dp(22) };
     y += L.g_sound.h + dp(24);
 
     /* Date & time: the clock, the time zone */
@@ -161,7 +167,12 @@ static void draw(canvas_t *c, rect_t a) {
         if (i == shell_accent_index()) gfx_ring(c, cx, cy, r.w / 2.0f + dp(3), dp(2), ui.text);
         gfx_circle(c, cx, cy, r.w / 2.0f - dp(2), accent_palette[i]);
     }
-    row_label(c, L.g_look, 1, "Screen rotation", shell_auto_rotate() ? (ish_orientation() >= 0 || ish_status()[0] == 'a' ? "Follows the accelerometer" : "Follows the accelerometer (none found)") : NULL);
+    {
+        static char why[200];
+        if (ish_status()[0] == 'a') strlcpy(why, "Follows the accelerometer", sizeof why);
+        else fmt(why, sizeof why, "Sensors: %s", ish_status());
+        row_label(c, L.g_look, 1, "Screen rotation", shell_auto_rotate() ? why : NULL);
+    }
     /* Auto (the accelerometer turns it), then the four fixed angles */
     segment(c, L.rot[0], "Auto", shell_auto_rotate(), 1, 0);
     for (int i = 0; i < 4; i++) segment(c, L.rot[i + 1], rot_label[i], !shell_auto_rotate() && i == shell_rotation(), 0, i == 3);
@@ -171,12 +182,31 @@ static void draw(canvas_t *c, rect_t a) {
     for (int i = 0; i < N_SLEEP; i++) segment(c, L.sleep[i], sleep_label[i], sleep_secs[i] == shell_sleep_after(), i == 0, i == N_SLEEP - 1);
     if (bl()) { row_label(c, L.g_power, 2, "Screen brightness", NULL); slider(c, L.bright, backlight_level()); }
 
-    group(c, L.g_sound, L.y_sound, "Sound", 2);
+    group(c, L.g_sound, L.y_sound, "Sound", 3);
     row_label(c, L.g_sound, 0, "Volume", NULL);
     slider(c, L.vol, shell_volume());
     const char *out = snd_output_name();
-    row_label(c, L.g_sound, 1, "Output", out[0] ? out : "None: plug in USB audio, or pair Bluetooth headphones");
+    {
+        static char sub[240];
+        const char *sp = speaker_status();
+        if (out[0] && strncmp(sp, "playing", 7)) fmt(sub, sizeof sub, "%s - speaker: %s", out, sp);
+        else if (out[0]) strlcpy(sub, out, sizeof sub);
+        else fmt(sub, sizeof sub, "None. Speaker: %s", sp);
+        row_label(c, L.g_sound, 1, "Output", sub);
+    }
     ui_button(c, L.test, "Test", RGBA(255, 255, 255, 22), ui.text);
+    row_label(c, L.g_sound, 2, "Play on", NULL);
+    {
+        const char *ch = snd_chosen_output();
+        int chosen_here = 0;
+        for (int i = 0; i < L.nout; i++) chosen_here |= ch[0] && !strcmp(ch, L.outname[i]);
+        segment(c, L.outsel[0], "Automatic", !chosen_here, 1, L.nout == 0);
+        for (int i = 0; i < L.nout; i++) {
+            const char *n = L.outname[i];
+            const char *label = !strncmp(n, "Bluetooth", 9) ? "Bluetooth" : !strncmp(n, "USB", 3) ? "USB" : n;
+            segment(c, L.outsel[i + 1], label, chosen_here && !strcmp(ch, n), 0, i == L.nout - 1);
+        }
+    }
 
     {
         static const char *mon[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
@@ -269,6 +299,8 @@ static int event(const event_t *e, rect_t a) {
     for (int i = 0; i < 4; i++) if (in_rect(L.rot[i + 1], e->x, e->y)) { shell_set_auto_rotate(0); shell_set_rotation(i); return 1; }
     for (int i = 0; i < N_SLEEP; i++) if (in_rect(L.sleep[i], e->x, e->y)) { shell_set_sleep_after(sleep_secs[i]); return 1; }
     if (in_rect(L.test, e->x, e->y)) { snd_beep(); return 1; }
+    for (int i = 0; i <= L.nout; i++)
+        if (in_rect(L.outsel[i], e->x, e->y)) { snd_choose_output(i ? L.outname[i - 1] : NULL); snd_beep(); return 1; }
     for (int i = 0; i < 2; i++)
         if (in_rect(L.tz[i], e->x, e->y)) { time_set_zone(time_zone() + (i ? 1800 : -1800)); shell_redraw(); return 1; }
     if (sizeof(void *) == 8)

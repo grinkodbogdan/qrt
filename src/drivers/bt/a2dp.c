@@ -362,6 +362,23 @@ void a2dp_poll(void) {
         A.qtail++;
     }
     if (A.state == A_IDLE || A.state == A_STREAMING || A.state == A_SUSPENDED) return;
+    /* the headset connected to us but leaves the audio to us (most do): start it ourselves, as BlueZ does */
+    if (A.state == A_SIG && !A.initiator && bt_now_ms() - A.since > 3000) {
+        klog("bt: A2DP: %s did not start the audio signalling; QRT does", A.name);
+        A.initiator = 1;
+        A.since = bt_now_ms();
+        set_status("Connecting to %s (audio)");
+        if (A.sig) { A.state = A_DISCOVER; av_command(DISCOVER, NULL, 0); }
+        else if (!(A.sig = l2cap_connect(A.handle, 25, &sig_ops, NULL))) hci_disconnect(A.handle);
+        return;
+    }
+    /* the headset opened the media channel and waits: start the stream */
+    if (A.state == A_MEDIA && A.media && A.initiator && !A.wait_sig && bt_now_ms() - A.since > 1000) {
+        u8 sd = (u8)(A.remote_seid << 2);
+        A.state = A_START;
+        av_command(START, &sd, 1);
+        return;
+    }
     if ((A.wait_sig || A.state == A_MEDIA || A.state == A_SIG) && bt_now_ms() - A.since > 15000) {
         klog("bt: A2DP: no answer from %s (state %d, waiting for %u)", A.name, A.state, A.wait_sig);
         set_status("%s did not start the audio stream");

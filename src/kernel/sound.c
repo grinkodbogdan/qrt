@@ -185,14 +185,36 @@ void snd_output_remove(snd_output_t *o) {
     klog("sound: output %s gone", o->name);
 }
 
-const char *snd_output_name(void) { return outputs ? outputs->name : ""; }
+/* which output plays: the one chosen in Settings while it is there; otherwise Bluetooth, then USB,
+ * then the built-in speaker (newest first within each) */
+static char chosen[48];               /* "" = automatic; else the output's name */
+static int out_rank(const snd_output_t *o) { return !strncmp(o->name, "Bluetooth", 9) ? 3 : !strncmp(o->name, "USB", 3) ? 2 : 1; }
+static snd_output_t *current(void) {
+    snd_output_t *best = NULL;
+    for (snd_output_t *o = outputs; o; o = o->next) {
+        if (chosen[0] && !strcmp(o->name, chosen)) return o;
+        if (!best || out_rank(o) > out_rank(best)) best = o;
+    }
+    return best;
+}
+int snd_outputs(const char **names, int max) {
+    int n = 0;
+    LOCK();
+    for (snd_output_t *o = outputs; o && n < max; o = o->next) names[n++] = o->name;
+    UNLOCK();
+    return n;
+}
+void snd_choose_output(const char *name) { LOCK(); strlcpy(chosen, name ? name : "", sizeof chosen); UNLOCK(); klog("sound: output %s", name && name[0] ? name : "automatic"); }
+const char *snd_chosen_output(void) { return chosen; }
+const char *snd_output_name(void) { snd_output_t *o = current(); return o ? o->name : ""; }
 int snd_volume(void) { return volume; }
 void snd_set_volume(int v) { volume = CLAMP(v, 0, 100); }
 
 const char *snd_status(void) {
     int n = 0;
     for (int i = 0; i < SND_MAX; i++) n += streams[i].used;
-    if (outputs) fmt(status, sizeof status, "%s, %d Hz; %d stream%s playing", outputs->name, outputs->rate, n, n == 1 ? "" : "s");
+    snd_output_t *o = current();
+    if (o) fmt(status, sizeof status, "%s, %d Hz; %d stream%s playing", o->name, o->rate, n, n == 1 ? "" : "s");
     else fmt(status, sizeof status, "no output yet: USB audio or Bluetooth headphones (%d stream%s)", n, n == 1 ? "" : "s");
     return status;
 }
@@ -238,7 +260,9 @@ void snd_beep(void) {
 static void sound_thread(void *arg) {
     (void)arg;
     for (;;) {
-        snd_output_t *o = outputs;
+        u64 fl = irq_save();
+        snd_output_t *o = current();
+        irq_restore(fl);
         if (o && o->pump) o->pump(o);
         else snd_tick(k_now_us());
         thread_sleep_ms(4);

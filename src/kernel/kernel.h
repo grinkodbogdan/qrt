@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.9.5"
+#define QRT_VERSION "0.9.6"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8

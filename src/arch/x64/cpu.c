@@ -73,6 +73,13 @@ void cpu_setup(percpu_t *c, u32 index) {
     wrmsr(MSR_GS_BASE, (u64)(usize)c);
     wrmsr(MSR_KERNEL_GS, 0);
     wrmsr(MSR_PAT, (rdmsr(MSR_PAT) & ~0xff00ull) | 0x0100ull);
+    /* caches on: a core started by INIT/SIPI comes up with CR0.CD and NW set (0x60000010), and
+     * nothing else clears them - such a core runs uncached, dozens of times slower (QEMU ignores it) */
+    u64 cr0 = read_cr0();
+    if (cr0 & ((1ull << 30) | (1ull << 29))) {
+        write_cr0(cr0 & ~((1ull << 30) | (1ull << 29)));
+        __asm__ volatile("wbinvd" ::: "memory");
+    }
     write_cr0((read_cr0() & ~4ull) | 2ull);     /* FPU: no emulation, monitor */
     write_cr4(read_cr4() | (1u << 9) | (1u << 10));
     cpus[index] = c;
