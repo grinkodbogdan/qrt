@@ -12,6 +12,7 @@
 #include "backlight.h"
 #include "battery.h"
 #include "pmic.h"
+#include "ish.h"
 #include "e1000.h"
 #include "iwm/iwm.h"
 #include "i915/gpu.h"
@@ -177,6 +178,19 @@ static void bat_status(device_t *d) { battery_status(d->status, sizeof d->status
 static int bat_probe(device_t *d) { if (!k.is_venue) return DEV_NOT_MINE; bat_status(d); return 0; }
 static const driver_t drv_battery = { "battery", NULL, bat_acpi, NULL, bat_probe, bat_status };
 
+/* ---- the Integrated Sensor Hub (Venue 8 Pro 5855: accelerometer, light; see ish.c) ---- */
+static const char *const ish_acpi[] = { "808622D8", NULL };
+static const pci_match_t ish_pci[] = { { 0x8086, 0x22d8, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
+static void ish_dev_status(device_t *d) { fmt(d->status, sizeof d->status, "sensor hub: %s", ish_status()); }
+static int ish_dev_probe(device_t *d) {
+    static int started;
+    if (!k.is_venue) return DEV_NOT_MINE;
+    if (!started) { started = 1; ish_start(); }
+    ish_dev_status(d);
+    return 0;
+}
+static const driver_t drv_ish = { "sensors", ish_pci, ish_acpi, NULL, ish_dev_probe, ish_dev_status };
+
 /* ---- the PMIC on I2C7 (see pmic.c) ------------------------------------------------ */
 static const char *const pmic_acpi[] = { "INT33FD", "INT33F5", "INT33F4", "INT34D3", NULL };
 static int pmic_owner;
@@ -207,4 +221,4 @@ static int e1000_dev_probe(device_t *d) {
 }
 static const driver_t drv_e1000 = { "e1000", e1000_pci, NULL, NULL, e1000_dev_probe, e1000_dev_status };
 
-const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_battery, &drv_pmic, &drv_iwm, &drv_e1000, &drv_xhci, &drv_audio, &drv_chipset, NULL };
+const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_battery, &drv_pmic, &drv_ish, &drv_iwm, &drv_e1000, &drv_xhci, &drv_audio, &drv_chipset, NULL };

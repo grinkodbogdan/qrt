@@ -16,6 +16,7 @@
 #include "../net/wlan.h"
 #include "../drivers/backlight.h"
 #include "../drivers/battery.h"
+#include "../drivers/ish.h"
 #include "../drivers/buttons.h"
 #include "../drivers/i915/gpu.h"
 #include "../drivers/i915/display.h"
@@ -58,6 +59,8 @@ static struct {
     u64 osd_until;
     int osd_shown;
     u64 power_next;                 /* next battery and cover check */
+    int auto_rot;                   /* follow the accelerometer (ish.c) */
+    u64 rot_next;
     u32 running;                  /* bit i: apps[i] was opened */
     char query[48];
     int cursor_x, cursor_y, cursor_on, cursor_dirty;
@@ -447,6 +450,9 @@ void shell_set_rotation(int rot) {
     hal_setting_set(u"QrtRotation", (u32)sh.rot);
     relayout();
 }
+
+int shell_auto_rotate(void) { return sh.auto_rot; }
+void shell_set_auto_rotate(int on) { sh.auto_rot = on != 0; hal_setting_set(u"QrtAutoRotate", (u32)sh.auto_rot); sh.dirty = 1; }
 
 void shell_set_accent(int idx) {
     sh.accent_idx = CLAMP(idx, 0, N_ACCENTS - 1);
@@ -2102,6 +2108,7 @@ static void run_benchmark(void) {
 /* ---- main loop ------------------------------------------------------------------ */
 void shell_main(void) {
     sh.rot = (int)hal_setting_get(u"QrtRotation", 0) & 3;
+    sh.auto_rot = (int)hal_setting_get(u"QrtAutoRotate", 1) != 0;
     sh.accent_idx = (int)hal_setting_get(u"QrtAccent", 0) % N_ACCENTS;
     sh.dock_edge = (int)hal_setting_get(u"QrtDockEdge", DOCK_RIGHT) & 3;
     sh.sleep_after = (int)hal_setting_get(u"QrtSleepAfter", 120);
@@ -2153,6 +2160,11 @@ void shell_main(void) {
                 if (b->lid_closed) go_to_sleep(); else wake_up();
             }
             if (b->present && b->discharging && b->percent <= 5 && was_pct > 5) klog("shell: battery at %d%% - plug the charger in", b->percent);
+        }
+        if (sh.auto_rot && !sh.desk && !sh.asleep && now >= sh.rot_next) {   /* the accelerometer: turn the screen (not saved) */
+            sh.rot_next = now + 250;
+            int o = ish_orientation();
+            if (o >= 0 && o != sh.rot) { klog("shell: turned to %d (accelerometer)", o * 90); sh.rot = o; relayout(); }
         }
         if (sh.asleep) {
             /* the panel is dark: keep the network and the buttons going, draw nothing */

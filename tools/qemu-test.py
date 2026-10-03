@@ -641,7 +641,7 @@ def default_script(q, shots):
         except ImportError:
             pass
     q.drag([(600, 200)] + [(600, 200 + i * 60) for i in range(1, 10)], settle=1.0)
-    q.tap(744, 257)                        # rotation 90 deg -> 800x1280 portrait canvas
+    q.tap(761, 257)                        # rotation 90 deg (after Auto and 0) -> 800x1280 portrait canvas
     time.sleep(2)
     shots.append(q.shot("15-settings-portrait"))
     q.keys("esc", settle=2)

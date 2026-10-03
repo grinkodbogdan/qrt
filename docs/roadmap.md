@@ -59,10 +59,10 @@ is set up register by register over I2C.
 | Milestone | State |
 |---|---|
 | Find the fitted codec: its id registers over I2C2 (as Linux's rt5670.c/rt5640.c do) | **0.6.1**: an RT5670/RT5672 (id 0x6271) on the tablet |
-| Codec power-up, headphone and speaker paths and volume over the DesignWare I2C driver (the volume keys already drive a mock control) | next |
-| SST DSP: load the firmware into its memory, the IPC mailbox, start an SSP (I2S) port to the codec | |
-| PCM playback: a ring buffer the DSP reads by DMA, a beep from the shell, then sounds | |
-| A sound API for native programs (the browser's audio), and `/dev/snd` for Linux ones | |
+| Codec power-up and the speaker path over the DesignWare I2C driver | **0.9.5** (RT5672: PLL from the PMC's 19.2 MHz clock, I2S slave, DAC1 -> PDM1 -> speaker amp), untested on hardware |
+| The DSP: Sound Open Firmware (`sof-cht.ri`) loaded into its memory, IPC3, the `sof-cht-rt5670` pipelines, SSP2 | **0.9.5**, untested on hardware (tested against a simulated DSP) |
+| PCM playback: a ring buffer the DSP reads by DMA, fed by QRT's mixer | **0.9.5** |
+| A sound API for native programs (the browser's audio) | **0.9.2** (`/dev/dsp`, OSS) |
 
 ## 4. Bluetooth (Intel Wireless 8260)
 

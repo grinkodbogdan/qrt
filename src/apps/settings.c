@@ -3,6 +3,7 @@
 #include "../ui/shell.h"
 #include "../kernel/sound.h"
 #include "../drivers/backlight.h"
+#include "../drivers/ish.h"
 #include "../drivers/i915/gpu.h"
 #include "../drivers/i915/display.h"
 
@@ -40,7 +41,7 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
 typedef struct {
     int x, w;                                   /* the clamped column */
     int y_look, y_power, y_sound, y_time, y_start, y_system, y_about;
-    rect_t accent[N_ACCENTS], rot[4], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], power[3], tz[2], test;
+    rect_t accent[N_ACCENTS], rot[5], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], power[3], tz[2], test;
     rect_t bright, vol;                         /* slider tracks */
     rect_t g_look, g_power, g_sound, g_time, g_start, g_system, g_about;   /* group boxes */
     int bottom;
@@ -60,8 +61,8 @@ static lay_t layout(rect_t a) {
     L.g_look = (rect_t){ x, y, w, 2 * ROW_H };
     int dot = dp(30), dx = x + w - pad - N_ACCENTS * (dot + dp(10)) + dp(10);
     for (int i = 0; i < N_ACCENTS; i++) L.accent[i] = (rect_t){ dx + i * (dot + dp(10)), y + (ROW_H - dot) / 2, dot, dot };
-    int segw = MIN(dp(76), (w / 2) / 4);
-    for (int i = 0; i < 4; i++) L.rot[i] = (rect_t){ x + w - pad - 4 * segw + i * segw, y + ROW_H + dp(11), segw, ROW_H - dp(22) };
+    int segw = MIN(dp(70), (w * 3 / 5) / 5);
+    for (int i = 0; i < 5; i++) L.rot[i] = (rect_t){ x + w - pad - 5 * segw + i * segw, y + ROW_H + dp(11), segw, ROW_H - dp(22) };
     y += L.g_look.h + dp(24);
 
     /* Power: sleep, brightness */
@@ -160,8 +161,10 @@ static void draw(canvas_t *c, rect_t a) {
         if (i == shell_accent_index()) gfx_ring(c, cx, cy, r.w / 2.0f + dp(3), dp(2), ui.text);
         gfx_circle(c, cx, cy, r.w / 2.0f - dp(2), accent_palette[i]);
     }
-    row_label(c, L.g_look, 1, "Screen rotation", NULL);
-    for (int i = 0; i < 4; i++) segment(c, L.rot[i], rot_label[i], i == shell_rotation(), i == 0, i == 3);
+    row_label(c, L.g_look, 1, "Screen rotation", shell_auto_rotate() ? (ish_orientation() >= 0 || ish_status()[0] == 'a' ? "Follows the accelerometer" : "Follows the accelerometer (none found)") : NULL);
+    /* Auto (the accelerometer turns it), then the four fixed angles */
+    segment(c, L.rot[0], "Auto", shell_auto_rotate(), 1, 0);
+    for (int i = 0; i < 4; i++) segment(c, L.rot[i + 1], rot_label[i], !shell_auto_rotate() && i == shell_rotation(), 0, i == 3);
 
     group(c, L.g_power, L.y_power, "Power", bl() ? 3 : 2);
     row_label(c, L.g_power, 0, "Automatic sleep", "Lock and turn the screen off after");
@@ -262,7 +265,8 @@ static int event(const event_t *e, rect_t a) {
     if (!tap_track(&st.tap, e, dp(12))) return scrolled;
     if (st.cand) { set_slider(st.cand, slider_value(st.cand == SL_BRIGHT ? L.bright : L.vol, e->x)); st.cand = SL_NONE; return 1; }
     for (int i = 0; i < N_ACCENTS; i++) if (in_rect(grab(L.accent[i]), e->x, e->y)) { shell_set_accent(i); return 1; }
-    for (int i = 0; i < 4; i++) if (in_rect(L.rot[i], e->x, e->y)) { shell_set_rotation(i); return 1; }
+    if (in_rect(L.rot[0], e->x, e->y)) { shell_set_auto_rotate(1); return 1; }
+    for (int i = 0; i < 4; i++) if (in_rect(L.rot[i + 1], e->x, e->y)) { shell_set_auto_rotate(0); shell_set_rotation(i); return 1; }
     for (int i = 0; i < N_SLEEP; i++) if (in_rect(L.sleep[i], e->x, e->y)) { shell_set_sleep_after(sleep_secs[i]); return 1; }
     if (in_rect(L.test, e->x, e->y)) { snd_beep(); return 1; }
     for (int i = 0; i < 2; i++)

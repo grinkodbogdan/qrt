@@ -54,6 +54,8 @@ typedef struct {
 extern shell_stats_t shell_stats;
 void shell_go_home(void);
 void shell_set_rotation(int rot);
+int  shell_auto_rotate(void);               /* the accelerometer turns the screen (QrtAutoRotate) */
+void shell_set_auto_rotate(int on);
 void shell_set_dock_edge(int edge);      /* 0 right, 1 left, 2 bottom, 3 top */
 int  shell_dock_edge(void);
 int  shell_volume(void);                 /* the master volume 0..100 (sound.c) */

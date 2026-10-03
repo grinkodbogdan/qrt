@@ -33,10 +33,9 @@ waits, and queries for the engine and its configuration.
 ## The options, easiest first
 
 1. **Use all four CPU cores for Ladybird** (not the GPU, but the biggest win available).
-   QRT runs every program on the first core; the other three only draw the shell.  Painting,
-   JavaScript, decoding and networking all compete for one core.  Letting user threads run
-   on every core needs per-CPU scheduling and SMP-safe locks in the kernel (most kernel
-   paths take "interrupts off" as their lock today).  Testable in QEMU (`-smp 4`).
+   **Done in 0.9.5**: program threads run on every core, the kernel under one big lock
+   (README, "0.9.5").  A finer-grained kernel (per-subsystem locks) would let system calls
+   run in parallel too; for now they take turns.
 
 2. **Paint at a lower resolution and let the GPU scale.**  Ladybird painting at 0.75x
    (1.8x fewer pixels), the GPU upscaling as it composes.  Pages get a little softer, but

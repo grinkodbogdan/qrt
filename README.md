@@ -189,6 +189,42 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.9.5: every core, battery, speakers, sensors
+
+- **All four cores run programs.**  Until 0.9.4 the other three cores only helped the
+  shell draw; a browser's processes and threads shared one core.  Now any core runs
+  program threads, so JavaScript, layout, painting and video decoding run side by
+  side.  The kernel itself stays serialised by one big kernel lock (taken on system
+  calls, faults and device interrupts, given back on the way out and on thread
+  switches), the way early SMP Linux and BSD did it: the kernel code written for one
+  core stays correct.  Page-table changes are announced to the other cores (TLB
+  shootdowns), and a process's memory is freed only when no core still uses it.
+  `QrtSmpPrograms = 0` (an NVRAM variable) goes back to one core.
+- **Battery.**  The Venue's battery, charger and cover sensor answer through a small
+  embedded controller on I2C3 (address 0x78): QRT reads it the way the DSDT does.  The
+  top bar shows the charge (green while charging, red when low); System Monitor has
+  the details (voltage, current, capacity).  Closing a magnetic cover puts QRT to sleep.
+- **Brightness** works without the backlight PWM too: the Crystal Cove PMIC's PWM if
+  that is the one in use, otherwise QRT dims the picture itself.
+- **The speakers.**  The tablet's own speakers sit behind Intel's audio DSP.  QRT now
+  loads Sound Open Firmware into it (`sof-cht.ri`, BSD-licensed), builds the same DSP
+  pipelines Linux uses with this codec (from SOF's `sof-cht-rt5670` topology), sets up
+  the Realtek RT5672 codec over I2C (its PLL from the SoC's 19.2 MHz clock, the DAC,
+  the speaker path) and streams QRT's mix to it.  USB audio and Bluetooth headphones
+  still take over when connected.  `QrtSpeaker = 0` turns it off.
+- **Sensors.**  The accelerometer and light sensor are behind the Integrated Sensor
+  Hub, a microcontroller with its own firmware.  QRT speaks its protocol (ISHTP) and
+  the HID sensor reports on top: Settings → Screen rotation → **Auto** turns the
+  screen with the tablet.  `QrtSensors = 0` turns the hub off.
+- Also: `ls` in the Terminal no longer dies ("stack smashing detected": QRT wrote 60
+  bytes into a 36-byte terminal-settings structure).
+
+The battery, speaker and sensor drivers could not be tried here (QEMU has none of
+this hardware).  Each was tested against a simulated device (`make check`: the
+speaker test decodes every message to the DSP with Linux's own SOF structures), and
+each logs every step: if one does not work on the tablet, System Monitor's log says
+where it stopped.
+
 ## Native QRT programs (0.8.0)
 
 QRT has its own kind of program now, built with the **QRT SDK** (`sdk/`, `make sdk`):
@@ -495,14 +531,17 @@ FreeBSD's.
 | Storage | the boot stick is read into RAM at boot; writes go to RAM only |
 | Buttons | power, volume and Windows through GPIO (input bit and edge latch) and the ACPI fixed power button, both kernel modes. Pins confirmed on the tablet with the Button test's pad scanner: SW/5f Windows, SW/5d volume up, N/08 volume down (power: PMU_PWRBTN_B, left in its native function for the ACPI power button). Up to 0.5.9 the driver never started on the tablet: the ACPI device list did not bind it (the Button test said "not started"). 0.5.9.1 starts it from the input path: **works** (volume, Windows); 0.5.9.2 also raises the device table limit that dropped the button devices. |
 | Wi-Fi | Intel 8260 driver, WPA2-Personal: **works** (scanning, connecting, DHCP) |
-| Backlight | LPSS PWM #1, native mode: brightness and sleep (**new in 0.5.5.3, untested on hardware**). QRT only takes control if the firmware left that PWM running. |
+| Backlight | LPSS PWM #1, native mode: brightness and sleep (0.5.5.3). QRT only takes control if the firmware left that PWM running; 0.9.5 then tries the Crystal Cove PMIC's PWM, and otherwise dims the picture in software, so the Settings slider always works. System Monitor names the method in use. |
 | Sleep | backlight off and a slower frame loop; not ACPI suspend |
-| Audio | 0.9.2: **USB audio** (headsets, USB-C dongles, docks' headphone jacks: USB Audio Class 1 and 2) and **Bluetooth headphones and speakers** (A2DP), mixed by QRT's sound core; the volume keys set the real volume. The built-in speaker is not driven yet: it sits behind Intel's SST audio DSP (the RT5670 codec is identified over I2C2 since 0.6.1). See [Sound](#sound-092) |
+| Audio | 0.9.2: **USB audio** (headsets, USB-C dongles, docks' headphone jacks: USB Audio Class 1 and 2) and **Bluetooth headphones and speakers** (A2DP), mixed by QRT's sound core; the volume keys set the real volume. 0.9.5: the **built-in speakers** - Sound Open Firmware on the audio DSP, SSP2, the RT5672 codec - **new, untested on hardware**. See [0.9.5](#095-every-core-battery-speakers-sensors) |
 | USB | 0.6.1: QRT's own xHCI driver in native mode: devices on the root ports and behind USB 2 hubs (0.6.3) are listed under System Monitor → Hardware → USB; USB keyboards work, also behind a hub (tested in QEMU); USB mice since 0.6.5. USB-C docks show up by name (USB billboard class). |
 | External display | 0.6.4: a monitor on a USB-C dock (DisplayPort Alt Mode, HDMI behind the dock's converter): **works** (detected and mirrored on the tablet). 0.6.5: desk mode - the shell moves to the monitor and the tablet becomes its touchpad and keyboard; see [External display](#external-display-064) |
 | Mouse | 0.6.5: USB mice, also wireless receivers and keyboard-and-mouse combos (HID report descriptors; buttons, wheel, absolute pointers); a cursor on whichever screen the shell is on |
 | Bluetooth | 0.6.2: the Intel 8260's Bluetooth (USB 8087:0a2b, root port 4): firmware download as Linux's btusb/btintel do it, then scanning for classic and LE devices in the **Bluetooth** app (works on the tablet: it finds devices). 0.9.2: pairing (Secure Simple Pairing, link keys kept) and **A2DP audio** to headphones and speakers - tested against a simulated headset, **new on hardware** |
-| Camera, sensors, battery | no drivers yet (they need ACPI/PMIC support first; see docs/drivers.md) |
+| Battery, charger, cover | 0.9.5: the embedded controller on I2C3 (as the DSDT reads it): charge, charging, AC, the cover sensor (closing it sleeps); the top bar shows the charge - **new, untested on hardware** |
+| Sensors | 0.9.5: the Integrated Sensor Hub (ISHTP, HID sensors): the accelerometer turns the screen (Settings: Auto-rotate), the light sensor is read - **new, untested on hardware** |
+| Camera | no driver: the OmniVision sensors sit behind Intel's imaging unit (ISP), which needs its own firmware and a large driver |
+| CPU cores | 0.9.5: programs run on all four cores (the kernel under one big lock); before, only the boot core ran them |
 | USB keyboard | both modes (native: QRT's xHCI driver, 0.6.1) |
 
 ## Hardware report
@@ -663,9 +702,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.9.3.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.9.5.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.9.3.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.9.5.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.
