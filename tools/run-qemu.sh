@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # run-qemu.sh [ia32|x64] [extra qemu args...]
 # Boots build/qrt.img under OVMF with a USB touchscreen-like tablet device.
+# QRT_QEMU_CPU picks the CPU model: Westmere,+movbe,+rdrand is close to the Venue's Atom x5-Z8500
+# (SSE4.2, AES-NI; no AVX).
 set -euo pipefail
 arch=${1:-x64}; shift || true
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -13,7 +15,7 @@ myvars=$here/build/vars-$arch.fd
 [ -f "$myvars" ] || cp "$vars" "$myvars"
 
 exec qemu-system-x86_64 \
-    -machine q35,i8042=off -m 2048 -cpu max -smp 4 \
+    -machine q35,i8042=off -m 2048 -cpu ${QRT_QEMU_CPU:-max} -smp 4 \
     -drive if=pflash,format=raw,readonly=on,file="$code" \
     -drive if=pflash,format=raw,file="$myvars" \
     -drive format=raw,file="$here/build/qrt.img" \

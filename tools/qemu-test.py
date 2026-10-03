@@ -363,11 +363,11 @@ def native_test(q, shots):
         shots.append(shot)
         from PIL import Image
         im = Image.open(shot).convert("RGB")
-        header = im.getpixel((700, 170))             # the test page's blue-purple header band
+        header = im.getpixel((650, 290))             # the test page's blue-purple header band
         if not (header[2] > 150 and header[0] < 160):
             raise RuntimeError("native: Ladybird's window did not show the page (pixel %s)" % (header,))
         # the page's text field takes the focus: the on-screen keyboard comes up by itself
-        q.tap(1000, 181, settle=6)
+        q.tap(1000, 225, settle=6)
         if "window shows the keyboard" not in slog():
             raise RuntimeError("native: a text field in Ladybird did not bring up the keyboard")
         shots.append(q.shot("08-ladybird-keyboard"))
@@ -386,7 +386,7 @@ def native_test(q, shots):
         q.tap(700, 120, settle=1)
         q.keys(*"file:///share/tests/video.html", settle=0.3)
         q.keys("ret", settle=25)
-        q.tap(586, 695, settle=2)                    # Play (sound needs a user gesture)
+        q.tap(586, 485, settle=2)                    # Play, in the middle of the page (sound needs a user gesture)
         for _ in range(120):
             if "video-ended" in slog() or "video-error" in slog():
                 break

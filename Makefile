@@ -91,7 +91,7 @@ RUST_HELLO := $(if $(RUST_MUSL),build/rootfs/bin/rust-hello)
 # Ladybird, built natively for QRT by ports/ladybird/build.sh; shipped when it has been built
 LADYBIRD := $(if $(wildcard build/ladybird/bin/js),build/rootfs/bin/js build/rootfs/share/tests/js-test.js)
 # the browser (one program: it and its helper processes), its resources, fonts, fontconfig
-LADYBIRD += $(if $(wildcard build/ladybird/bin/Ladybird),build/rootfs/bin/ladybird build/rootfs/share/Lagom/.stamp \
+LADYBIRD += $(if $(wildcard build/ladybird/bin/Ladybird),build/rootfs/bin/ladybird $(if $(wildcard build/ladybird/bin/cranelift-compiler),build/rootfs/bin/cranelift-compiler) build/rootfs/share/Lagom/.stamp \
             build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/fps.html build/rootfs/share/tests/functions.html build/rootfs/share/tests/video.html build/rootfs/share/tests/video.webm build/rootfs/share/tests/render.sh \
             build/rootfs/etc/ssl/certs/ca-certificates.crt)
 FONT_DIRS := /usr/share/fonts/truetype/liberation /usr/share/fonts/truetype/dejavu
@@ -151,6 +151,11 @@ build/rootfs/bin/js: build/ladybird/bin/js
 	llvm-strip-20 -o $@ $<
 
 build/rootfs/bin/ladybird: build/ladybird/bin/Ladybird
+	@mkdir -p $(dir $@)
+	llvm-strip-20 -o $@ $<
+
+# WebAssembly's compiler (Cranelift): Ladybird runs it next to itself, without it pages' wasm is interpreted
+build/rootfs/bin/cranelift-compiler: build/ladybird/bin/cranelift-compiler
 	@mkdir -p $(dir $@)
 	llvm-strip-20 -o $@ $<
 

@@ -1,0 +1,378 @@
+From b656397b93196396ac146c4a10f9c2fd3b878571 Mon Sep 17 00:00:00 2001
+From: qrt <qrt@localhost>
+Date: Sat, 3 Oct 2026 20:57:29 +0000
+Subject: [PATCH] UI/QRT: sized for the screen: a scaled toolbar, pages at the
+ panel's pixel ratio, flick scrolling
+
+The shell passes its density (--qrt-scale=<percent>). The toolbar is 1.25x the
+shell's controls, pages are laid out at a device pixel ratio of 1.5 on the
+Venue's 8" panel, a finger drag moves the page by CSS pixels so it follows the
+finger, and a flick keeps the page moving and slowing down.
+---
+ UI/QRT/BrowserWindow.cpp | 143 ++++++++++++++++++++++++++++-----------
+ UI/QRT/BrowserWindow.h   |  25 ++++++-
+ UI/QRT/main.cpp          |  16 +++++
+ 3 files changed, 144 insertions(+), 40 deletions(-)
+
+diff --git a/UI/QRT/BrowserWindow.cpp b/UI/QRT/BrowserWindow.cpp
+index ef6a224c..7a2f925a 100644
+--- a/UI/QRT/BrowserWindow.cpp
++++ b/UI/QRT/BrowserWindow.cpp
+@@ -5,9 +5,12 @@
+  */
+ 
+ #include <AK/LexicalPath.h>
++#include <AK/Math.h>
++#include <AK/Time.h>
+ #include <LibCore/EventLoop.h>
+ #include <LibCore/Notifier.h>
+ #include <LibCore/System.h>
++#include <LibCore/Timer.h>
+ #include <LibGfx/Bitmap.h>
+ #include <LibGfx/SharedImageBuffer.h>
+ #include <LibGfx/SystemTheme.h>
+@@ -28,27 +31,30 @@ static constexpr u32 field_edit = 0x3a5a8c;
+ static constexpr u32 text_fg = 0xf0f0f0;
+ static constexpr u32 text_dim = 0x9a9a9a;
+ 
+-// toolbar geometry: four buttons, then the address
+-static constexpr int button_w = 48;
+-static constexpr int pad = 6;
+-enum class ToolbarItem { Back, Forward, Reload, Keyboard, Address, None };
+-static constexpr int address_x = pad + 4 * button_w + pad;
++// toolbar geometry, at a scale of 1: four buttons, then the address
++static constexpr int base_button_w = 48;
++static constexpr int base_pad = 6;
++static constexpr int base_toolbar_h = 52;
+ 
+-static ToolbarItem toolbar_item_at(int x)
++// the shell's density, from "--qrt-scale=<percent>" (main.cpp)
++float g_shell_scale = 1.0f;
++
++BrowserWindow::ToolbarItem BrowserWindow::toolbar_item_at(int x) const
+ {
+-    if (x < pad)
++    if (x < m_pad)
+         return ToolbarItem::None;
+-    if (x < address_x - pad)
+-        return static_cast<ToolbarItem>((x - pad) / button_w);
++    if (x < address_x() - m_pad)
++        return static_cast<ToolbarItem>(min((x - m_pad) / m_button_w, 3));
+     return ToolbarItem::Address;
+ }
+ 
+ // There are no tabs yet: a page that opens one (target=_blank, window.open) gets a hidden
+ // view for it, as headless Ladybird does, and as soon as that view has somewhere to go,
+ // this view goes there instead.
+-PageView::PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size)
++PageView::PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size, double device_pixel_ratio)
+     : HeadlessWebView(move(theme), size)
+ {
++    m_device_pixel_ratio = device_pixel_ratio;
+     on_new_web_view = [this](auto, auto, ::WebView::WebContentClient& page_process, Optional<Web::PageId> page_index) {
+         auto child = page_index.has_value()
+             ? HeadlessWebView::create_child(*this, page_process, *page_index)
+@@ -64,9 +70,9 @@ PageView::PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size)
+     };
+ }
+ 
+-NonnullOwnPtr<PageView> PageView::create(Core::AnonymousBuffer theme, Web::DevicePixelSize size)
++NonnullOwnPtr<PageView> PageView::create(Core::AnonymousBuffer theme, Web::DevicePixelSize size, double device_pixel_ratio)
+ {
+-    auto view = adopt_own(*new PageView(move(theme), size));
++    auto view = adopt_own(*new PageView(move(theme), size, device_pixel_ratio));
+     view->initialize_client(CreateNewClient::Yes);
+     return view;
+ }
+@@ -94,6 +100,15 @@ BrowserWindow::~BrowserWindow()
+ 
+ ErrorOr<void> BrowserWindow::initialize(Vector<URL::URL> const& urls)
+ {
++    // The toolbar is a little larger than the shell's own controls, for fingers, and pages
++    // are laid out at a device pixel ratio that makes their text readable on a dense panel
++    // (1.5 on the Venue's 8" 800x1280: a 533 CSS px wide page in portrait, as a phone has).
++    m_ui = max(1.0f, g_shell_scale * 1.25f);
++    m_button_w = scaled(base_button_w);
++    m_pad = scaled(base_pad);
++    m_toolbar_height = scaled(base_toolbar_h);
++    m_page_ratio = max(1.0, round(g_shell_scale * 1.25 * 4) / 4.0);
++
+     m_window = qrt_window_create("Ladybird");
+     if (m_window < 0)
+         return Error::from_errno(-m_window);
+@@ -108,7 +123,7 @@ ErrorOr<void> BrowserWindow::initialize(Vector<URL::URL> const& urls)
+ 
+     auto theme_path = LexicalPath::join(::WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
+     auto theme = TRY(Gfx::load_system_theme(theme_path.string()));
+-    m_view = PageView::create(move(theme), viewport());
++    m_view = PageView::create(move(theme), viewport(), m_page_ratio);
+     m_view->set_system_visibility_state(Web::HTML::VisibilityState::Visible);
+     m_view->set_has_system_focus(true);
+ 
+@@ -187,50 +202,55 @@ void BrowserWindow::draw_toolbar()
+     qrt_fill(b, 0, h - 1, b->w, 1, toolbar_line);
+ 
+     int cy = h / 2;
+-    auto button_x = [](int i) { return pad + i * button_w + button_w / 2; };
++    auto button_x = [this](int i) { return m_pad + i * m_button_w + m_button_w / 2; };
++    auto S = [this](float v) { return scaled(v); };
++    int stroke = max(3, S(2.6f));
+     bool can_back = m_view && m_view->navigate_back_action().enabled();
+     bool can_forward = m_view && m_view->navigate_forward_action().enabled();
+ 
+     // back and forward: chevrons
+     int bx = button_x(0), fx = button_x(1);
+     u32 back_c = can_back ? button_fg : button_off, forward_c = can_forward ? button_fg : button_off;
+-    qrt_line(b, bx + 5, cy - 9, bx - 4, cy, 3, back_c);
+-    qrt_line(b, bx - 4, cy, bx + 5, cy + 9, 3, back_c);
+-    qrt_line(b, fx - 5, cy - 9, fx + 4, cy, 3, forward_c);
+-    qrt_line(b, fx + 4, cy, fx - 5, cy + 9, 3, forward_c);
++    qrt_line(b, bx + S(5), cy - S(9), bx - S(4), cy, stroke, back_c);
++    qrt_line(b, bx - S(4), cy, bx + S(5), cy + S(9), stroke, back_c);
++    qrt_line(b, fx - S(5), cy - S(9), fx + S(4), cy, stroke, forward_c);
++    qrt_line(b, fx + S(4), cy, fx - S(5), cy + S(9), stroke, forward_c);
+ 
+     // reload (or stop while loading)
+     int rx = button_x(2);
+     if (m_loading) {
+-        qrt_line(b, rx - 7, cy - 7, rx + 7, cy + 7, 3, button_fg);
+-        qrt_line(b, rx + 7, cy - 7, rx - 7, cy + 7, 3, button_fg);
++        qrt_line(b, rx - S(7), cy - S(7), rx + S(7), cy + S(7), stroke, button_fg);
++        qrt_line(b, rx + S(7), cy - S(7), rx - S(7), cy + S(7), stroke, button_fg);
+     } else {
+-        qrt_disc(b, rx, cy, 10, button_fg);
+-        qrt_disc(b, rx, cy, 7, toolbar_bg);
+-        qrt_fill(b, rx, cy - 11, 11, 9, toolbar_bg);
+-        qrt_line(b, rx + 2, cy - 10, rx + 8, cy - 6, 3, button_fg);
+-        qrt_line(b, rx + 8, cy - 6, rx + 2, cy - 2, 3, button_fg);
++        qrt_disc(b, rx, cy, S(10), button_fg);
++        qrt_disc(b, rx, cy, S(10) - stroke, toolbar_bg);
++        qrt_fill(b, rx, cy - S(11), S(11), S(9), toolbar_bg);
++        qrt_line(b, rx + S(2), cy - S(10), rx + S(8), cy - S(6), stroke, button_fg);
++        qrt_line(b, rx + S(8), cy - S(6), rx + S(2), cy - S(2), stroke, button_fg);
+     }
+ 
+     // the keyboard
+     int kx = button_x(3);
+-    qrt_round_rect(b, kx - 13, cy - 9, 26, 18, 3, m_keyboard ? field_edit : button_fg);
++    qrt_round_rect(b, kx - S(13), cy - S(9), S(26), S(18), S(3), m_keyboard ? field_edit : button_fg);
+     for (int row = 0; row < 3; ++row)
+         for (int col = 0; col < 4; ++col)
+-            qrt_fill(b, kx - 10 + col * 6, cy - 6 + row * 5, 3, 3, toolbar_bg);
++            qrt_fill(b, kx - S(10) + S(col * 6), cy - S(6) + S(row * 5), S(3), S(3), toolbar_bg);
+ 
+     // the address field
+-    int fw = b->w - address_x - pad;
+-    qrt_round_rect(b, address_x, pad + 2, fw, h - 2 * pad - 4, (h - 2 * pad - 4) / 2, m_editing_address ? field_edit : field_bg);
+-    int th = qrt_text_height(QRT_TEXT_BODY);
+-    int tx = address_x + 14, ty = (h - th) / 2;
++    int ax = address_x();
++    int fw = b->w - ax - m_pad;
++    int fh = h - 2 * m_pad - S(4);
++    qrt_round_rect(b, ax, m_pad + S(2), fw, fh, fh / 2, m_editing_address ? field_edit : field_bg);
++    int size = m_ui >= 1.3f ? QRT_TEXT_TITLE : QRT_TEXT_BODY;
++    int th = qrt_text_height(size);
++    int tx = ax + fh / 2, ty = (h - th) / 2;
+     ByteString shown = m_address;
+     if (m_editing_address && !m_replace_address)
+         shown = ByteString::formatted("{}|", m_address);
+     // keep the end of a long address in view while it is edited, the start otherwise
+-    while (shown.length() > 1 && qrt_text_width(shown.characters(), QRT_TEXT_BODY) > fw - 28)
++    while (shown.length() > 1 && qrt_text_width(shown.characters(), size) > fw - fh)
+         shown = m_editing_address ? shown.substring(1) : shown.substring(0, shown.length() - 1);
+-    qrt_text(b, tx, ty, shown.characters(), m_address.is_empty() ? text_dim : text_fg, QRT_TEXT_BODY);
++    qrt_text(b, tx, ty, shown.characters(), m_address.is_empty() ? text_dim : text_fg, size);
+ }
+ 
+ void BrowserWindow::draw_page()
+@@ -311,6 +331,9 @@ void BrowserWindow::handle(qrt_event const& e)
+             draw_toolbar();
+             qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
+         }
++        if (m_fling)
++            m_fling->stop();
++        m_velocity = 0;
+         m_mouse = e.scan == 1;
+         m_finger_down = true;
+         m_dragging = false;
+@@ -330,10 +353,18 @@ void BrowserWindow::handle(qrt_event const& e)
+             break;
+         }
+         // a finger: past a few pixels it is a drag, and the page follows it
+-        if (!m_dragging && (abs(e.x - m_down_x) > 10 || abs(e.y - m_down_y) > 10))
++        if (!m_dragging && (abs(e.x - m_down_x) > scaled(8) || abs(e.y - m_down_y) > scaled(8))) {
+             m_dragging = true;
+-        if (m_dragging && e.y != m_last_y)
+-            send_mouse(Type::MouseWheel, m_down_x, max(m_down_y, content_top()), none, none, m_last_y - e.y);
++            m_last_move_ms = now_ms();
++        }
++        if (m_dragging && e.y != m_last_y) {
++            auto now = now_ms();
++            double dy = m_last_y - e.y;
++            double v = dy / max<u64>(1, now - m_last_move_ms);
++            m_velocity = m_velocity == 0 ? v : 0.6 * v + 0.4 * m_velocity;
++            m_last_move_ms = now;
++            scroll_page(dy);
++        }
+         m_last_x = e.x;
+         m_last_y = e.y;
+         break;
+@@ -343,7 +374,15 @@ void BrowserWindow::handle(qrt_event const& e)
+         m_finger_down = false;
+         if (m_mouse) {
+             send_mouse(Type::MouseUp, e.x, e.y, primary, none);
+-        } else if (!m_dragging) {
++        } else if (m_dragging) {
++            // a flick: the page goes on, unless the finger stopped before it lifted
++            if (now_ms() - m_last_move_ms < 80 && fabs(m_velocity) > 0.3) {
++                m_fling_carry = 0;
++                if (!m_fling)
++                    m_fling = Core::Timer::create_repeating(16, [this] { fling_step(); });
++                m_fling->start();
++            }
++        } else {
+             // a tap: a click where the finger went down
+             send_mouse(Type::MouseMove, m_down_x, m_down_y, none, none);
+             send_mouse(Type::MouseDown, m_down_x, m_down_y, primary, primary);
+@@ -351,7 +390,7 @@ void BrowserWindow::handle(qrt_event const& e)
+         }
+         break;
+     case QRT_EV_SCROLL:
+-        send_mouse(Type::MouseWheel, m_last_x, max(m_last_y, content_top()), none, none, e.y * 60.0);
++        send_mouse(Type::MouseWheel, m_last_x, max(m_last_y, content_top()), none, none, e.y * 60.0 * m_page_ratio);
+         break;
+     case QRT_EV_KEY:
+         if (m_editing_address)
+@@ -362,6 +401,34 @@ void BrowserWindow::handle(qrt_event const& e)
+     }
+ }
+ 
++u64 BrowserWindow::now_ms()
++{
++    return static_cast<u64>(MonotonicTime::now().milliseconds());
++}
++
++// the page moves by dy device pixels; its scroll offsets are CSS pixels
++void BrowserWindow::scroll_page(double dy)
++{
++    using Type = Web::MouseEvent::Type;
++    auto const none = Web::UIEvents::MouseButton::None;
++    send_mouse(Type::MouseWheel, m_down_x, max(m_down_y, content_top()), none, none, dy / m_page_ratio);
++}
++
++void BrowserWindow::fling_step()
++{
++    m_velocity *= 0.95;
++    if (fabs(m_velocity) < 0.05 || m_finger_down) {
++        m_fling->stop();
++        return;
++    }
++    // whole pixels only, the rest carries over to the next frame
++    m_fling_carry += m_velocity * 16;
++    double step = trunc(m_fling_carry);
++    m_fling_carry -= step;
++    if (step != 0)
++        scroll_page(step);
++}
++
+ void BrowserWindow::tap_toolbar(int x)
+ {
+     switch (toolbar_item_at(x)) {
+diff --git a/UI/QRT/BrowserWindow.h b/UI/QRT/BrowserWindow.h
+index 65e1b53a..2d167918 100644
+--- a/UI/QRT/BrowserWindow.h
++++ b/UI/QRT/BrowserWindow.h
+@@ -18,18 +18,21 @@ extern "C" {
+ 
+ namespace Ladybird {
+ 
++// the shell's density (px per dp), given by the shell when it starts the browser
++extern float g_shell_scale;
++
+ // The page: a web view whose frames are copied into the QRT window under the toolbar.
+ class PageView final : public ::WebView::HeadlessWebView {
+ public:
+     AK_ALLOC_WITH_KMALLOC;
+ 
+-    static NonnullOwnPtr<PageView> create(Core::AnonymousBuffer theme, Web::DevicePixelSize);
++    static NonnullOwnPtr<PageView> create(Core::AnonymousBuffer theme, Web::DevicePixelSize, double device_pixel_ratio);
+ 
+     // the last frame WebContent painted, and its size
+     RefPtr<Gfx::Bitmap> frame(Gfx::IntSize& size) const;
+ 
+ private:
+-    PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size);
++    PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size, double device_pixel_ratio);
+ };
+ 
+ // Ladybird's window in the QRT shell: a toolbar (back, forward, reload, the address,
+@@ -55,7 +58,15 @@ private:
+     void draw_page();
+     void present_all();
+ 
++    enum class ToolbarItem { Back, Forward, Reload, Keyboard, Address, None };
++    ToolbarItem toolbar_item_at(int x) const;
++    int scaled(float v) const { return static_cast<int>(v * m_ui + 0.5f); }
++    int address_x() const { return m_pad + 4 * m_button_w + m_pad; }
++
+     void tap_toolbar(int x);
++    void fling_step();
++    void scroll_page(double dy);
++    static u64 now_ms();
+     void address_key(u32 ch, u32 scan);
+     void page_key(u32 ch, u32 scan);
+     void send_mouse(Web::MouseEvent::Type, int x, int y, Web::UIEvents::MouseButton button, Web::UIEvents::MouseButton buttons, double wheel_y = 0);
+@@ -66,6 +77,10 @@ private:
+     int m_window { -1 };
+     int m_event_fd { -1 };
+     qrt_buffer m_buffer {};
++    float m_ui { 1.0f };
++    double m_page_ratio { 1.0 };
++    int m_button_w { 48 };
++    int m_pad { 6 };
+     int m_toolbar_height { 52 };
+     RefPtr<Core::Notifier> m_notifier;
+     OwnPtr<PageView> m_view;
+@@ -82,6 +97,12 @@ private:
+     bool m_dragging { false };
+     bool m_mouse { false };
+     int m_down_x { 0 }, m_down_y { 0 }, m_last_y { 0 }, m_last_x { 0 };
++
++    // after a drag, the page keeps moving and slows down (in device pixels per ms)
++    double m_velocity { 0 };
++    u64 m_last_move_ms { 0 };
++    double m_fling_carry { 0 };
++    RefPtr<Core::Timer> m_fling;
+ };
+ 
+ }
+diff --git a/UI/QRT/main.cpp b/UI/QRT/main.cpp
+index 04c39e4f..51000915 100644
+--- a/UI/QRT/main.cpp
++++ b/UI/QRT/main.cpp
+@@ -43,6 +43,22 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
+         QRT_HELPERS(RUN_HELPER)
+     }
+ 
++    // the shell says how dense its screen is: "--qrt-scale=<percent>", QRT's own option
++    Vector<StringView> strings;
++    Vector<char*> argv;
++    for (int i = 0; i < arguments.argc; ++i) {
++        auto argument = arguments.strings[i];
++        if (argument.starts_with("--qrt-scale="sv)) {
++            if (auto percent = argument.substring_view(12).to_number<int>(); percent.has_value() && *percent >= 50 && *percent <= 400)
++                Ladybird::g_shell_scale = static_cast<float>(*percent) / 100.0f;
++            continue;
++        }
++        strings.append(argument);
++        argv.append(arguments.argv[i]);
++    }
++    argv.append(nullptr);
++    arguments = Main::Arguments { static_cast<int>(strings.size()), argv.data(), strings.span() };
++
+     AK::set_rich_debug_enabled(true);
+     auto app = TRY(Ladybird::Application::create(arguments));
+     if (app->should_exit_after_profile_coordination())
+-- 
+2.43.0
+

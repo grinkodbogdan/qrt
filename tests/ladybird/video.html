@@ -6,7 +6,9 @@
 <style>
   body { margin: 0; font-family: sans-serif; background: #111; color: #eee; text-align: center; }
   video { width: 640px; height: 480px; background: black; margin-top: 16px; }
-  button { font-size: 28px; padding: 12px 48px; margin: 16px; border-radius: 12px; border: 0; background: #3584e4; color: white; }
+  video { max-width: 100%; max-height: 60vh; object-fit: contain; }
+  /* in the middle of the window whatever the browser's scale, where the QEMU test taps it */
+  button { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 28px; padding: 12px 48px; border-radius: 12px; border: 0; background: #3584e4; color: white; }
 </style></head>
 <body>
 <video id="v" src="video.webm" preload="auto"></video><br>

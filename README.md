@@ -189,6 +189,26 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.9.8: a browser sized for the tablet
+
+- **Bigger browser**: the toolbar is 1.25 times the shell's own controls, and pages
+  are laid out at a device pixel ratio of 1.5 on the 8" panel - text and buttons on
+  web pages are 1.5 times larger, and in portrait a page is 533 CSS pixels wide, as on
+  a phone, so sites send their mobile layouts.
+- **Scrolling follows the finger** (in CSS pixels, whatever the scale), and a flick
+  keeps the page moving and slowing down.
+- **WebAssembly is compiled**, not interpreted: Cranelift's compiler process
+  (`/bin/cranelift-compiler`) is now in the image.  Anubis' WebAssembly challenge
+  (the "making sure you're not a bot" page in front of Invidious and many other
+  sites) at difficulty 4 now passes in about 8 s in QEMU; interpreted, difficulty 2
+  (16 times less work) took as long.
+- Anubis checked in QEMU against a real Anubis server: versions 1.21, 1.24 and
+  1.28, all its challenges (fast, sha256, hashx, argon2id), over HTTP and HTTPS,
+  on a CPU like the tablet's (`QRT_QEMU_CPU=Westmere,+movbe,+rdrand
+  tools/run-qemu.sh`: no AVX).  All of them pass.
+- Ladybird's start-up options reached it only partly (the shell gave the wrong
+  argument count): the in-memory HTTP disk cache is now really off.
+
 ## 0.9.7: one core by default, a browser that says why it waits
 
 - Programs run on **one core again by default**: on the tablet the browser still did
@@ -735,9 +755,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.9.7.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.9.8.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.9.7.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.9.8.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.
