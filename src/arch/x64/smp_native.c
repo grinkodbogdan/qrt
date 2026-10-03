@@ -43,27 +43,54 @@ static void work(smp_job_t job, void *arg, int count) {
     }
 }
 
+/* 0.9.5: once the boot core has set up user mode (smp_programs_start), a worker's idle loop
+ * also runs program threads (sched.c); render jobs still come first */
+static volatile int go_sched;
+void proc_cpu_setup(void);                    /* proc.c: SYSCALL and paging bits of this core */
+void sched_ap_join(void (*idle_fn)(void *));
+int  sched_ap_has_work(void);
+void sched_ap_run(void);
+
+static void idle(void *arg) {
+    (void)arg;
+    percpu_t *c = this_cpu();
+    u64 seen = __atomic_load_n(&J.gen, __ATOMIC_ACQUIRE);
+    for (;;) {
+        cli();
+        if (__atomic_load_n(&J.gen, __ATOMIC_ACQUIRE) != seen) {
+            jl_lock();
+            seen = J.gen;
+            smp_job_t job = J.job;
+            void *jarg = J.arg;
+            int count = J.count;
+            __atomic_fetch_add(&J.active, 1, __ATOMIC_SEQ_CST);
+            c->in_job = go_sched;
+            jl_unlock();
+            sti();
+            work(job, jarg, count);
+            __atomic_fetch_sub(&J.active, 1, __ATOMIC_SEQ_CST);
+            c->in_job = 0;
+            continue;
+        }
+        if (go_sched && c->sched_on && sched_ap_has_work()) { sched_ap_run(); sti(); continue; }
+        if (go_sched && !c->sched_on) { sti(); sched_ap_join(idle); }   /* never returns: this loop again, as the idle thread */
+        sti_hlt();
+    }
+}
+
 static void ap_main(void *arg) {
     percpu_t *c = arg;
     cpu_setup(c, c->index);
     lapic_init();
     c->apic_id = lapic_id();
     __atomic_fetch_add(&alive, 1, __ATOMIC_SEQ_CST);
-    u64 seen = 0;
-    for (;;) {
-        cli();
-        if (__atomic_load_n(&J.gen, __ATOMIC_ACQUIRE) == seen) { sti_hlt(); continue; }
-        jl_lock();
-        seen = J.gen;
-        smp_job_t job = J.job;
-        void *jarg = J.arg;
-        int count = J.count;
-        __atomic_fetch_add(&J.active, 1, __ATOMIC_SEQ_CST);
-        jl_unlock();
-        sti();
-        work(job, jarg, count);
-        __atomic_fetch_sub(&J.active, 1, __ATOMIC_SEQ_CST);
-    }
+    idle(NULL);
+}
+
+void smp_programs_start(void) {
+    if (!workers) return;
+    go_sched = 1;
+    lapic_broadcast_ipi(VEC_WAKE);
 }
 
 void native_smp_run(smp_job_t job, void *arg, int count) {

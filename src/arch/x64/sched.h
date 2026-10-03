@@ -19,7 +19,8 @@ typedef struct thread {
     u64 clear_tid;              /* CLONE_CHILD_CLEARTID / set_tid_address: zeroed and woken at exit */
     volatile int in_sys;        /* inside a system call: may hold kernel locks */
     int kbuf;                   /* sendfile: the kernel's own buffer stands in for a user one */
-    int irq_depth;              /* inside interrupt handlers (boot core): a fault there is the kernel's, not the program's */
+    int irq_depth;              /* inside interrupt handlers: a fault there is the kernel's, not the program's */
+    volatile int on_cpu;        /* the core running it, -1 if none */
     u64 cpu_ticks;              /* ticks spent running */
     u64 sig_mask, sig_pending;  /* blocked signals; signals sent to this thread */
     u64 sig_saved_mask;         /* rt_sigsuspend: the mask to restore after the handler */
@@ -31,6 +32,22 @@ typedef struct thread {
 } thread_t;
 
 void      sched_init(void);                         /* current context -> thread "shell" */
+thread_t *thread_create_suspended(const char *name, void (*fn)(void *), void *arg, u64 cr3);   /* runs after thread_wake() */
+void      thread_stop(thread_t *t);                 /* a thread of a stopped process: never runs again (any core) */
+/* SMP (0.9.5): program threads on every core, the kernel under one big lock */
+void      bkl_lock(void);
+void      bkl_unlock(void);
+int       bkl_held(void);
+void      tlb_shootdown(u64 cr3);                   /* other cores using cr3 reload it */
+void      cpu_load_cr3(u64 cr3);                    /* switch this core's address space */
+void      sched_quiesce_cr3(u64 cr3);               /* wait until no other core uses cr3 */
+void      sched_smp_enable(void);
+int       sched_smp_enabled(void);
+void      sched_ap_join(void (*idle_fn)(void *));   /* a worker core starts scheduling; never returns */
+int       sched_ap_has_work(void);
+void      sched_ap_run(void);
+void      sched_tlb_ipi(void);
+void      thread_first_run(void);
 thread_t *thread_create(const char *name, void (*fn)(void *), void *arg, u64 cr3);
 thread_t *thread_current(void);
 void      thread_sleep_ms(u64 ms);

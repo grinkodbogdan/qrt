@@ -48,6 +48,7 @@ _Static_assert(sizeof(sigcontext_t) == 256, "sigcontext");
 _Static_assert(__builtin_offsetof(ucontext_k_t, sigmask) == 296, "ucontext");
 
 extern void (*user_return_hook)(frame_t *f);
+extern int (*user_return_check)(void);
 
 static int default_ignored(int sig) { return sig == 17 || sig == 18 || sig == 23 || sig == 28 || (sig >= 19 && sig <= 22); }
 static int ignored(proc_t *p, int sig) { u64 h = p->sa[sig].handler; return h == 1 || (h == 0 && default_ignored(sig)); }
@@ -231,6 +232,18 @@ int sig_fault(proc_t *p, frame_t *f) {
         p->sig = s;
         return 0;
     }
+    /* the program catches it (Ladybird prints "CRASH" and exits): say where, a few times */
+    static int told;
+    if (told < 8 && s != 5) {
+        told++;
+        u64 vfl = proc_vma_lock();
+        vma_t *v = f->vector == 14 ? proc_vma(p, addr) : NULL;
+        u32 vprot = v ? v->prot : 0;
+        proc_vma_unlock(vfl);
+        klog("proc: %s (pid %d, thread %d) fault %llu (err %llx) at %llx, address %llx%s%s - to its handler", p->name, p->pid, t->tid,
+             f->vector, f->err, f->rip, addr, f->vector == 14 ? (v ? ", mapped " : ", not mapped") : "",
+             v ? (vprot & PROT_WRITE ? "rw" : vprot & PROT_READ ? "r" : "none") : "");
+    }
     ksiginfo_t info = { code, 0, 0, addr };
     if (!setup_frame(p, f, s, &info, f->vector, f->vector == 14 ? addr : 0)) { p->sig = 11; return 0; }
     return 1;
@@ -397,4 +410,14 @@ i64 sig_alarm(proc_t *p, u64 seconds) {
     return (i64)left;
 }
 
-void sig_init(void) { user_return_hook = on_user_return; }
+/* without the big lock: could on_user_return have anything to do? (most returns to user mode: no) */
+static int user_return_needed(void) {
+    thread_t *t = thread_current();
+    proc_t *p = t ? t->proc : NULL;
+    if (!p) return 0;
+    if (p->killed || p->exited || t->state == T_DEAD) return 1;
+    if (p->alarm_us && k_now_us() >= p->alarm_us) return 1;
+    return ((t->sig_pending | p->sig_pending) & ~t->sig_mask) != 0;
+}
+
+void sig_init(void) { user_return_hook = on_user_return; user_return_check = user_return_needed; }

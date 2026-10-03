@@ -369,8 +369,15 @@ int proc_user_ok(proc_t *p, u64 addr, u64 len) {
  * violation (a store to a read-only page, a jump into data): the program's fault */
 static int on_page_fault(frame_t *f) {
     proc_t *p = proc_current();
-    if (!p || f->vector != 14 || (f->err & 1)) return 0;
-    return fault_in_access(p, read_cr2(), (f->err & 2) != 0);
+    if (!p || f->vector != 14) return 0;
+    u64 a = read_cr2();
+    if (f->err & 1) {
+        /* a protection fault on a present page: the program's, unless the page allows the access
+         * by now (another core changed it, and this core still had the old entry) - then retry */
+        if (!user_va(a) || (f->err & 0x10)) return 0;
+        return (f->err & 2) ? as_pte_writable(p->cr3, a) && sched_smp_enabled() : 0;
+    }
+    return fault_in_access(p, a, (f->err & 2) != 0);
 }
 
 static int on_user_fault(frame_t *f) {
@@ -431,11 +438,23 @@ void proc_init(void) {
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 & ~(1ull << 16)));
     sig_init();
+    proc_cpu_setup();
+}
+
+/* what every core needs to run programs (the boot core in proc_init, the others when they join) */
+void proc_cpu_setup(void) {
+    u64 cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 & ~(1ull << 16)));
+    u32 r[4];
+    cpuid(0x80000001, 0, r);
+    if (r[3] & (1u << 20)) wrmsr(MSR_EFER, rdmsr(MSR_EFER) | (1ull << 11));   /* NX, as mm_enable_nx */
     /* SYSCALL/SYSRET: kernel CS 0x08 (SS 0x10); SYSRET derives user CS/SS from 0x18 */
     wrmsr(MSR_EFER, rdmsr(MSR_EFER) | 1);
     wrmsr(MSR_STAR, (0x18ull << 48) | (0x08ull << 32));
     wrmsr(MSR_LSTAR, (u64)(usize)syscall_entry);
     wrmsr(MSR_SFMASK, 0x700);             /* clear TF, IF, DF on entry */
+    wrmsr(MSR_FS_BASE, 0);
 }
 
 /* ---- ELF loading -------------------------------------------------------------- */
@@ -613,6 +632,7 @@ static u64 build_stack(proc_t *p, int argc, const char *const *argv, const char 
 static void user_thread(void *arg) {
     proc_t *p = arg;
     wrmsr(MSR_FS_BASE, 0);
+    bkl_unlock();                                          /* user mode runs without the big lock */
     enter_user(p->start, p->sp);
 }
 
@@ -661,11 +681,10 @@ proc_t *proc_spawn(const char *path, int argc, const char *const *argv, term_t *
     if (!term) p->fd[1].flags = p->fd[2].flags = 1 << 30;   /* no terminal: output goes to the kernel log (KMSG in linux.c) */
     p->nthreads = 1;
     proc_register(p);
-    u64 fl = irq_save();                       /* the thread must not run before it knows its process */
-    p->th = thread_create(p->name, user_thread, p, p->cr3);
+    p->th = thread_create_suspended(p->name, user_thread, p, p->cr3);   /* runs once it knows its process */
     p->th->proc = p;
     p->th->tid = p->pid;
-    irq_restore(fl);
+    thread_wake(p->th);
     return p;
 }
 
@@ -683,6 +702,7 @@ extern i64 futex_wake(proc_t *p, u64 uaddr, int n);       /* linux.c */
 static void clone_thread(void *arg) {
     frame_t fr = *(frame_t *)arg;                          /* onto this thread's own kernel stack */
     kfree(arg);
+    bkl_unlock();
     enter_user_frame(&fr);
 }
 
@@ -719,8 +739,7 @@ static i64 proc_fork(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 
     }
     c->nthreads = 1;
     proc_register(c);
-    u64 fl = irq_save();
-    thread_t *t = thread_create(c->name, clone_thread, cf, c->cr3);
+    thread_t *t = thread_create_suspended(c->name, clone_thread, cf, c->cr3);
     t->proc = c;
     t->tid = c->pid;
     t->fs_base = (flags & CLONE_SETTLS) ? tls : thread_current()->fs_base;
@@ -728,7 +747,7 @@ static i64 proc_fork(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 
     t->sig_mask = thread_current()->sig_mask;
     t->alt_sp = thread_current()->alt_sp; t->alt_size = thread_current()->alt_size; t->alt_flags = thread_current()->alt_flags;
     c->th = t;
-    irq_restore(fl);
+    thread_wake(t);
     if (flags & CLONE_VFORK)
         while (!c->exec_done && !c->exited && !p->killed) thread_sleep_ms(1);
     return c->pid;
@@ -744,15 +763,14 @@ i64 proc_clone(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 ctid, 
     int tid = next_pid++;
     if ((flags & CLONE_PARENT_SETTID) && proc_user_ok(p, ptid, 4)) *(i32 *)(usize)ptid = tid;
     if ((flags & CLONE_CHILD_SETTID) && proc_user_ok(p, ctid, 4)) *(i32 *)(usize)ctid = tid;
-    u64 fl = irq_save();                                   /* do not run it before it is complete */
-    thread_t *t = thread_create(p->name, clone_thread, cf, p->cr3);
+    thread_t *t = thread_create_suspended(p->name, clone_thread, cf, p->cr3);   /* runs once complete */
     t->proc = p;
     t->tid = tid;
     t->fs_base = (flags & CLONE_SETTLS) ? tls : thread_current()->fs_base;
     t->clear_tid = (flags & CLONE_CHILD_CLEARTID) ? ctid : 0;
     t->sig_mask = thread_current()->sig_mask;
     p->nthreads++;
-    irq_restore(fl);
+    thread_wake(t);
     return tid;
 }
 
@@ -770,8 +788,9 @@ static void notify_parent(proc_t *p) {
 }
 
 static void teardown(proc_t *p, int code) {
-    write_cr3(kernel_cr3());                   /* leave the address space before freeing it */
+    cpu_load_cr3(kernel_cr3());                /* leave the address space before freeing it */
     thread_current()->cr3 = kernel_cr3();
+    sched_quiesce_cr3(p->cr3);                 /* and so have its stopped threads, on every core */
     proc_vmas_release(p);
     as_destroy(p->cr3);
     p->exit_code = code;
@@ -811,7 +830,7 @@ void proc_exit(int code) {
     for (int i = 0; i < n; i++) {
         thread_t *t = all[i];
         if (t == me || t->proc != p || t->state == T_DEAD || t->in_sys) continue;
-        t->state = T_DEAD;
+        thread_stop(t);
         p->nthreads--;
     }
     if (--p->nthreads > 0) thread_exit();
@@ -846,13 +865,14 @@ void proc_kill(proc_t *p) {
         thread_t *t = all[i];
         if (t->proc != p || t->state == T_DEAD) continue;
         if (t->in_sys) { left++; thread_wake(t); continue; }
-        t->state = T_DEAD;
+        thread_stop(t);
         p->nthreads--;
     }
     if (!left && p->nthreads <= 0) {
         irq_restore(fl);
         fds_release_all(p);                         /* nothing of it runs any more: its sockets are free to close */
         fl = irq_save();
+        sched_quiesce_cr3(p->cr3);                  /* nor on another core */
         proc_vmas_release(p);
         as_destroy(p->cr3);
         p->exited = 1;
@@ -907,7 +927,7 @@ i64 proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, ch
     thread_t *all[64];
     int nt = sched_threads(all, 64);
     for (int i = 0; i < nt; i++)
-        if (all[i] != me && all[i]->proc == p && all[i]->state != T_DEAD) { all[i]->state = T_DEAD; p->nthreads--; }
+        if (all[i] != me && all[i]->proc == p && all[i]->state != T_DEAD) { thread_stop(all[i]); p->nthreads--; }
     irq_restore(fl);
 
     /* build the new image beside the old one */
@@ -942,6 +962,7 @@ i64 proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, ch
         klog("proc: exec %s failed: %s", resolved, err);
         return -8;
     }
+    sched_quiesce_cr3(old_cr3);                                /* its other threads (stopped) are off every core */
     for (int i = 0; i < old_nvma; i++) if (old_vma[i].obj) kobj_put(old_vma[i].obj);
     p->native = im.native;                                     /* the new image decides the personality */
     if (old_vma) kfree(old_vma);
@@ -956,7 +977,7 @@ i64 proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, ch
 
     fl = irq_save();
     me->cr3 = p->cr3;
-    write_cr3(p->cr3);
+    cpu_load_cr3(p->cr3);
     as_destroy(old_cr3);
     me->fs_base = 0;
     wrmsr(MSR_FS_BASE, 0);

@@ -19,6 +19,16 @@ typedef struct percpu {
     u64 user_rsp;               /* gs:16 scratch for syscall entry */
     u32 index, apic_id;         /* gs:24 */
     struct thread *cur;         /* gs:32 */
+    /* scheduling (sched.c) */
+    struct thread *idle;        /* this core's idle thread */
+    struct thread *prev;        /* the thread being switched away from */
+    u64 loaded_cr3;             /* the address space in CR3 (TLB shootdowns) */
+    volatile int tlb_req;       /* another core changed that address space: reload CR3 */
+    volatile int need_resched;  /* a thread became runnable for this core */
+    int bkl_depth;              /* the big kernel lock, held this many times */
+    volatile int in_job;        /* running a render job (not preempted) */
+    int sched_on;               /* takes part in scheduling (user threads) */
+    u64 idle_ticks, busy_ticks;
     u64 gdt[8];
     tss_t tss;
     u8 df_stack[8192] __attribute__((aligned(16)));
@@ -50,6 +60,7 @@ void lapic_init(void);
 void lapic_eoi(void);
 u32  lapic_id(void);
 void lapic_timer_start(u32 hz);
+void lapic_timer_start_ap(u32 hz);
 void lapic_send_ipi(u32 apic_id, u32 vector);
 void lapic_broadcast_ipi(u32 vector);             /* all cores except this one */
 void lapic_init_sipi(u32 apic_id, u32 page);

@@ -125,6 +125,7 @@ void    fd_release(proc_t *p, int fd);           /* close, dropping socket/pipe 
 void    fd_addref(proc_t *p, int fd);            /* a copy of the descriptor now exists (dup, fork) */
 void    fds_release_all(proc_t *p);
 void    proc_init(void);
+void    proc_cpu_setup(void);                     /* SYSCALL and paging bits of the calling core */
 int     proc_interrupted(proc_t *p);              /* a blocking call should stop: -EINTR (killed, or a signal to handle) */
 proc_t *proc_at(int i);                           /* every process ever started, NULL past the end */
 thread_t *proc_thread(proc_t *p, int tid);        /* a thread of p by tid (0: any live one) */

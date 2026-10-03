@@ -345,6 +345,7 @@ static u64 pte_bits(int prot) {
     return PTE_P | PTE_U | ((prot & AS_W) ? PTE_W : 0) | ((prot & AS_X) ? 0 : nx_bit) | ((prot & AS_SHARED) ? PTE_SOFT_SHARED : 0);
 }
 
+void tlb_shootdown(u64 cr3);                          /* sched.c: the other cores */
 static void flush(u64 cr3, u64 va) { if (read_cr3() == cr3) __asm__ volatile("invlpg (%0)" : : "r"((usize)va) : "memory"); }
 
 static void clone_pdpt(u64 *sp3, u64 *dp3) {
@@ -387,8 +388,10 @@ int as_map(u64 cr3, u64 va, u64 frame, int prot) {
     u64 *pte = pte_of(cr3, va, 1);
     if (!pte) return -1;
     if (PTE_HAS(*pte) && !(*pte & PTE_SOFT_SHARED) && (*pte & PTE_ADDR) != (frame & PTE_ADDR)) pmm_free(*pte & PTE_ADDR);
+    u64 old = *pte;
     *pte = (frame & PTE_ADDR) | pte_bits(prot);
     flush(cr3, va);
+    if (old & PTE_P) tlb_shootdown(cr3);          /* another core may hold the old entry */
     return 0;
 }
 
@@ -408,6 +411,7 @@ void as_unmap(u64 cr3, u64 va) {
     if (!(*pte & PTE_SOFT_SHARED)) pmm_free(*pte & PTE_ADDR);
     *pte = 0;
     flush(cr3, va);
+    tlb_shootdown(cr3);
 }
 
 void as_protect(u64 cr3, u64 va, int prot) {
@@ -416,6 +420,7 @@ void as_protect(u64 cr3, u64 va, int prot) {
     u64 keep = *pte & (PTE_ADDR | PTE_SOFT_SHARED);
     *pte = (prot & AS_NONE) ? keep | PTE_SOFT_PARKED : (*pte & PTE_ADDR) | pte_bits(prot | ((*pte & PTE_SOFT_SHARED) ? AS_SHARED : 0));
     flush(cr3, va);
+    tlb_shootdown(cr3);
 }
 
 int as_parked(u64 cr3, u64 va) { u64 *pte = pte_of(cr3, va, 0); return pte && (*pte & PTE_SOFT_PARKED) && !(*pte & PTE_P); }
@@ -430,6 +435,7 @@ int as_move(u64 cr3, u64 from, u64 to) {
     if (!pd) { if (!(e & PTE_SOFT_SHARED)) pmm_free(e & PTE_ADDR); return 0; }
     *pd = e;
     flush(cr3, to);
+    tlb_shootdown(cr3);
     return 1;
 }
 
@@ -460,8 +466,8 @@ static void protect_fn(u64 cr3, u64 *pte, u64 va, int prot) {
     *pte = (prot & AS_NONE) ? keep | PTE_SOFT_PARKED : (*pte & PTE_ADDR) | pte_bits(prot | ((*pte & PTE_SOFT_SHARED) ? AS_SHARED : 0));
     flush(cr3, va);
 }
-void as_unmap_range(u64 cr3, u64 start, u64 end) { as_walk(cr3, start, end, unmap_fn, 0); }
-void as_protect_range(u64 cr3, u64 start, u64 end, int prot) { as_walk(cr3, start, end, protect_fn, prot); }
+void as_unmap_range(u64 cr3, u64 start, u64 end) { as_walk(cr3, start, end, unmap_fn, 0); tlb_shootdown(cr3); }
+void as_protect_range(u64 cr3, u64 start, u64 end, int prot) { as_walk(cr3, start, end, protect_fn, prot); tlb_shootdown(cr3); }
 
 static void free_pdpt(u64 *pdpt) {
     for (int g = 0; g < 512; g++) {

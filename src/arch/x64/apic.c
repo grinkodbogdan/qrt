@@ -45,6 +45,13 @@ void lapic_init(void) {
     if (!pic_masked) { outb(0x21, 0xff); outb(0xa1, 0xff); pic_masked = 1; }
 }
 
+/* another core's timer, at its own rate (the calibration is the boot core's) */
+void lapic_timer_start_ap(u32 hz) {
+    wr(R_TIMER_DIV, 0x3);
+    wr(R_LVT_TIMER, VEC_TIMER | (1u << 17));
+    wr(R_TIMER_INIT, ticks_per_ms * 1000 / hz);
+}
+
 void lapic_timer_start(u32 hz) {
     wr(R_TIMER_DIV, 0x3);                          /* divide by 16 */
     if (!ticks_per_ms) {

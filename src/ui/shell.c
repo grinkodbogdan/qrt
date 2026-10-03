@@ -15,6 +15,7 @@
 #include "../net/netstack.h"
 #include "../net/wlan.h"
 #include "../drivers/backlight.h"
+#include "../drivers/battery.h"
 #include "../drivers/buttons.h"
 #include "../drivers/i915/gpu.h"
 #include "../drivers/i915/display.h"
@@ -56,6 +57,7 @@ static struct {
     int home_y0, home_tracking, ov_gesture, lock_gesture;
     u64 osd_until;
     int osd_shown;
+    u64 power_next;                 /* next battery and cover check */
     u32 running;                  /* bit i: apps[i] was opened */
     char query[48];
     int cursor_x, cursor_y, cursor_on, cursor_dirty;
@@ -629,6 +631,33 @@ static void net_icon(canvas_t *c, float x, float cy, float s, u32 fg) {
 
 static void speaker_icon(canvas_t *c, float x, float cy, float s, int muted, int level, u32 fg);
 
+/* the battery: an outline filled to the charge, red when low, a bolt while charging; returns its width */
+static int battery_icon(canvas_t *c, float x, float cy, float s, u32 fg) {
+    const battery_t *b = battery_get();
+    if (!b->present) return 0;
+    char pct[8];
+    fmt(pct, sizeof pct, "%d%%", b->percent);
+    const font_t *f = font_pick(F_SEMIBOLD, dp(12));
+    int tw = text_width(f, pct);
+    float bw = s * 1.15f, bh = s * 0.62f, by = cy - bh / 2;
+    int x0 = (int)x - tw - dp(5);
+    gfx_text(c, f, x0, (int)(cy - f->line / 2.0f), pct, fg);
+    float bx = x;
+    gfx_rrect(c, (rect_t){ (int)bx, (int)by, (int)bw, (int)bh }, dp(2.5f), fg);
+    gfx_rrect(c, (rect_t){ (int)(bx + dp(1.5f)), (int)(by + dp(1.5f)), (int)(bw - dp(3)), (int)(bh - dp(3)) }, dp(1.5f), RGBA(0, 0, 0, 255));
+    gfx_fill(c, (rect_t){ (int)(bx + bw), (int)(cy - bh / 4), dp(2), (int)(bh / 2) }, fg);
+    u32 col = b->charging || b->ac ? RGB(110, 210, 120) : b->percent <= 15 ? RGB(235, 80, 70) : fg;
+    int inner = (int)(bw - dp(5));
+    gfx_fill(c, (rect_t){ (int)(bx + dp(2.5f)), (int)(by + dp(2.5f)), MAX(1, inner * b->percent / 100), (int)(bh - dp(5)) }, col);
+    if (b->charging) {
+        float mx = bx + bw / 2, my = cy;
+        gfx_line(c, mx + dp(1.5f), my - bh * 0.42f, mx - dp(2), my + dp(0.5f), dp(1.6f), RGB(255, 255, 255));
+        gfx_line(c, mx - dp(2), my + dp(0.5f), mx + dp(2), my - dp(0.5f), dp(1.6f), RGB(255, 255, 255));
+        gfx_line(c, mx + dp(2), my - dp(0.5f), mx - dp(1.5f), my + bh * 0.42f, dp(1.6f), RGB(255, 255, 255));
+    }
+    return (int)(x + bw + dp(2)) - x0;
+}
+
 static void draw_status(canvas_t *c, const EFI_TIME *t) {
     int h = dp(32);
     gfx_fill(c, (rect_t){ 0, 0, ui.W, h }, RGBA(0, 0, 0, 225));
@@ -644,6 +673,7 @@ static void draw_status(canvas_t *c, const EFI_TIME *t) {
     float s = dp(16), cy = h / 2.0f, x = ui.W - dp(16) - s;
     speaker_icon(c, x, cy, s, sh.volume == 0, sh.volume, ui.text);
     net_icon(c, x - dp(14) - s, cy, s, ui.text);
+    battery_icon(c, x - dp(28) - s * 2.15f, cy, s, ui.text);
 }
 
 /* ---- geometry ----------------------------------------------------------------
@@ -1163,6 +1193,8 @@ static void compose_rect(rect_t d) {
     }
     if (sh.power_open && !sh.desk) draw_power(&c);
     if (sh.osd_shown) draw_osd(&c);
+    int veil = backlight_dim_alpha();                /* no backlight control: brightness in software */
+    if (veil) gfx_fill(&c, d, RGBA(0, 0, 0, veil));
 }
 
 static rect_t compose_area;
@@ -2110,6 +2142,18 @@ void shell_main(void) {
 
         u64 now = k_now_ms();
         netstack_poll();
+        if (now >= sh.power_next) {                   /* battery, charger and cover (battery.c) */
+            sh.power_next = now + 2000;
+            const battery_t *b = battery_get();
+            int was_pct = b->percent, was_chg = b->charging, was_ac = b->ac, was_lid = b->lid_closed;
+            battery_poll();
+            if (b->percent != was_pct || b->charging != was_chg || b->ac != was_ac) shell_damage((rect_t){ 0, 0, ui.W, STATUS_H });
+            if (b->lid_closed != was_lid) {
+                klog("shell: cover %s", b->lid_closed ? "closed" : "opened");
+                if (b->lid_closed) go_to_sleep(); else wake_up();
+            }
+            if (b->present && b->discharging && b->percent <= 5 && was_pct > 5) klog("shell: battery at %d%% - plug the charger in", b->percent);
+        }
         if (sh.asleep) {
             /* the panel is dark: keep the network and the buttons going, draw nothing */
             for (int i = 0; i < 3; i++) hal_wait_frame();

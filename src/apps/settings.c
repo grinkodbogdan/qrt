@@ -46,7 +46,7 @@ typedef struct {
     int bottom;
 } lay_t;
 
-static int bl(void) { return backlight_available(); }
+static int bl(void) { return 1; }                 /* a PWM, or the shell's software dimming */
 
 static lay_t layout(rect_t a) {
     lay_t L;
@@ -236,7 +236,7 @@ static int slider_value(rect_t t, int x) { return CLAMP((x - t.x) * 100 / MAX(1,
 static rect_t grab(rect_t t) { return (rect_t){ t.x - dp(14), t.y - dp(20), t.w + dp(28), t.h + dp(40) }; }
 
 static void set_slider(int which, int v) {
-    if (which == SL_BRIGHT) backlight_set_level(v);
+    if (which == SL_BRIGHT) { backlight_set_level(v); if (!backlight_available()) shell_redraw(); }   /* software dimming: the whole picture */
     else if (which == SL_VOL) shell_set_volume(v);
 }
 

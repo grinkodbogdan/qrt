@@ -156,6 +156,26 @@ const char *dwi2c_strerror(int err) {
  * drivers stop at ExitBootServices and may reset or power the block down, so
  * the configuration is captured beforehand and written back afterwards.
  */
+/*
+ * Standard mode (100 kHz) for a slow device.  A bus the firmware never used
+ * (I2C3 on the Venue: the battery controller) is still in reset with its clock
+ * gated: take it out (LPSS private registers, as Linux's acpi_lpss does) and
+ * program the SCL counts for the 100 MHz LPSS clock (Linux's formulas:
+ * tHIGH 4.0 us, tLOW 4.7 us + 0.3 us fall).  If the clock is faster the bus
+ * only runs slower, which a standard-mode device accepts.
+ */
+void dwi2c_standard_mode(dwi2c_t *c) {
+    if (!c->found) return;
+    if ((rd(c, 0x804) & 3) != 3) { wr(c, 0x804, 3); hal_delay_us(100); }
+    if (!(rd(c, 0x800) & 1)) wr(c, 0x800, rd(c, 0x800) | 1);
+    wr(c, IC_ENABLE, 0);
+    for (int i = 0; i < 100000 && (rd(c, IC_ENABLE_STATUS) & 1); i++) {}
+    if (rd(c, 0x14) < 100 || rd(c, 0x18) < 100) { wr(c, 0x14, 392); wr(c, 0x18, 499); }   /* IC_SS_SCL_HCNT / LCNT */
+    if (!rd(c, 0x7c)) wr(c, 0x7c, 30);                                                      /* SDA hold, 300 ns */
+    wr(c, IC_CON, 1u | (1u << 1) | (1u << 5) | (1u << 6));                                  /* master, standard, restart, no slave */
+    wr(c, IC_ENABLE, 1);
+}
+
 static const u16 saved_regs[] = { 0x00, 0x14, 0x18, 0x1c, 0x20, 0x24, 0x28, 0x7c, 0x94, 0xa0, 0xa4 };
 
 void dwi2c_save(dwi2c_t *c) {

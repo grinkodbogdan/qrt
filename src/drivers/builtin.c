@@ -10,6 +10,8 @@
 #include "touch.h"
 #include "buttons.h"
 #include "backlight.h"
+#include "battery.h"
+#include "pmic.h"
 #include "e1000.h"
 #include "iwm/iwm.h"
 #include "i915/gpu.h"
@@ -160,11 +162,29 @@ static const driver_t drv_buttons = { "gpio-buttons", NULL, btn_acpi, NULL, btn_
 static const char *const bl_acpi[] = { "80862288", NULL };
 static void bl_status(device_t *d) { backlight_status(d->status, sizeof d->status); }
 static int bl_probe(device_t *d) {
-    if (!backlight_init()) return DEV_NOT_MINE;
+    if (!backlight_init()) return DEV_NOT_MINE;      /* software dimming: not this device's doing */
     bl_status(d);
     return 0;
 }
 static const driver_t drv_backlight = { "backlight", NULL, bl_acpi, NULL, bl_probe, bl_status };
+
+/* ---- battery, charger, cover (Venue 8 Pro 5855: an embedded controller on I2C3, see battery.c) ---- */
+static const char *const bat_acpi[] = { "PNP0C0A", NULL };
+static void bat_status(device_t *d) { battery_status(d->status, sizeof d->status); }
+static int bat_probe(device_t *d) { if (!k.is_venue) return DEV_NOT_MINE; bat_status(d); return 0; }
+static const driver_t drv_battery = { "battery", NULL, bat_acpi, NULL, bat_probe, bat_status };
+
+/* ---- the PMIC on I2C7 (see pmic.c) ------------------------------------------------ */
+static const char *const pmic_acpi[] = { "INT33FD", "INT33F5", "INT33F4", "INT34D3", NULL };
+static int pmic_owner;
+static void pmic_dev_status(device_t *d) { strlcpy(d->status, d->priv ? pmic_status() : "another description of the same PMIC", sizeof d->status); }
+static int pmic_dev_probe(device_t *d) {
+    if (!k.is_venue) return DEV_NOT_MINE;
+    if (!pmic_owner) { pmic_owner = 1; d->priv = d; }
+    pmic_dev_status(d);
+    return 0;
+}
+static const driver_t drv_pmic = { "pmic", NULL, pmic_acpi, NULL, pmic_dev_probe, pmic_dev_status };
 
 /* ---- Intel Wireless 8260 (src/drivers/iwm, started from the Wi-Fi app) ------------ */
 static const pci_match_t iwm_pci[] = { { 0x8086, 0x24f3, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x24f4, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
@@ -184,4 +204,4 @@ static int e1000_dev_probe(device_t *d) {
 }
 static const driver_t drv_e1000 = { "e1000", e1000_pci, NULL, NULL, e1000_dev_probe, e1000_dev_status };
 
-const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_iwm, &drv_e1000, &drv_xhci, &drv_audio, &drv_chipset, NULL };
+const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_battery, &drv_pmic, &drv_iwm, &drv_e1000, &drv_xhci, &drv_audio, &drv_chipset, NULL };

@@ -845,7 +845,18 @@ static void trace_failure(proc_t *p, u64 nr, u64 a0, u64 a1, i64 r) {
     klog("trace: %s[%d] sys %llu -> %lld %s", p->name, p->pid, nr, r, s);
 }
 
+static void syscall_dispatch_locked(frame_t *f);
+
+/* the kernel runs under the big lock (sched.c): taken on the way in, given back on the way out */
 void syscall_dispatch(frame_t *f) {
+    bkl_lock();
+    thread_t *me = thread_current();
+    if (me->state == T_DEAD || !me->proc || me->proc->exited) thread_exit();   /* stopped while it waited for the lock */
+    syscall_dispatch_locked(f);
+    bkl_unlock();
+}
+
+static void syscall_dispatch_locked(frame_t *f) {
     proc_t *p = proc_current();
     u64 nr = f->rax, a0 = f->rdi, a1 = f->rsi, a2 = f->rdx, a3 = f->r10, a4 = f->r8, a5 = f->r9;
     u64 entry_nr = nr;
@@ -1094,7 +1105,7 @@ void syscall_dispatch(frame_t *f) {
     case 16:                                            /* ioctl */
         if (fdp(p, a0) && p->fd[a0].type == F_TTY && !(p->fd[a0].flags & KMSG) && (a1 == 0x5401 || a1 == 0x5413)) {
             /* the Terminal is a terminal: TCGETS (so isatty() is true and stdout is line-buffered), TIOCGWINSZ */
-            if (a1 == 0x5401 && UOK(a2, 60)) { memset((void *)(usize)a2, 0, 60); ((u32 *)(usize)a2)[1] = 5; ((u32 *)(usize)a2)[3] = 0x8a3b; r = 0; }
+            if (a1 == 0x5401 && UOK(a2, 36)) { memset((void *)(usize)a2, 0, 36); ((u32 *)(usize)a2)[1] = 5; ((u32 *)(usize)a2)[3] = 0x8a3b; r = 0; }   /* the kernel's struct termios: 36 bytes (more overwrote the caller's stack: busybox ls died) */
             else if (a1 == 0x5413 && UOK(a2, 8)) { u16 *ws = (u16 *)(usize)a2; ws[0] = 40; ws[1] = 100; ws[2] = ws[3] = 0; r = 0; }
             else r = -EFAULT;
         } else if (fdp(p, a0) && p->fd[a0].type == F_OBJ) {
@@ -1199,7 +1210,7 @@ void syscall_dispatch(frame_t *f) {
     }
     case 204:                                                   /* sched_getaffinity */
         if (!UOK(a2, 8)) { r = -EFAULT; break; }
-        *(u64 *)(usize)a2 = 1; r = 8; break;
+        *(u64 *)(usize)a2 = sched_smp_enabled() ? (1ull << ncpus) - 1 : 1; r = 8; break;   /* every core runs programs (0.9.5) */
     case 24: thread_yield(); r = 0; break;
     case 99: {                                                  /* sysinfo */
         struct { i64 uptime; u64 loads[3], totalram, freeram, sharedram, bufferram, totalswap, freeswap;

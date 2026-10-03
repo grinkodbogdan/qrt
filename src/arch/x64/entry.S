@@ -42,6 +42,9 @@ switch_context:
 /* First activation of a new thread: r13 = entry function, r12 = argument. */
     .globl thread_start
 thread_start:
+    subq $32, %rsp
+    call thread_first_run       /* finish the switch; kernel code takes the big lock */
+    addq $32, %rsp
     sti
     movq %r12, %rcx
     subq $32, %rsp

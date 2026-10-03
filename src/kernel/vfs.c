@@ -1,5 +1,6 @@
 /* vfs.c - RAM file system seeded from the boot volume, plus /proc and /etc. */
 #include "vfs.h"
+#include "smp.h"
 #include "../net/net.h"
 #if defined(__x86_64__)
 #include "../arch/x64/mm.h"
@@ -180,8 +181,11 @@ static int gen_os_release(char *b, int cap) {
     return fmt(b, cap, "NAME=\"QRT\"\nVERSION=\"" QRT_VERSION "\"\nID=qrt\nPRETTY_NAME=\"QRT " QRT_VERSION "\"\n");
 }
 static int gen_cpuinfo(char *b, int cap) {
-    return fmt(b, cap, "processor\t: 0\nvendor_id\t: GenuineIntel\nmodel name\t: %s\ncpu MHz\t\t: %llu\n\n",
-               k.cpu, k.tsc_per_ms / 1000);
+    int n = 0, cores = 1 + smp_workers();
+    for (int i = 0; i < cores && n < cap; i++)
+        n += fmt(b + n, (usize)(cap - n), "processor\t: %d\nvendor_id\t: GenuineIntel\nmodel name\t: %s\ncpu MHz\t\t: %llu\n\n",
+                 i, k.cpu, k.tsc_per_ms / 1000);
+    return n;
 }
 static int gen_uptime(char *b, int cap) {
     u64 ms = k_now_ms();

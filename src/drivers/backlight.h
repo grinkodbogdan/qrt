@@ -3,7 +3,8 @@
 #include "../kernel/kernel.h"
 
 int  backlight_init(void);            /* 1 if the backlight PWM was found running */
-int  backlight_available(void);
+int  backlight_available(void);       /* a hardware control (PWM) */
+int  backlight_dim_alpha(void);       /* without one: 0..200, the shell's veil over the picture */
 int  backlight_level(void);           /* 5..100 (%) */
 void backlight_set_level(int pct);    /* also saved as QrtBrightness */
 void backlight_power(int on);         /* off for sleep; on restores the level */

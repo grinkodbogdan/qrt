@@ -56,4 +56,6 @@ static inline void cpuid(u32 leaf, u32 sub, u32 r[4]) {
 /* interrupt vectors */
 #define VEC_TIMER    0x20
 #define VEC_WAKE     0x40   /* IPI: render work available */
+#define VEC_RESCHED  0x41   /* IPI: a thread is runnable here, or the running one must stop */
+#define VEC_TLB      0x42   /* IPI: reload CR3 (page tables changed) */
 #define VEC_SPURIOUS 0xff

@@ -17,9 +17,13 @@
 #include "irq.h"
 #include "../../drivers/pci.h"
 #include "../../drivers/touch.h"
+#include "../../drivers/battery.h"
+#include "../../drivers/pmic.h"
 #include "../../ui/gfx.h"
 #include "sched.h"
 #include "proc.h"
+void smp_programs_start(void);
+int native_smp_workers(void);
 
 extern void switch_stack(u64 top, void (*fn)(void *), void *arg);
 void native_smp_start(void);
@@ -208,6 +212,11 @@ static void native_main(void *arg) {
     vfs_relocate();                        /* file data out of firmware pool memory */
     proc_init();                           /* SYSCALL entry, fault handlers for user processes */
     native_smp_start();
+    if (hal_setting_get(u"QrtSmpPrograms", 1) && native_smp_workers()) {   /* 0.9.5: programs on every core */
+        sched_smp_enable();
+        smp_programs_start();
+        klog("smp: programs run on all %d cores", native_smp_workers() + 1);
+    }
 
     if (nt.primary >= 0 && !ntouch_native_resume()) {
         /* We cannot go back to the firmware now.  Remember the failure and
@@ -218,6 +227,8 @@ static void native_main(void *arg) {
         hal_reboot();
     }
     klog("native: %s", nt.status[0] ? nt.status : "touch not present");
+    battery_native_resume();
+    pmic_native_resume();
     strlcpy(k.boot_note, "Native kernel", sizeof k.boot_note);
     irq_init();                            /* I/O APICs from the MADT, every line masked */
     dev_init();                            /* enumerate PCI/ACPI/platform devices, bind drivers */
