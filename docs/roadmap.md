@@ -18,7 +18,7 @@ in [ladybird.md](ladybird.md).
 | L3. Ladybird's base | its 34 libraries cross-built (`ports/`), AK, LibCore, LibJS + ICU: the `js` shell runs | **done** (in 0.8.0's tree, tested in QEMU) |
 | L4. Rendering | LibWeb, LibGfx with Skia (CPU), FreeType, HarfBuzz, image libraries: a page rendered to PNG | **done** (in 0.8.0's tree, tested in QEMU) |
 | L5. Network, processes | RequestServer (curl, OpenSSL), WebContent and ImageDecoder processes: a real HTTPS site loads | **mostly done**: HTTP pages load in QEMU; HTTPS gets through DNS and the TLS handshake (QEMU's sandboxed network re-signs certificates, so a real site needs the tablet) |
-| L6. The QRT front-end | tabs, address bar, touch, keyboard, desk mode; a bigger image read on demand: the default browser | **0.9.0**: the dock's Browser is Ladybird - address bar, back/forward/reload, touch scrolling, taps, mouse, keyboard, the on-screen keyboard following text fields, new windows opening in place. Tabs and reading the image on demand are next |
+| L6. The QRT front-end | tabs, address bar, touch, keyboard, desk mode; a bigger image read on demand: the default browser | **0.9.0–0.9.1**: the dock's Browser is Ladybird - address bar, back/forward/reload, touch scrolling, taps, mouse, keyboard, the on-screen keyboard following text fields, new windows opening in place. Tabs and reading the image on demand are next |
 
 ### What the Linux layer brought (and still serves)
 

@@ -71,7 +71,34 @@ Since 0.9.0:
 - the on-screen keyboard comes up by itself when a text field on the page takes the
   focus, and goes away when it loses it.
 
-Not yet: tabs, file downloads, and the GPU.
+Since 0.9.1:
+- pages no longer go blank after a while (see below);
+- Ladybird's window is the dock's **Browser**: one entry, not two;
+- the HTTP disk cache is off: QRT's file system is in memory, so it only held a second copy
+  of Ladybird's memory cache;
+- less lag: a woken thread runs within 1 ms (it used to wait up to 10 ms at each hand-over
+  between Ladybird's processes); queued finger movements and wheel steps for a window that
+  is behind are merged; Skia is compiled for the tablet's Atom (SSE4.2, SSSE3), so its CPU
+  rasteriser uses the instructions that chip has.
+
+Not yet: tabs, file downloads, and the GPU. The GPU already puts every frame on the screen
+(QRT's compositor), but pages are painted by Skia's CPU rasteriser: painting them on the GPU
+needs an OpenGL or Vulkan driver for the Gen8 graphics (a Mesa-class port). Every program
+also still runs on the first CPU core only; the other three draw the shell.
+
+### Blank pages (fixed in 0.9.1)
+
+On the tablet, pages went blank after some browsing. WebContent crashed with
+`mprotect: Out of memory`: a QRT process could have 1024 mappings, and LibJS maps every
+JavaScript function's bytecode on its own and makes it read-only. The VMAs are now a sorted
+array that grows up to 65530 entries (Linux's `max_map_count`), searched by binary search,
+with agreeing neighbours merged. `tests/ladybird/functions.html` (6000 functions) crashes
+0.9.0 and passes now; the QEMU test loads it. Ladybird's disk cache failed too
+("error reading a cached HTTP response"): it sends cached responses with `sendfile`, which
+QRT answered with EINVAL. `sendfile` works now.
+
+`tests/ladybird/fps.html` measures the frame rate (about 23 fps in QEMU, whose CPU emulation
+limits it; the tablet is the real measure).
 
 ### The triple fault (fixed in 0.9.0)
 

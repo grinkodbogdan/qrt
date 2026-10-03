@@ -1,6 +1,9 @@
 /* rt.c - freestanding runtime support. */
 #include "rt.h"
 #include "kernel.h"
+#if defined(__x86_64__)
+#include "../arch/x64/cpu.h"
+#endif
 #include "../drivers/uart.h"
 #if defined(__x86_64__)
 #include "../arch/x64/mm.h"
@@ -251,10 +254,18 @@ void klog(const char *f, ...) {
     va_start(ap, f);
     vfmt(line, sizeof line, f, ap);
     va_end(ap);
+    /* one line at a time: a thread preempted halfway through its line would let another
+     * line land in the middle of it (the QEMU test reads the log back) */
+#if defined(__x86_64__)
+    u64 fl = k.native ? irq_save() : 0;
+#endif
     strlcpy(log_ring[log_count % LOG_LINES], line, sizeof line);
     log_count++;
     if (k.native || k.graphics_up) {
         if (uart_present()) { uart_write(line); uart_write("\n"); }
+#if defined(__x86_64__)
+        if (k.native) irq_restore(fl);
+#endif
     } else if (k.st && k.st->ConOut) {
         utf8_to_str16(wide, 98, line);
         usize n = str16len(wide);
