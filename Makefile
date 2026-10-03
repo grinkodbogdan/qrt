@@ -84,7 +84,7 @@ RUST_HELLO := $(if $(RUST_MUSL),build/rootfs/bin/rust-hello)
 LADYBIRD := $(if $(wildcard build/ladybird/bin/js),build/rootfs/bin/js build/rootfs/share/tests/js-test.js)
 # the browser (one program: it and its helper processes), its resources, fonts, fontconfig
 LADYBIRD += $(if $(wildcard build/ladybird/bin/Ladybird),build/rootfs/bin/ladybird build/rootfs/share/Lagom/.stamp \
-            build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/render.sh \
+            build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/fps.html build/rootfs/share/tests/functions.html build/rootfs/share/tests/render.sh \
             build/rootfs/etc/ssl/certs/ca-certificates.crt)
 FONT_DIRS := /usr/share/fonts/truetype/liberation /usr/share/fonts/truetype/dejavu
 ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
@@ -176,6 +176,14 @@ build/rootfs/share/tests/render.sh: tests/ladybird/render.sh
 	cp $< $@
 
 build/rootfs/share/tests/page.html: tests/ladybird/page.html
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+build/rootfs/share/tests/fps.html: tests/ladybird/fps.html
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+build/rootfs/share/tests/functions.html: tests/ladybird/functions.html
 	@mkdir -p $(dir $@)
 	cp $< $@
 

@@ -38,10 +38,16 @@ typedef struct {
     qrt_event_t q[QLEN];
     int qh, qn;
     app_t app;
+    const app_t *host;                 /* shown through this shell app (the dock's Browser) */
 } cwin_t;
 
 static cwin_t win[MAX_WIN];
 static int next_id = 1;
+static int host_pid;                   /* this process's window is shown by host_app, not as an app of its own */
+static const app_t *host_app;
+
+void cw_host(int pid, const struct app *host) { host_pid = pid; host_app = host; }
+static const app_t *shown_as(cwin_t *w) { return w->host ? w->host : &w->app; }
 
 #define LOCK   u64 fl_ = irq_save()
 #define UNLOCK irq_restore(fl_)
@@ -54,7 +60,13 @@ static cwin_t *find(proc_t *p, int id) {
 static void push(cwin_t *w, qrt_event_t e) {
     LOCK;
     e.window = (u32)w->id;
-    if (w->qn < QLEN) w->q[(w->qh + w->qn++) % QLEN] = e;
+    /* a program that is behind gets the latest position, not every step on the way: a page
+     * that is slow to paint would otherwise trail behind the finger (scrolling uses the
+     * difference to the last position it saw, so nothing is lost); wheel steps add up */
+    qrt_event_t *last = w->qn ? &w->q[(w->qh + w->qn - 1) % QLEN] : NULL;
+    if (last && e.type == QRT_EV_MOVE && last->type == QRT_EV_MOVE && last->scan == e.scan) *last = e;
+    else if (last && e.type == QRT_EV_SCROLL && last->type == QRT_EV_SCROLL) last->y += e.y;
+    else if (w->qn < QLEN) w->q[(w->qh + w->qn++) % QLEN] = e;
     else if (e.type == QRT_EV_MOVE) { /* full: drop movement */ }
     else w->q[(w->qh + QLEN - 1) % QLEN] = e;                    /* keep the latest important one */
     if (w->owner && w->owner->qrt_events) eventfd_signal(w->owner->qrt_events);
@@ -233,7 +245,8 @@ void clientwin_poll(void) {
         cwin_t *w = &win[i];
         if (!w->used || !w->ready) continue;
         if (w->closing || w->owner->exited) {
-            if (w->added) shell_app_remove(&w->app);
+            if (w->host) shell_app_close(w->host);       /* the program is gone: so is the app showing it */
+            else if (w->added) shell_app_remove(&w->app);
             LOCK;
             kobj_t *o = w->shm;
             w->shm = NULL; w->px = NULL;
@@ -244,19 +257,20 @@ void clientwin_poll(void) {
         }
         if (!w->added) {
             w->added = 1;
+            if (host_app && w->pid == host_pid) { w->host = host_app; w->slot_ok = 1; shell_app_open(host_app); continue; }
             if (shell_app_add(&w->app) >= 0) { w->slot_ok = 1; shell_app_open(&w->app); }
             else { klog("shell: no room for %s's window", w->owner->name); w->closing = 1; }
             continue;
         }
         if (w->keyboard) {
-            if (shell_app_showing(&w->app)) {
+            if (shell_app_showing(shown_as(w))) {
                 klog("shell: %s's window %s the keyboard", w->owner->name, w->keyboard == 1 ? "shows" : "hides");
                 shell_keyboard(w->keyboard == 1);
             }
             w->keyboard = 0;
         }
         /* the app area changed (rotation, keyboard, desk mode): a new buffer, and the program is told */
-        if (shell_app_showing(&w->app) && (a.w != w->w || a.h != w->h) && a.w > 0 && a.h > 0) {
+        if (shell_app_showing(shown_as(w)) && (a.w != w->w || a.h != w->h) && a.w > 0 && a.h > 0) {
             new_buffer(w, a.w, a.h);
             push(w, (qrt_event_t){ .type = QRT_EV_RESIZE, .w = a.w, .h = a.h });
             shell_damage(a);
@@ -266,7 +280,7 @@ void clientwin_poll(void) {
             rect_t d = { a.x + w->dx0, a.y + w->dy0, w->dx1 - w->dx0, w->dy1 - w->dy0 };
             w->dmg_on = 0;
             UNLOCK;
-            if (shell_app_showing(&w->app)) shell_damage(rect_intersect(d, a));
+            if (shell_app_showing(shown_as(w))) shell_damage(rect_intersect(d, a));
         }
     }
 }

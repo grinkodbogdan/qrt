@@ -18,6 +18,7 @@ typedef struct thread {
     int tid;                    /* Linux thread id (user threads) */
     u64 clear_tid;              /* CLONE_CHILD_CLEARTID / set_tid_address: zeroed and woken at exit */
     volatile int in_sys;        /* inside a system call: may hold kernel locks */
+    int kbuf;                   /* sendfile: the kernel's own buffer stands in for a user one */
     u64 cpu_ticks;              /* ticks spent running */
     u64 sig_mask, sig_pending;  /* blocked signals; signals sent to this thread */
     u64 sig_saved_mask;         /* rt_sigsuspend: the mask to restore after the handler */

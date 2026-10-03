@@ -34,7 +34,6 @@ typedef struct {
 } ufile_t;
 
 #define MAX_FDS  256
-#define MAX_VMAS 1024
 
 /* PROT_* as Linux numbers them */
 #define PROT_READ  1
@@ -66,8 +65,8 @@ typedef struct proc {
     int nthreads;                 /* live threads */
     u64 brk_start, brk;
     u64 mmap_next;
-    vma_t vma[MAX_VMAS];
-    int nvma;
+    vma_t *vma;                   /* sorted by address (proc.c); grows as needed */
+    int nvma, vcap;
     ufile_t fd[MAX_FDS];
     char cwd[128];
     volatile int exited;
@@ -104,6 +103,9 @@ int     proc_user_ok(proc_t *p, u64 addr, u64 len);/* validate + fault in; 1 if 
 int     proc_add_vma(proc_t *p, u64 start, u64 end);      /* private, read-write */
 int     proc_add_vma_prot(proc_t *p, u64 start, u64 end, u32 prot, kobj_t *obj, u64 off);   /* takes a reference to obj */
 vma_t  *proc_vma(proc_t *p, u64 a);
+int     proc_range_mapped(proc_t *p, u64 start, u64 end);    /* any VMA in [start, end) */
+int     proc_add_vma_flags(proc_t *p, u64 start, u64 end, u32 prot, kobj_t *obj, u64 off, u32 flags);
+void    proc_vmas_copy(proc_t *c, const proc_t *p);
 i64     proc_protect(proc_t *p, u64 start, u64 end, u32 prot);
 void    proc_vmas_release(proc_t *p);                     /* drop the objects mapped (exit, exec) */
 u64     proc_find_free_low(proc_t *p, u64 len);

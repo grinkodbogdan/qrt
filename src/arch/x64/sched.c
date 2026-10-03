@@ -16,6 +16,10 @@ static thread_t *threads;        /* circular list */
 static thread_t *current, *idle;
 static u64 idle_ticks;
 #define QUANTUM 10
+/* a thread woken by thread_wake() runs at the next 1 ms tick, not the next 10 ms quantum: a
+ * frame in Ladybird passes through several processes (input, the UI, WebContent, the shell),
+ * and each hand-over used to wait for the quantum */
+static volatile int wake_pending;
 
 thread_t *thread_current(void) { return current; }
 u64 sched_idle_ticks(void) { return idle_ticks; }
@@ -60,7 +64,8 @@ static void on_tick(frame_t *f) {
         if (t->state == T_SLEEPING && ticks >= t->wake_tick) { t->state = T_RUNNABLE; woke = 1; }
         t = t->next;
     } while (t != threads);
-    if ((woke && current == idle) || ticks % QUANTUM == 0) schedule();
+    if (wake_pending) { woke = 1; wake_pending = 0; }
+    if (woke || ticks % QUANTUM == 0) schedule();
 }
 
 static void link(thread_t *t) {
@@ -137,7 +142,7 @@ void thread_block(void) {
 
 void thread_wake(thread_t *t) {
     u64 fl = irq_save();
-    if (t->state == T_BLOCKED || t->state == T_SLEEPING) t->state = T_RUNNABLE;
+    if (t->state == T_BLOCKED || t->state == T_SLEEPING) { t->state = T_RUNNABLE; wake_pending = 1; }
     irq_restore(fl);
 }
 

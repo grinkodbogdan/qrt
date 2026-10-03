@@ -413,13 +413,16 @@ static int ladybird_open(void) {
     if (!vfs_lookup("/bin/ladybird")) return 0;
     if (ladybird_running()) {
         const app_t *a = cw_app_of(LB.pid);
-        if (a) shell_app_open(a);
+        if (a && a->open) a->open();                   /* tell it it is shown again */
         return 1;
     }
-    static const char *const argv[] = { "ladybird", NULL };
+    /* the file system is in memory: a disk cache would only hold a second copy of what
+     * Ladybird keeps in its memory cache */
+    static const char *const argv[] = { "ladybird", "--disable-http-disk-cache", NULL };
     proc_t *p = proc_spawn("/bin/ladybird", 1, argv, NULL, LB.err, sizeof LB.err);
     if (!p) { klog("browser: Ladybird did not start: %s", LB.err); return 0; }
     LB.pid = p->pid;
+    cw_host(LB.pid, &app_browser);                     /* one app in the dock: this one shows its window */
     LB.started = k_now_ms();
     LB.err[0] = 0;
     klog("browser: started Ladybird (pid %d)", LB.pid);
@@ -427,12 +430,16 @@ static int ladybird_open(void) {
 }
 
 static int ladybird_starting(void) { return ladybird_running() && !cw_app_of(LB.pid); }
+static const app_t *ladybird_window(void) { return ladybird_running() ? cw_app_of(LB.pid) : NULL; }
 #else
 static int ladybird_open(void) { return 0; }
 static int ladybird_starting(void) { return 0; }
+static const app_t *ladybird_window(void) { return NULL; }
 #endif
 
 static void draw(canvas_t *c, rect_t a) {
+    const app_t *lw = ladybird_window();
+    if (lw) { lw->draw(c, a); return; }
     if (ladybird_starting()) {                         /* until its window opens (it opens itself) */
         gfx_fill(c, a, ui.window);
         rect_t m = { a.x, a.y + a.h / 2 - dp(40), a.w, dp(40) };
@@ -471,6 +478,9 @@ static int hit_box(rect_t a, int x, int y) {
 }
 
 static int event(const event_t *e, rect_t a) {
+    const app_t *lw = ladybird_window();
+    if (lw) return lw->event(e, a);
+    if (ladybird_starting()) return 0;
     if (e->type == EV_KEY) {
         if (B.editing) {
             if (e->ch == '\r' || e->ch == '\n') { go_typed(B.edit); return 1; }
@@ -558,7 +568,7 @@ static void page_arrived(void) {
 
 static int tick(u64 now) {
     (void)now;
-    if (ladybird_starting()) return 0;
+    if (ladybird_starting() || ladybird_window()) return 0;
     int redraw = 0;
     rect_t a = shell_app_area();
     if (B.req) {
@@ -595,4 +605,10 @@ static void on_open(void) {
     if (!B.url[0] && !B.req) load(HOME_URL, NULL);
 }
 
-const app_t app_browser = { "Browser", "Web pages as text", RGB(0xff, 0x70, 0x43), icon, on_open, draw, event, tick };
+/* closing the Browser closes Ladybird's window (Ladybird then exits) */
+static void on_close(void) {
+    const app_t *lw = ladybird_window();
+    if (lw && lw->close) lw->close();
+}
+
+const app_t app_browser = { "Browser", "Web pages", RGB(0xff, 0x70, 0x43), icon, on_open, draw, event, tick, on_close };

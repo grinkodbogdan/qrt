@@ -1,7 +1,8 @@
 VERSION=148
 # Skia at the commit vcpkg's skia port (version 148) pins, which is the one Ladybird builds
 # against, with vcpkg's patches.  Built with GN as Ladybird's features ask for on Linux
-# (FreeType, fontconfig, HarfBuzz, ICU) minus Vulkan: Skia's CPU rasteriser only.  The
+# (FreeType, fontconfig, HarfBuzz, ICU) minus Vulkan: Skia's CPU rasteriser only, compiled
+# for the tablet's CPU.  The
 # libraries it uses are the sysroot's ("system"); wuffs is fetched from its GitHub mirror.
 SKIA_COMMIT=e7c90ecca9444fe09598f1630ab7cee2c0ee027a
 WUFFS_COMMIT=e3f919ccfe3ef542cfc983a82146070258fb57f8
@@ -28,7 +29,9 @@ build() {
     chmod +x "$B/bin/clang" "$B/bin/clang++"
     export PATH="$B/bin:$PATH"
     sed -i "s|\"/usr/include/harfbuzz\"|\"$SYS/usr/include/harfbuzz\"|" "$S/third_party/harfbuzz/BUILD.gn"
-    local common="\"--target=$TARGET\", \"--sysroot=$SYS\", \"-D__QRT__\", \"-fPIC\", \"-I$SYS/usr/include/freetype2\""
+    # -march: the tablet's Atom (Airmont: SSE4.2, SSSE3, no AVX); Skia's raster pipeline
+    # picks its SSE4.1 code at compile time, so the x86-64 baseline (SSE2) leaves it out
+    local common="\"--target=$TARGET\", \"--sysroot=$SYS\", \"-D__QRT__\", \"-fPIC\", \"-march=silvermont\", \"-I$SYS/usr/include/freetype2\""
     gn gen "$B/out" --root="$S" --args="
         target_cpu=\"x64\" target_os=\"linux\" is_official_build=true is_component_build=false
         cc=\"clang\" cxx=\"clang++\" ar=\"llvm-ar-20\"

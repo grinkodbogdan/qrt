@@ -1225,6 +1225,7 @@ void shell_app_remove(const app_t *a) {
     sh.dirty = 1;
 }
 void shell_app_open(const app_t *a) { int i = app_index(a); if (i >= 0) open_app(i); }
+void shell_app_close(const app_t *a) { int i = app_index(a); if (i >= 0 && (sh.running & (1u << i))) close_app(i); }
 int  shell_app_showing(const app_t *a) { return a && sh.app == a && sh.view == VIEW_APP && !sh.overview && !sh.launcher_open && !sh.locked; }
 
 void shell_keyboard(int show) {

@@ -279,6 +279,38 @@ static i64 do_read(proc_t *p, int fd, u64 buf, u64 len) {
     }
 }
 
+/* sendfile: the file's bytes from *offset (or the file position) to out_fd, through a kernel
+ * buffer; the output's own write path (socket, pipe, file) sees it as an ordinary write.
+ * Ladybird's disk cache sends cached responses this way. */
+static kobj_t *obj_of(proc_t *p, u64 fd, int kind);
+static i64 do_sendfile(proc_t *p, int out, int in, u64 uoff, u64 count) {
+    if (in < 0 || in >= MAX_FDS || out < 0 || out >= MAX_FDS || !p->fd[out].type) return -EBADF;
+    ufile_t *f = &p->fd[in];
+    kobj_t *shm = f->type == F_OBJ ? obj_of(p, (u64)in, KO_SHM) : NULL;
+    if (f->type != F_FILE && !shm) return f->type ? -EINVAL : -EBADF;
+    if (uoff && !UOK(uoff, 8)) return -EFAULT;
+    u64 off = uoff ? *(u64 *)(usize)uoff : f->off;
+    u64 cap = MIN(count, 64 * 1024);
+    if (!cap) return 0;
+    u8 *buf = kalloc(cap);
+    i64 done = 0;
+    thread_t *me = thread_current();
+    while ((u64)done < count) {
+        u64 want = MIN(cap, count - (u64)done);
+        i64 n = shm ? shm_rw(shm, off, buf, want, 0) : vfs_read(f->vn, off, buf, want);
+        if (n <= 0) { if (!done && n < 0) done = n; break; }
+        me->kbuf = 1;
+        i64 w = do_write(p, out, (u64)(usize)buf, (u64)n);
+        me->kbuf = 0;
+        if (w <= 0) { if (!done) done = w; break; }
+        done += w; off += (u64)w;
+        if (w < n) break;                                  /* the socket is full: the caller polls */
+    }
+    kfree(buf);
+    if (done > 0) { if (uoff) *(u64 *)(usize)uoff = off; else f->off = off; }
+    return done;
+}
+
 /* ---- poll / select ---------------------------------------------------------------------- */
 enum { POLLIN = 1, POLLPRI = 2, POLLOUT = 4, POLLERR = 8, POLLHUP = 0x10, POLLNVAL = 0x20 };
 
@@ -449,19 +481,18 @@ static i64 do_mmap(proc_t *p, u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u6
         if (!urange(addr, addr + len)) { kobj_put(made); return -ENOMEM; }
         va = addr;
         if ((flags & MAP_FIXED_NOREPLACE) && !(flags & MAP_FIXED))
-            for (int i = 0; i < p->nvma; i++) if (va < p->vma[i].end && p->vma[i].start < va + len) { kobj_put(made); return -EEXIST; }
+            if (proc_range_mapped(p, va, va + len)) { kobj_put(made); return -EEXIST; }
         proc_unmap(p, va, va + len);                               /* MAP_FIXED replaces what was there */
     } else {
         u64 hint = addr & ~(PAGE - 1);
         va = hint && proc_range_free(p, hint, hint + len) ? hint : (flags & MAP_32BIT) ? proc_find_free_low(p, len) : proc_find_free(p, len);
         if (!va) { kobj_put(made); return -ENOMEM; }
     }
-    int e = proc_add_vma_prot(p, va, va + len, (u32)(prot & 7), backing, boff);
+    int file_copy = !anon && !backing;                             /* a private copy of the contents */
+    int e = proc_add_vma_flags(p, va, va + len, (u32)(prot & 7), backing, boff, file_copy ? VMA_FILE : 0);
     kobj_put(made);                                                /* the VMA holds it now */
     if (e) return -ENOMEM;
-    if (!anon && !backing) {                                       /* a private copy of the contents */
-        vma_t *v = proc_vma(p, va);
-        if (v) v->shared |= VMA_FILE;
+    if (file_copy) {
         u64 fsz = uf->type == F_FILE ? vfs_size(uf->vn) : shm_size(shm);
         if (off < fsz && (prot & 7)) {
             u64 n = MIN(len, fsz - off);
@@ -623,8 +654,7 @@ static i64 do_futex(proc_t *p, u64 uaddr, int op, u32 val, u64 utime, u64 uaddr2
 
 static i64 do_brk(proc_t *p, u64 want) {
     if (want < p->brk_start || want >= USER_BRK_MAX) return (i64)p->brk;
-    for (int i = 0; i < p->nvma; i++)                              /* never into a mapping */
-        if (p->vma[i].start >= p->brk && p->vma[i].start < ((want + PAGE - 1) & ~(PAGE - 1))) return (i64)p->brk;
+    if (proc_range_mapped(p, p->brk, (want + PAGE - 1) & ~(PAGE - 1))) return (i64)p->brk;   /* never into a mapping */
     want = (want + PAGE - 1) & ~(PAGE - 1);
     if (want > p->brk) proc_add_vma(p, p->brk, want);
     p->brk = want;
@@ -1152,7 +1182,7 @@ void syscall_dispatch(frame_t *f) {
         break;
     }
     case 157: r = 0; break;                                     /* prctl: accepted (names, dumpable...) */
-    case 40: r = -EINVAL; break;                                /* sendfile: callers fall back to read/write */
+    case 40: r = do_sendfile(p, (int)a0, (int)a1, a2, a3); break;     /* sendfile */
     case 35: case 230: {                                        /* nanosleep, clock_nanosleep */
         u64 ts = nr == 35 ? a0 : a2;
         if (!UOK(ts, 16)) { r = -EFAULT; break; }

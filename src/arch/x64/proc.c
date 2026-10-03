@@ -116,21 +116,92 @@ static int as_prot(u32 prot, int shared) {
     return ((prot & PROT_WRITE) ? AS_W : 0) | ((prot & PROT_EXEC) ? AS_X : 0) | (shared ? AS_SHARED : 0);
 }
 
-int proc_add_vma_prot(proc_t *p, u64 start, u64 end, u32 prot, kobj_t *obj, u64 off) {
-    if (!obj)
-        for (int i = 0; i < p->nvma; i++)                   /* extend a private neighbour (brk) */
-            if (p->vma[i].end == start && !p->vma[i].obj && p->vma[i].prot == prot) { p->vma[i].end = end; return 0; }
-    if (p->nvma == MAX_VMAS) return -1;
-    p->vma[p->nvma++] = (vma_t){ start, end, prot, obj != NULL, obj, off };
-    if (obj) kobj_get(obj);
+/* The VMAs are kept sorted by address, without overlaps, in an array that grows as needed
+ * (up to VMA_LIMIT, Linux's max_map_count).  Lookups are binary searches; neighbours that
+ * agree (anonymous, same protection) merge.  Ladybird maps every JavaScript function's
+ * bytecode on its own and makes it read-only, so a web page can need thousands. */
+#define VMA_LIMIT 65530
+
+static int vma_grow(proc_t *p, int extra) {
+    if (p->nvma + extra <= p->vcap) return 0;
+    if (p->nvma + extra > VMA_LIMIT) return -1;
+    int cap = p->vcap ? p->vcap : 64;
+    while (cap < p->nvma + extra) cap *= 2;
+    if (cap > VMA_LIMIT) cap = VMA_LIMIT;
+    vma_t *n = kalloc((usize)cap * sizeof *n);
+    if (p->nvma) memcpy(n, p->vma, (usize)p->nvma * sizeof *n);
+    if (p->vma) kfree(p->vma);
+    p->vma = n;
+    p->vcap = cap;
     return 0;
 }
 
+/* the first VMA that ends after a (they are sorted, so their ends are too) */
+static int vma_index(proc_t *p, u64 a) {
+    int lo = 0, hi = p->nvma;
+    while (lo < hi) { int m = (lo + hi) / 2; if (p->vma[m].end <= a) lo = m + 1; else hi = m; }
+    return lo;
+}
+
+static void vma_insert_at(proc_t *p, int i, vma_t v) {
+    memmove(&p->vma[i + 1], &p->vma[i], (usize)(p->nvma - i) * sizeof *p->vma);
+    p->vma[i] = v;
+    p->nvma++;
+}
+
+static void vma_remove(proc_t *p, int i, int n) {
+    for (int k = i; k < i + n; k++) if (p->vma[k].obj) kobj_put(p->vma[k].obj);
+    memmove(&p->vma[i], &p->vma[i + n], (usize)(p->nvma - i - n) * sizeof *p->vma);
+    p->nvma -= n;
+}
+
+static int vma_mergeable(const vma_t *a, const vma_t *b) {
+    return a->end == b->start && !a->obj && !b->obj && a->prot == b->prot && a->shared == b->shared;
+}
+
+/* merge VMA i with the ones on either side where they agree; returns i's new index */
+static int vma_merge(proc_t *p, int i) {
+    if (i + 1 < p->nvma && vma_mergeable(&p->vma[i], &p->vma[i + 1])) { p->vma[i].end = p->vma[i + 1].end; vma_remove(p, i + 1, 1); }
+    if (i > 0 && vma_mergeable(&p->vma[i - 1], &p->vma[i])) { p->vma[i - 1].end = p->vma[i].end; vma_remove(p, i, 1); i--; }
+    return i;
+}
+
+/* split the VMA that contains a (strictly inside) into two at a */
+static int vma_split(proc_t *p, u64 a) {
+    int i = vma_index(p, a);
+    if (i >= p->nvma || p->vma[i].start >= a) return 0;
+    if (vma_grow(p, 1)) return -1;
+    vma_t tail = p->vma[i];
+    tail.off += a - tail.start;
+    tail.start = a;
+    if (tail.obj) kobj_get(tail.obj);
+    p->vma[i].end = a;
+    vma_insert_at(p, i + 1, tail);
+    return 0;
+}
+
+int proc_add_vma_flags(proc_t *p, u64 start, u64 end, u32 prot, kobj_t *obj, u64 off, u32 flags) {
+    if (end <= start) return 0;
+    int i = vma_index(p, start);
+    if (i < p->nvma && p->vma[i].start < end) return -1;   /* the caller makes room first */
+    if (vma_grow(p, 1)) return -1;
+    vma_insert_at(p, i, (vma_t){ start, end, prot, (obj != NULL) | flags, obj, off });
+    if (obj) kobj_get(obj);
+    vma_merge(p, i);
+    return 0;
+}
+
+int proc_add_vma_prot(proc_t *p, u64 start, u64 end, u32 prot, kobj_t *obj, u64 off) { return proc_add_vma_flags(p, start, end, prot, obj, off, 0); }
 int proc_add_vma(proc_t *p, u64 start, u64 end) { return proc_add_vma_prot(p, start, end, PROT_READ | PROT_WRITE, NULL, 0); }
 
 vma_t *proc_vma(proc_t *p, u64 a) {
-    for (int i = 0; i < p->nvma; i++) if (a >= p->vma[i].start && a < p->vma[i].end) return &p->vma[i];
-    return NULL;
+    int i = vma_index(p, a);
+    return i < p->nvma && p->vma[i].start <= a ? &p->vma[i] : NULL;
+}
+
+int proc_range_mapped(proc_t *p, u64 start, u64 end) {
+    int i = vma_index(p, start);
+    return i < p->nvma && p->vma[i].start < end;
 }
 
 static int in_stack(u64 a) { return a >= USER_STACK_TOP - USER_STACK_SIZE && a < USER_STACK_TOP; }
@@ -138,6 +209,20 @@ static int in_stack(u64 a) { return a >= USER_STACK_TOP - USER_STACK_SIZE && a <
 void proc_vmas_release(proc_t *p) {
     for (int i = 0; i < p->nvma; i++) if (p->vma[i].obj) { kobj_put(p->vma[i].obj); p->vma[i].obj = NULL; }
     p->nvma = 0;
+    if (p->vma) kfree(p->vma);
+    p->vma = NULL;
+    p->vcap = 0;
+}
+
+/* fork: the child gets its own copy of the table */
+void proc_vmas_copy(proc_t *c, const proc_t *p) {
+    c->vma = NULL; c->nvma = c->vcap = 0;
+    if (!p->nvma) return;
+    c->vma = kalloc((usize)p->vcap * sizeof *c->vma);
+    c->vcap = p->vcap;
+    c->nvma = p->nvma;
+    memcpy(c->vma, p->vma, (usize)p->nvma * sizeof *c->vma);
+    for (int i = 0; i < c->nvma; i++) if (c->vma[i].obj) kobj_get(c->vma[i].obj);   /* shared memory stays shared */
 }
 
 static int range_user(u64 start, u64 end) {
@@ -149,53 +234,49 @@ static int range_user(u64 start, u64 end) {
 int proc_range_free(proc_t *p, u64 start, u64 end) {
     if (!range_user(start, end)) return 0;
     if (start < p->brk + (64ull << 20) && end > p->brk_start) return 0;     /* leave brk room to grow */
-    for (int i = 0; i < p->nvma; i++) if (start < p->vma[i].end && p->vma[i].start < end) return 0;
-    return 1;
+    return !proc_range_mapped(p, start, end);
 }
 
+/* first fit in [lo, hi): one walk over the gaps between the sorted VMAs */
 static u64 find_in(proc_t *p, u64 lo, u64 hi, u64 len) {
     u64 a = lo;
-    for (int pass = 0; pass < MAX_VMAS + 2; pass++) {
-        if (a + len > hi) return 0;
-        int moved = 0;
-        for (int i = 0; i < p->nvma; i++)
-            if (a < p->vma[i].end + PAGE && p->vma[i].start < a + len + PAGE) { a = p->vma[i].end + PAGE; moved = 1; }
-        if (!moved) return a;
+    for (int i = vma_index(p, lo); i < p->nvma && p->vma[i].start < hi; i++) {
+        if (a + len <= p->vma[i].start) break;
+        if (p->vma[i].end > a) a = p->vma[i].end;
     }
-    return 0;
+    return a + len <= hi && a + len > a ? a : 0;
 }
 
-/* first fit in the mmap window (below the kernel's hole first), one guard page after every mapping */
+/* in the mmap window: after the last mapping made (the gaps before it are mostly full),
+ * then from the start; below the kernel's hole first */
 u64 proc_find_free(proc_t *p, u64 len) {
-    u64 a = find_in(p, USER_MMAP_BASE, USER_HOLE_BASE, len);
-    return a ? a : find_in(p, USER_HOLE_END, USER_MMAP_END, len);
+    u64 a = 0;
+    if (p->mmap_next >= USER_MMAP_BASE && p->mmap_next < USER_HOLE_BASE) a = find_in(p, p->mmap_next, USER_HOLE_BASE, len);
+    else if (p->mmap_next >= USER_HOLE_END && p->mmap_next < USER_MMAP_END) a = find_in(p, p->mmap_next, USER_MMAP_END, len);
+    if (!a) a = find_in(p, USER_MMAP_BASE, USER_HOLE_BASE, len);
+    if (!a) a = find_in(p, USER_HOLE_END, USER_MMAP_END, len);
+    if (a) p->mmap_next = a + len;
+    return a;
 }
 u64 proc_find_free_low(proc_t *p, u64 len) { return find_in(p, USER_LOW_MMAP, USER_STACK_TOP - USER_STACK_SIZE - (1ull << 20), len); }
 
-/* cut [start, end) out of the VMAs: returns how many pieces were removed or trimmed */
+/* cut [start, end) out of the VMAs */
 static void vma_cut(proc_t *p, u64 start, u64 end) {
-    for (int i = 0; i < p->nvma; i++) {
-        vma_t *v = &p->vma[i];
-        if (end <= v->start || start >= v->end) continue;
-        if (start <= v->start && end >= v->end) {             /* all of it */
-            if (v->obj) kobj_put(v->obj);
-            *v = p->vma[--p->nvma];
-            i--;
-            continue;
+    if (end <= start) return;
+    if (vma_split(p, start) || vma_split(p, end)) {
+        /* no room to split: trim instead (the pages are gone either way) */
+        int i = vma_index(p, start);
+        if (i < p->nvma && p->vma[i].start < start) {
+            if (p->vma[i].end > end) { klog("proc: %s: no room to split a mapping", p->name); return; }
+            p->vma[i].end = start;
         }
-        if (start > v->start && end < v->end) {               /* a hole: split */
-            if (p->nvma < MAX_VMAS) {
-                vma_t tail = *v;
-                tail.off += end - v->start;
-                tail.start = end;
-                if (tail.obj) kobj_get(tail.obj);
-                p->vma[p->nvma++] = tail;
-            }
-            v->end = start;
-            continue;
-        }
-        if (start <= v->start) { v->off += end - v->start; v->start = end; }
-        else v->end = start;
+    }
+    int i = vma_index(p, start), j = i;
+    while (j < p->nvma && p->vma[j].end <= end && p->vma[j].start >= start) j++;
+    if (j > i) vma_remove(p, i, j - i);
+    if (i < p->nvma && p->vma[i].start < end && p->vma[i].start >= start) {   /* a VMA reaching past end */
+        p->vma[i].off += end - p->vma[i].start;
+        p->vma[i].start = end;
     }
 }
 
@@ -205,38 +286,19 @@ void proc_unmap(proc_t *p, u64 start, u64 end) {
     vma_cut(p, start, end);
 }
 
-/* mprotect: split the VMAs at the edges, give the inside the new protection */
+/* mprotect: split the VMAs at the edges, give the inside the new protection, merge again */
 i64 proc_protect(proc_t *p, u64 start, u64 end, u32 prot) {
+    if (end <= start) return 0;
     /* every page of the range must be mapped (Linux: ENOMEM otherwise) */
     for (u64 a = start; a < end;) {
         vma_t *v = proc_vma(p, a);
         if (!v) { if (in_stack(a)) { a += PAGE; continue; } return -12; }
         a = v->end;
     }
-    for (int i = 0; i < p->nvma; i++) {
-        vma_t *v = &p->vma[i];
-        if (end <= v->start || start >= v->end || v->prot == prot) continue;
-        if (p->nvma + 2 > MAX_VMAS) return -12;
-        if (v->start < start) {                               /* the part before keeps its protection */
-            vma_t head = *v;
-            head.end = start;
-            if (head.obj) kobj_get(head.obj);
-            v->off += start - v->start;
-            v->start = start;
-            p->vma[p->nvma++] = head;
-            v = &p->vma[i];
-        }
-        if (v->end > end) {                                   /* and the part after */
-            vma_t tail = *v;
-            tail.off += end - v->start;
-            tail.start = end;
-            if (tail.obj) kobj_get(tail.obj);
-            v->end = end;
-            p->vma[p->nvma++] = tail;
-            v = &p->vma[i];
-        }
-        v->prot = prot;
-    }
+    if (vma_split(p, start) || vma_split(p, end)) return -12;
+    int i = vma_index(p, start), last = i;
+    for (int k = i; k < p->nvma && p->vma[k].start < end; k++) { p->vma[k].prot = prot; last = k; }
+    for (int k = last; k >= i - 1 && k >= 0; k--) if (k < p->nvma) vma_merge(p, k);
     as_protect_range(p->cr3, start, end, prot ? as_prot(prot, 0) : AS_NONE);   /* PROT_NONE keeps the contents */
     return 0;
 }
@@ -264,6 +326,7 @@ static int fault_in_access(proc_t *p, u64 a, int write) {
 }
 
 int proc_user_ok(proc_t *p, u64 addr, u64 len) {
+    if (thread_current()->kbuf) return 1;               /* do_sendfile's bounce buffer */
     if (!p || len > USER_HIGH_END || !user_va(addr) || (len && !user_va(addr + len - 1))) return 0;
     if (addr < USER_TOP && addr + len > USER_TOP) return 0;
     for (u64 a = addr & ~(PAGE - 1); a < addr + len; a += PAGE)
@@ -574,9 +637,7 @@ static i64 proc_fork(proc_t *p, frame_t *f, u64 flags, u64 newsp, u64 ptid, u64 
     c->entry = p->entry; c->start = p->start; c->interp_base = p->interp_base;
     c->native = p->native;
     c->brk_start = p->brk_start; c->brk = p->brk; c->mmap_next = p->mmap_next;
-    memcpy(c->vma, p->vma, sizeof c->vma);
-    c->nvma = p->nvma;
-    for (int i = 0; i < c->nvma; i++) if (c->vma[i].obj) kobj_get(c->vma[i].obj);   /* shared memory stays shared */
+    proc_vmas_copy(c, p);
     memcpy(c->sa, p->sa, sizeof c->sa);                    /* handlers are inherited, pending signals are not */
     c->cr3 = as_clone(p->cr3);
     memcpy(c->fd, p->fd, sizeof c->fd);
@@ -786,9 +847,9 @@ i64 proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, ch
 
     /* build the new image beside the old one */
     u64 old_cr3 = p->cr3;
-    vma_t *old_vma = kalloc(sizeof p->vma);
-    memcpy(old_vma, p->vma, sizeof p->vma);
-    int old_nvma = p->nvma;
+    vma_t *old_vma = p->vma;                                   /* the new image gets a fresh table */
+    int old_nvma = p->nvma, old_vcap = p->vcap;
+    p->vma = NULL; p->vcap = 0;
     u64 old_interp = p->interp_base;
     p->cr3 = as_create();
     p->nvma = 0;
@@ -810,16 +871,15 @@ i64 proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, ch
     if (!ok) {                                                 /* keep running the old program */
         as_destroy(p->cr3);
         p->cr3 = old_cr3;
-        memcpy(p->vma, old_vma, sizeof p->vma);
-        p->nvma = old_nvma;
+        proc_vmas_release(p);
+        p->vma = old_vma; p->nvma = old_nvma; p->vcap = old_vcap;
         p->interp_base = old_interp;
-        kfree(old_vma);
         klog("proc: exec %s failed: %s", resolved, err);
         return -8;
     }
     for (int i = 0; i < old_nvma; i++) if (old_vma[i].obj) kobj_put(old_vma[i].obj);
     p->native = im.native;                                     /* the new image decides the personality */
-    kfree(old_vma);
+    if (old_vma) kfree(old_vma);
     for (int i = 0; i < NSIG; i++) if (p->sa[i].handler > 1) p->sa[i] = (ksigaction_t){ 0 };   /* caught -> default; ignored stays */
     me->alt_sp = me->alt_size = 0; me->alt_flags = 0;
     p->entry = im.entry;

@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<!-- functions.html - a page with thousands of JavaScript functions, as a big site has.  LibJS
+     maps every function's bytecode on its own and makes it read-only; QRT 0.9.0 allowed a
+     process 1024 mappings, so a page like this crashed WebContent (the page went blank). -->
+<html><head><meta charset="utf-8"><title>QRT functions</title></head>
+<body><p id="out">Compiling...</p>
+<script>
+  let sum = 0;
+  for (let i = 0; i < 6000; i++) {
+    const f = new Function("x", "return x * " + i + " + " + (i % 7) + ";");
+    sum += f(2);
+  }
+  document.getElementById("out").textContent = "6000 functions, sum " + sum;
+  console.log("functions-result " + sum);
+</script></body></html>

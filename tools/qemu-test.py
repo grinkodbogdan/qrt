@@ -298,9 +298,19 @@ def native_test(q, shots):
         if "window shows the keyboard" not in slog():
             raise RuntimeError("native: a text field in Ladybird did not bring up the keyboard")
         shots.append(q.shot("08-ladybird-keyboard"))
+        # thousands of JavaScript functions, each its own read-only mapping in WebContent
+        q.tap(700, 120, settle=1)
+        q.keys(*"file:///share/tests/functions.html", settle=0.3)
+        q.keys("ret", settle=1)
+        for _ in range(120):
+            if "functions-result" in slog() or "WebContent process crashed" in slog():
+                break
+            time.sleep(1)
+        if "functions-result 36011997" not in slog():
+            raise RuntimeError("native: Ladybird failed the page with 6000 functions\n  " + "\n  ".join(l for l in slog().splitlines() if "ladybird" in l)[-1500:])
         q.tap(1141, 66, settle=4)                    # close it: QRT_EV_CLOSE, Ladybird exits
         q.tap(1226, 170, settle=2)                   # back to the Terminal
-        progs.append("Ladybird in the shell (dock, address bar, a page, the keyboard for a text field)")
+        progs.append("Ladybird in the shell (dock, address bar, a page, the keyboard for a text field, 6000 functions)")
     q.keys(*"hello-window", settle=0.2)
     q.keys("ret", settle=1)
     for _ in range(40):

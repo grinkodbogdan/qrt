@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<!-- fps.html - how many frames a second Ladybird paints on QRT: a card that moves and turns
+     for 8 seconds, then the rate goes to the console (and from there to the kernel log). -->
+<html><head><meta charset="utf-8"><title>QRT frame rate</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #f4f4f7; }
+  #card { position: absolute; width: 220px; height: 140px; border-radius: 18px; color: white; font-size: 22px;
+          display: flex; align-items: center; justify-content: center;
+          background: linear-gradient(45deg, #e64980, #4c6ef5); box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+  p { padding: 8px 16px; color: #333; }
+</style></head>
+<body>
+<p>Measuring the frame rate for 8 seconds...</p>
+<div id="card">Ladybird</div>
+<script>
+  const card = document.getElementById("card"), out = document.querySelector("p");
+  let frames = 0, t0 = 0;
+  function step(t) {
+    if (!t0) t0 = t;
+    frames++;
+    card.style.transform = `translate(${40 + (t / 4) % 700}px, ${120 + 80 * Math.sin(t / 400)}px) rotate(${t / 12}deg)`;
+    if (t - t0 < 8000) requestAnimationFrame(step);
+    else {
+      const fps = (frames * 1000 / (t - t0)).toFixed(1);
+      out.textContent = "Frame rate: " + fps + " fps";
+      console.log("fps-result " + fps);
+    }
+  }
+  requestAnimationFrame(step);
+</script>
+</body></html>
