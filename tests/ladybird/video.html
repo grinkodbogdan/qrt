@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<!-- video.html - a WebM (VP9 video, Opus sound: what YouTube serves) played by Ladybird on QRT.
+     The QEMU test taps Play (media with sound needs a user gesture), then checks that the
+     video ended and that its 660 Hz tone reached the USB audio device's recording. -->
+<html><head><meta charset="utf-8"><title>QRT video</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #111; color: #eee; text-align: center; }
+  video { width: 640px; height: 480px; background: black; margin-top: 16px; }
+  button { font-size: 28px; padding: 12px 48px; margin: 16px; border-radius: 12px; border: 0; background: #3584e4; color: white; }
+</style></head>
+<body>
+<video id="v" src="video.webm" preload="auto"></video><br>
+<button id="play">Play</button>
+<p id="state">ready</p>
+<script>
+  const v = document.getElementById("v"), state = document.getElementById("state");
+  document.getElementById("play").addEventListener("click", () => {
+    v.play().then(() => console.log("video-playing")).catch(e => console.log("video-error " + e));
+  });
+  v.addEventListener("timeupdate", () => { state.textContent = v.currentTime.toFixed(1) + " s"; });
+  v.addEventListener("ended", () => { state.textContent = "ended"; console.log("video-ended " + v.currentTime.toFixed(2)); });
+  v.addEventListener("error", () => console.log("video-error " + (v.error ? v.error.code + " " + v.error.message : "")));
+</script>
+</body></html>

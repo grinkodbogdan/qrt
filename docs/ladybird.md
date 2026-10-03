@@ -81,7 +81,11 @@ Since 0.9.1:
   is behind are merged; Skia is compiled for the tablet's Atom (SSE4.2, SSSE3), so its CPU
   rasteriser uses the instructions that chip has.
 
-Not yet: tabs, file downloads, and the GPU. The GPU already puts every frame on the screen
+Since 0.9.2: video and audio play with sound - LibMedia gets an OSS backend
+(`Audio/PlaybackStreamOSS.cpp`, patch 0005) that writes to QRT's `/dev/dsp`; the QEMU test plays
+a VP9/Opus WebM (`tests/ladybird/video.html`) and checks its tone in QEMU's USB audio recording.
+
+Not yet: tabs, file downloads, and the GPU (see [gpu.md](gpu.md)). The GPU already puts every frame on the screen
 (QRT's compositor), but pages are painted by Skia's CPU rasteriser: painting them on the GPU
 needs an OpenGL or Vulkan driver for the Gen8 graphics (a Mesa-class port). Every program
 also still runs on the first CPU core only; the other three draw the shell.

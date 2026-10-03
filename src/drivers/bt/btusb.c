@@ -19,7 +19,7 @@
 static struct {
     udev_t *d;
     u8 ev_in, bulk_in, bulk_out;
-    u8 ibuf[300], bbuf[300];               /* reassembly: interrupt and bulk streams */
+    u8 ibuf[300], bbuf[1200];              /* reassembly: interrupt (events) and bulk (bootloader events, ACL) */
     int ilen, blen;
     int started;
 } U;
@@ -41,10 +41,31 @@ static void reassemble(u8 *buf, int *have, const u8 *data, int len) {
 }
 
 static void on_event(void *arg, const u8 *data, int len) { (void)arg; reassemble(U.ibuf, &U.ilen, data, len); }
+/* ACL packets (handle+flags, length, data) out of the bulk stream; usually one per transfer */
+static void acl_stream(const u8 *data, int len) {
+    while (len > 0) {
+        int room = (int)sizeof U.bbuf - U.blen, n = MIN(len, room);
+        if (n <= 0) { U.blen = 0; return; }
+        memcpy(U.bbuf + U.blen, data, (usize)n);
+        U.blen += n; data += n; len -= n;
+        while (U.blen >= 4) {
+            int pl = 4 + (U.bbuf[2] | U.bbuf[3] << 8);
+            if (pl > (int)sizeof U.bbuf) { U.blen = 0; break; }         /* garbage: start over */
+            if (U.blen < pl) break;
+            bt_rx_acl(U.bbuf, pl);
+            memmove(U.bbuf, U.bbuf + pl, (usize)(U.blen - pl));
+            U.blen -= pl;
+        }
+    }
+}
+
 static void on_bulk(void *arg, const u8 *data, int len) {
     (void)arg;
-    if (bt_in_bootloader()) reassemble(U.bbuf, &U.blen, data, len);   /* Intel bootloader: events */
-    /* else ACL data: no L2CAP yet */
+    static int was_boot = -1;
+    int boot = bt_in_bootloader();
+    if (boot != was_boot) { U.blen = 0; was_boot = boot; }           /* a new kind of stream: nothing half-read carries over */
+    if (boot) reassemble(U.bbuf, &U.blen, data, len);                 /* Intel bootloader: events */
+    else acl_stream(data, len);                                       /* then: ACL data (L2CAP) */
 }
 
 static int send_cmd(const u8 *p, int len) { return usb_control(U.d, 0x20, 0, 0, 0, (void *)p, (u16)len); }
@@ -59,8 +80,9 @@ static u8 *read_file(const char *path, u64 *len) {
     return b;
 }
 static void free_file(u8 *p) { kfree(p); }
+static u64 now_ms(void) { return k_now_ms(); }
 
-static const bt_transport_t transport = { send_cmd, send_bulk, usb_poll, sleep_ms, read_file, free_file };
+static const bt_transport_t transport = { send_cmd, send_bulk, usb_poll, sleep_ms, read_file, free_file, now_ms };
 
 static void bt_thread(void *arg) {
     (void)arg;

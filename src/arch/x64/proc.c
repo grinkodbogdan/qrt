@@ -122,6 +122,14 @@ static int as_prot(u32 prot, int shared) {
  * bytecode on its own and makes it read-only, so a web page can need thousands. */
 #define VMA_LIMIT 65530
 
+/* The table moves (an insert shifts entries, growing reallocates it), and a process's
+ * threads can be preempted in the kernel: a page fault in one thread must not look at
+ * the table while another thread's mmap changes it.  User threads all run on the boot
+ * core, so turning interrupts off is the lock; it nests (linux.c holds it around
+ * compound operations such as find-a-place-then-map). */
+u64 proc_vma_lock(void) { return irq_save(); }
+void proc_vma_unlock(u64 fl) { irq_restore(fl); }
+
 static int vma_grow(proc_t *p, int extra) {
     if (p->nvma + extra <= p->vcap) return 0;
     if (p->nvma + extra > VMA_LIMIT) return -1;
@@ -182,12 +190,13 @@ static int vma_split(proc_t *p, u64 a) {
 
 int proc_add_vma_flags(proc_t *p, u64 start, u64 end, u32 prot, kobj_t *obj, u64 off, u32 flags) {
     if (end <= start) return 0;
+    u64 fl = proc_vma_lock();
     int i = vma_index(p, start);
-    if (i < p->nvma && p->vma[i].start < end) return -1;   /* the caller makes room first */
-    if (vma_grow(p, 1)) return -1;
+    if ((i < p->nvma && p->vma[i].start < end) || vma_grow(p, 1)) { proc_vma_unlock(fl); return -1; }   /* the caller makes room first */
     vma_insert_at(p, i, (vma_t){ start, end, prot, (obj != NULL) | flags, obj, off });
     if (obj) kobj_get(obj);
     vma_merge(p, i);
+    proc_vma_unlock(fl);
     return 0;
 }
 
@@ -250,12 +259,14 @@ static u64 find_in(proc_t *p, u64 lo, u64 hi, u64 len) {
 /* in the mmap window: after the last mapping made (the gaps before it are mostly full),
  * then from the start; below the kernel's hole first */
 u64 proc_find_free(proc_t *p, u64 len) {
+    u64 fl = proc_vma_lock();
     u64 a = 0;
     if (p->mmap_next >= USER_MMAP_BASE && p->mmap_next < USER_HOLE_BASE) a = find_in(p, p->mmap_next, USER_HOLE_BASE, len);
     else if (p->mmap_next >= USER_HOLE_END && p->mmap_next < USER_MMAP_END) a = find_in(p, p->mmap_next, USER_MMAP_END, len);
     if (!a) a = find_in(p, USER_MMAP_BASE, USER_HOLE_BASE, len);
     if (!a) a = find_in(p, USER_HOLE_END, USER_MMAP_END, len);
     if (a) p->mmap_next = a + len;
+    proc_vma_unlock(fl);
     return a;
 }
 u64 proc_find_free_low(proc_t *p, u64 len) { return find_in(p, USER_LOW_MMAP, USER_STACK_TOP - USER_STACK_SIZE - (1ull << 20), len); }
@@ -282,12 +293,22 @@ static void vma_cut(proc_t *p, u64 start, u64 end) {
 
 /* munmap: free the pages, cut the VMAs (splitting one that spans the hole) */
 void proc_unmap(proc_t *p, u64 start, u64 end) {
+    u64 fl = proc_vma_lock();
     as_unmap_range(p->cr3, start, end);
     vma_cut(p, start, end);
+    proc_vma_unlock(fl);
 }
 
 /* mprotect: split the VMAs at the edges, give the inside the new protection, merge again */
+static i64 protect_locked(proc_t *p, u64 start, u64 end, u32 prot);
 i64 proc_protect(proc_t *p, u64 start, u64 end, u32 prot) {
+    u64 fl = proc_vma_lock();
+    i64 r = protect_locked(p, start, end, prot);
+    proc_vma_unlock(fl);
+    return r;
+}
+
+static i64 protect_locked(proc_t *p, u64 start, u64 end, u32 prot) {
     if (end <= start) return 0;
     /* every page of the range must be mapped (Linux: ENOMEM otherwise) */
     for (u64 a = start; a < end;) {
@@ -306,8 +327,16 @@ i64 proc_protect(proc_t *p, u64 start, u64 end, u32 prot) {
 u64 shm_frame(kobj_t *o, u64 page);                           /* linux.c: a page of a shared object */
 
 /* map the page at a for an access (write: a store); 0 if the program may not */
+static int fault_in_locked(proc_t *p, u64 a, int write);
 static int fault_in_access(proc_t *p, u64 a, int write) {
     if (!user_va(a)) return 0;
+    u64 fl = proc_vma_lock();
+    int r = fault_in_locked(p, a, write);
+    proc_vma_unlock(fl);
+    return r;
+}
+
+static int fault_in_locked(proc_t *p, u64 a, int write) {
     vma_t *v = proc_vma(p, a);
     u64 page = a & ~(PAGE - 1);
     if (!v) {

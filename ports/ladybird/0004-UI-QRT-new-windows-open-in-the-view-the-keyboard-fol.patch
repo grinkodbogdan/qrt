@@ -1,7 +1,7 @@
 From b31e646835de7236a21554151a665a49d3f83fee Mon Sep 17 00:00:00 2001
 From: grinkodbogdan <grinkod.bogdan@gmail.com>
 Date: Fri, 2 Oct 2026 21:32:30 +0000
-Subject: [PATCH 4/4] UI/QRT: new windows open in the view, the keyboard
+Subject: [PATCH 4/5] UI/QRT: new windows open in the view, the keyboard
  follows text fields
 
 ---

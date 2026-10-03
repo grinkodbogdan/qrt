@@ -15,7 +15,7 @@ HOSTCC  ?= gcc
 
 SRC := src/kernel/kernel.c src/kernel/time.c src/kernel/sound.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
        src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c src/drivers/backlight.c src/drivers/audio.c src/drivers/e1000.c \
-       src/drivers/iwm/iwm.c src/drivers/i915/gpu.c src/drivers/i915/display.c src/drivers/usb/xhci.c src/drivers/usb/uaudio.c src/drivers/bt/hci.c src/drivers/bt/btusb.c src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
+       src/drivers/iwm/iwm.c src/drivers/i915/gpu.c src/drivers/i915/display.c src/drivers/usb/xhci.c src/drivers/usb/uaudio.c src/drivers/bt/hci.c src/drivers/bt/l2cap.c src/drivers/bt/a2dp.c src/drivers/bt/sbc.c src/drivers/bt/btusb.c src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
        src/ui/gfx.c src/ui/shell.c src/ui/clientwin.c src/ui/fontdata.c \
        src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c \
        src/apps/settings.c src/apps/life.c src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/apps/browser.c src/apps/bluetooth.c src/apps/html.c src/ui/osk.c \
@@ -84,7 +84,7 @@ RUST_HELLO := $(if $(RUST_MUSL),build/rootfs/bin/rust-hello)
 LADYBIRD := $(if $(wildcard build/ladybird/bin/js),build/rootfs/bin/js build/rootfs/share/tests/js-test.js)
 # the browser (one program: it and its helper processes), its resources, fonts, fontconfig
 LADYBIRD += $(if $(wildcard build/ladybird/bin/Ladybird),build/rootfs/bin/ladybird build/rootfs/share/Lagom/.stamp \
-            build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/fps.html build/rootfs/share/tests/functions.html build/rootfs/share/tests/render.sh \
+            build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/fps.html build/rootfs/share/tests/functions.html build/rootfs/share/tests/video.html build/rootfs/share/tests/video.webm build/rootfs/share/tests/render.sh \
             build/rootfs/etc/ssl/certs/ca-certificates.crt)
 FONT_DIRS := /usr/share/fonts/truetype/liberation /usr/share/fonts/truetype/dejavu
 ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
@@ -187,6 +187,14 @@ build/rootfs/share/tests/functions.html: tests/ladybird/functions.html
 	@mkdir -p $(dir $@)
 	cp $< $@
 
+build/rootfs/share/tests/video.html: tests/ladybird/video.html
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+build/rootfs/share/tests/video.webm: tests/ladybird/video.webm
+	@mkdir -p $(dir $@)
+	cp $< $@
+
 build/rootfs/share/tests/js-test.js: tests/ladybird/js-test.js
 	@mkdir -p $(dir $@)
 	cp $< $@
@@ -252,8 +260,9 @@ check:
 	$(HOSTCC) -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -O1 -fshort-wchar -o build/test_gpu tests/test_gpu.c -lm && build/test_gpu
 	$(HOSTCC) -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -O1 -fshort-wchar -o build/test_display tests/test_display.c -lm && build/test_display
 	$(HOSTCC) -Wall -Wextra -O1 -o build/test_mouse tests/test_mouse.c && build/test_mouse
-	$(HOSTCC) -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -O1 -fshort-wchar -o build/test_bt tests/test_bt.c && build/test_bt
+	$(HOSTCC) -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -O1 -fshort-wchar -o build/test_bt tests/test_bt.c -lm && build/test_bt   # FFMPEG=...: the A2DP stream decoded too
 	$(HOSTCC) -Wall -Wextra -O1 -o build/test_sound tests/test_sound.c -lm && build/test_sound
+	$(HOSTCC) -Wall -Wextra -O1 -o build/test_sbc tests/test_sbc.c -lm && build/test_sbc     # FFMPEG=path/to/ffmpeg: decoded and compared too
 
 # TLS 1.3 client against a local OpenSSL server (needs openssl and python3)
 check-tls:

@@ -208,7 +208,7 @@ int sig_fault(proc_t *p, frame_t *f) {
     int s, code;
     u64 addr = f->rip;
     switch (f->vector) {
-    case 14: s = 11; addr = read_cr2(); code = proc_vma(p, addr) ? 2 : 1; break;    /* SEGV_ACCERR / SEGV_MAPERR */
+    case 14: { s = 11; addr = read_cr2(); u64 fl = proc_vma_lock(); code = proc_vma(p, addr) ? 2 : 1; proc_vma_unlock(fl); break; }   /* SEGV_ACCERR / SEGV_MAPERR */
     case 13: s = 11; addr = 0; code = 0x80; break;
     case 6:  s = 4; code = 2; break;                                     /* ILL_ILLOPN */
     case 0:  s = 8; code = 1; break;                                     /* FPE_INTDIV */
@@ -218,7 +218,19 @@ int sig_fault(proc_t *p, frame_t *f) {
     default: return 0;
     }
     thread_t *t = thread_current();
-    if (p->sa[s].handler <= 1 || (t->sig_mask & BIT(s))) { p->sig = s; return 0; }   /* default (or blocked): it dies */
+    if (p->sa[s].handler <= 1 || (t->sig_mask & BIT(s))) {             /* default (or blocked): it dies */
+        /* say where: the instruction, the address, and what is mapped there */
+        u64 vfl = proc_vma_lock();
+        vma_t *v = f->vector == 14 ? proc_vma(p, addr) : NULL;
+        u32 vprot = v ? v->prot : 0;
+        proc_vma_unlock(vfl);
+        klog("proc: %s (pid %d) %s at %llx (rsp %llx), address %llx%s%s", p->name, p->pid,
+             s == 11 ? "SIGSEGV" : s == 4 ? "SIGILL" : s == 8 ? "SIGFPE" : s == 7 ? "SIGBUS" : "SIGTRAP",
+             f->rip, f->rsp, addr, f->vector == 14 ? (v ? ", mapped " : ", not mapped") : "",
+             v ? (vprot & PROT_WRITE ? "rw" : vprot & PROT_READ ? "r" : "none") : "");
+        p->sig = s;
+        return 0;
+    }
     ksiginfo_t info = { code, 0, 0, addr };
     if (!setup_frame(p, f, s, &info, f->vector, f->vector == 14 ? addr : 0)) { p->sig = 11; return 0; }
     return 1;

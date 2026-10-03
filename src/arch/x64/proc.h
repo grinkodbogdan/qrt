@@ -104,6 +104,8 @@ int     proc_add_vma(proc_t *p, u64 start, u64 end);      /* private, read-write
 int     proc_add_vma_prot(proc_t *p, u64 start, u64 end, u32 prot, kobj_t *obj, u64 off);   /* takes a reference to obj */
 vma_t  *proc_vma(proc_t *p, u64 a);
 int     proc_range_mapped(proc_t *p, u64 start, u64 end);    /* any VMA in [start, end) */
+u64     proc_vma_lock(void);                                  /* the VMA table's lock (nests); returns what to unlock with */
+void    proc_vma_unlock(u64 fl);
 int     proc_add_vma_flags(proc_t *p, u64 start, u64 end, u32 prot, kobj_t *obj, u64 off, u32 flags);
 void    proc_vmas_copy(proc_t *c, const proc_t *p);
 i64     proc_protect(proc_t *p, u64 start, u64 end, u32 prot);

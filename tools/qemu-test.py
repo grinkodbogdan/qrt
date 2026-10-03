@@ -219,8 +219,9 @@ AUDIO_EXPECTED = []          # set by native_test: the tone it played
 
 
 def check_audio(wav):
-    """The 1 kHz tone 'play -t' sent through /dev/dsp, the mixer and the USB audio driver,
-    as QEMU's usb-audio device recorded it: its pitch, its length, no dropouts."""
+    """What QEMU's usb-audio device recorded: the tones the test played, in order - 'play -t'
+    (1 kHz, 1 s: /dev/dsp, the mixer, the USB audio driver) and the test video's (660 Hz, 4 s:
+    Ladybird's Opus decoder and OSS backend).  Pitch, length, and no more than a dropout."""
     import wave, struct
     try:
         w = wave.open(wav)
@@ -229,22 +230,41 @@ def check_audio(wav):
     except Exception as e:  # noqa
         print("FAIL: audio: no recording (%s)" % e)
         return False
-    loud = [i for i, v in enumerate(x) if abs(v) > 500]
-    if len(loud) < rate // 2:
-        print("FAIL: audio: the tone was not heard (%d loud samples)" % len(loud))
+    # sounding stretches, split where it is quiet for 0.2 s
+    segs, start, quiet = [], None, 0
+    for i, v in enumerate(x):
+        if abs(v) > 200:
+            if start is None:
+                start = i
+            quiet = 0
+        elif start is not None:
+            quiet += 1
+            if quiet > rate // 5:
+                segs.append((start, i - quiet))
+                start, quiet = None, 0
+    if start is not None:
+        segs.append((start, len(x)))
+    segs = [s2 for s2 in segs if s2[1] - s2[0] > rate // 4]
+    ok = len(segs) == len(AUDIO_EXPECTED)
+    report = []
+    for k, (a, b) in enumerate(segs):
+        seg = x[a:b]
+        cross = [i for i in range(1, len(seg)) if seg[i - 1] < 0 <= seg[i]]
+        hz = (len(cross) - 1) * rate / (cross[-1] - cross[0]) if len(cross) > 1 else 0
+        secs = len(seg) / rate
+        run = gaps = 0
+        for v in seg:
+            run = run + 1 if abs(v) < 20 else 0
+            gaps += run == 8
+        report.append("%.1f Hz for %.2f s, %d dropout%s" % (hz, secs, gaps, "" if gaps == 1 else "s"))
+        if k < len(AUDIO_EXPECTED):
+            want_hz, want_s = AUDIO_EXPECTED[k]
+            ok = ok and abs(hz - want_hz) < 5 and abs(secs - want_s) < 0.1 and gaps <= 1
+    want = ", then ".join("%d Hz for %g s" % e for e in AUDIO_EXPECTED)
+    if not ok:
+        print("FAIL: audio: heard %s; want %s" % ("; ".join(report) or "nothing", want))
         return False
-    seg = x[loud[0]:loud[-1]]
-    cross = [i for i in range(1, len(seg)) if seg[i - 1] < 0 <= seg[i]]
-    hz = (len(cross) - 1) * rate / (cross[-1] - cross[0])
-    secs = len(seg) / rate
-    run = gaps = 0
-    for v in seg:
-        run = run + 1 if abs(v) < 30 else 0
-        gaps += run == 6
-    if abs(hz - 1000) > 5 or abs(secs - 1.0) > 0.05 or gaps:
-        print("FAIL: audio: %.1f Hz for %.3f s, %d dropouts (want 1000 Hz, 1 s, none)" % (hz, secs, gaps))
-        return False
-    print("audio: USB audio played the tone: %.1f Hz for %.3f s, no dropouts" % (hz, secs))
+    print("audio: USB audio played " + "; then ".join(report))
     return True
 
 
@@ -291,7 +311,7 @@ def native_test(q, shots):
             time.sleep(1)
         if "play-exit=0" not in slog():
             raise RuntimeError("native: play did not finish\n  " + "\n  ".join(l for l in slog().splitlines() if "play" in l or "sound" in l)[-800:])
-        AUDIO_EXPECTED.append(1000)
+        AUDIO_EXPECTED.append((1000, 1))
         progs.append("play (USB audio)")
     elif ARCH == "x64":
         raise RuntimeError("native: QEMU's USB audio device did not become the sound output\n  " + "\n  ".join(l for l in slog().splitlines() if "usb" in l or "sound" in l)[-800:])
@@ -361,9 +381,24 @@ def native_test(q, shots):
             time.sleep(1)
         if "functions-result 36011997" not in slog():
             raise RuntimeError("native: Ladybird failed the page with 6000 functions\n  " + "\n  ".join(l for l in slog().splitlines() if "ladybird" in l)[-1500:])
+        # a WebM video (VP9 and Opus, as YouTube sends): it plays to the end, and its sound
+        # reaches QEMU's USB audio device (checked after QEMU exits)
+        q.tap(700, 120, settle=1)
+        q.keys(*"file:///share/tests/video.html", settle=0.3)
+        q.keys("ret", settle=25)
+        q.tap(586, 695, settle=2)                    # Play (sound needs a user gesture)
+        for _ in range(120):
+            if "video-ended" in slog() or "video-error" in slog():
+                break
+            time.sleep(1)
+        if "video-ended" not in slog():
+            raise RuntimeError("native: the test video did not play to the end\n  " + "\n  ".join(l for l in slog().splitlines() if "video" in l or "ladybird" in l)[-1500:])
+        shots.append(q.shot("09-ladybird-video"))
+        if "sound: output USB audio" in slog():
+            AUDIO_EXPECTED.append((660, 4))
         q.tap(1141, 66, settle=4)                    # close it: QRT_EV_CLOSE, Ladybird exits
         q.tap(1226, 170, settle=2)                   # back to the Terminal
-        progs.append("Ladybird in the shell (dock, address bar, a page, the keyboard for a text field, 6000 functions)")
+        progs.append("Ladybird in the shell (dock, address bar, a page, the keyboard for a text field, 6000 functions, a video with sound)")
     q.keys(*"hello-window", settle=0.2)
     q.keys("ret", settle=1)
     for _ in range(40):

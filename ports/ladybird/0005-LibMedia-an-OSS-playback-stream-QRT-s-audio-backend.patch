@@ -1,0 +1,532 @@
+From b6d5d7011ea3c6a83c0f44c9069784d62a75215d Mon Sep 17 00:00:00 2001
+From: grinkodbogdan <grinkod.bogdan@gmail.com>
+Date: Sat, 3 Oct 2026 13:02:13 +0000
+Subject: [PATCH 5/5] LibMedia: an OSS playback stream, QRT's audio backend
+
+---
+ .../LibMedia/Audio/PlaybackStreamOSS.cpp      | 434 ++++++++++++++++++
+ Libraries/LibMedia/Audio/PlaybackStreamOSS.h  |  38 ++
+ Libraries/LibMedia/CMakeLists.txt             |   3 +
+ Meta/CMake/audio.cmake                        |   6 +-
+ 4 files changed, 480 insertions(+), 1 deletion(-)
+ create mode 100644 Libraries/LibMedia/Audio/PlaybackStreamOSS.cpp
+ create mode 100644 Libraries/LibMedia/Audio/PlaybackStreamOSS.h
+
+diff --git a/Libraries/LibMedia/Audio/PlaybackStreamOSS.cpp b/Libraries/LibMedia/Audio/PlaybackStreamOSS.cpp
+new file mode 100644
+index 00000000..d5d06d78
+--- /dev/null
++++ b/Libraries/LibMedia/Audio/PlaybackStreamOSS.cpp
+@@ -0,0 +1,434 @@
++/*
++ * Copyright (c) 2026, Jelle Raaijmakers <jelle@ladybird.org>
++ * Copyright (c) 2026, the QRT authors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include <AK/Atomic.h>
++#include <AK/ConditionVariable.h>
++#include <AK/Math.h>
++#include <AK/Mutex.h>
++#include <LibMedia/Audio/PlaybackStreamOSS.h>
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++#include <LibThreading/Thread.h>
++
++namespace Audio {
++
++static constexpr u32 NULL_OUTPUT_SAMPLE_RATE = 48000;   // the kernel mixer's own rate: no resampling there
++
++// OSS (sys/soundcard.h)
++static constexpr unsigned long SNDCTL_DSP_RESET = 0x00005000;
++static constexpr unsigned long SNDCTL_DSP_SPEED = 0xc0045002;
++static constexpr unsigned long SNDCTL_DSP_SETFMT = 0xc0045005;
++static constexpr unsigned long SNDCTL_DSP_CHANNELS = 0xc0045006;
++static constexpr int AFMT_S16_LE = 0x10;
++static constexpr u32 PERIOD_MS = 10;
++static constexpr i64 PERIOD_FRAMES = NULL_OUTPUT_SAMPLE_RATE * PERIOD_MS / 1000;
++
++// The played position is derived from the wall clock on demand, advancing from an anchor while the stream is playing
++// or draining, and never passing the frames that have been written. Data is requested one period at a time to keep a
++// target amount written ahead of the played position, like a device buffer.
++class PlaybackStreamOSS::State final : public AtomicRefCounted<State> {
++public:
++    State(int fd, OutputState initial_output_state, u32 target_latency_ms, AudioDataRequestCallback data_request_callback)
++        : m_fd(fd)
++        , m_data_request_callback(move(data_request_callback))
++        , m_target_lookahead_frames(max(PERIOD_FRAMES, static_cast<i64>(NULL_OUTPUT_SAMPLE_RATE) * target_latency_ms / 1000))
++        , m_state(initial_output_state == OutputState::Playing ? StreamState::Playing : StreamState::Suspended)
++    {
++    }
++
++    ~State()
++    {
++        stop();
++        if (m_fd >= 0)
++            ::close(m_fd);
++    }
++
++    void start()
++    {
++        auto thread = MUST(Threading::Thread::try_create("OSS Audio Output"sv, [self = NonnullRefPtr(*this)] {
++            return self->thread_main();
++        }));
++        thread->start();
++        thread->detach();
++    }
++
++    SampleSpecification sample_specification() const
++    {
++        return { NULL_OUTPUT_SAMPLE_RATE, ChannelMap::stereo() };
++    }
++
++    NonnullRefPtr<Core::ThreadedPromise<AK::Duration>> resume()
++    {
++        auto promise = Core::ThreadedPromise<AK::Duration>::create();
++        {
++            MutexLocker locker(m_mutex);
++            if (m_state == StreamState::Stopped) {
++                promise->reject(Error::from_string_literal("OSS playback stream has stopped"));
++                return promise;
++            }
++            m_ready_void_promises.extend(move(m_drain_promises));
++            set_state_while_locked(StreamState::Playing);
++            m_awaiting_data = false;
++            m_resume_promises.append(promise);
++            signal_while_locked();
++        }
++        return promise;
++    }
++
++    NonnullRefPtr<Core::ThreadedPromise<void>> drain_buffer_and_suspend()
++    {
++        auto promise = Core::ThreadedPromise<void>::create();
++        {
++            MutexLocker locker(m_mutex);
++            if (m_state == StreamState::Stopped) {
++                promise->reject(Error::from_string_literal("OSS playback stream has stopped"));
++                return promise;
++            }
++            set_state_while_locked(StreamState::Draining);
++            m_drain_promises.append(promise);
++            signal_while_locked();
++        }
++        return promise;
++    }
++
++    NonnullRefPtr<Core::ThreadedPromise<void>> discard_buffer_and_suspend()
++    {
++        auto promise = Core::ThreadedPromise<void>::create();
++        {
++            MutexLocker locker(m_mutex);
++            if (m_state == StreamState::Stopped) {
++                promise->reject(Error::from_string_literal("OSS playback stream has stopped"));
++                return promise;
++            }
++            set_state_while_locked(StreamState::Suspended);
++            m_frames_written = m_anchor_frames_played;
++            ::ioctl(m_fd, SNDCTL_DSP_RESET, 0);   // what is queued in the kernel is dropped too
++            m_ready_void_promises.extend(move(m_drain_promises));
++            m_ready_void_promises.append(promise);
++            signal_while_locked();
++        }
++        return promise;
++    }
++
++    void notify_data_available()
++    {
++        MutexLocker locker(m_mutex);
++        m_awaiting_data = false;
++        m_data_notified = true;
++        if (m_state == StreamState::Underrun)
++            set_state_while_locked(StreamState::Playing);
++        signal_while_locked();
++    }
++
++    AK::Duration total_time_played() const
++    {
++        MutexLocker locker(m_mutex);
++        return AK::Duration::from_time_units(frames_played_while_locked(MonotonicTime::now()), 1, NULL_OUTPUT_SAMPLE_RATE);
++    }
++
++    NonnullRefPtr<Core::ThreadedPromise<void>> set_volume(double volume)
++    {
++        m_volume.store(static_cast<float>(clamp(volume, 0.0, 1.0)));
++        auto promise = Core::ThreadedPromise<void>::create();
++        {
++            MutexLocker locker(m_mutex);
++            if (m_state == StreamState::Stopped) {
++                promise->reject(Error::from_string_literal("OSS playback stream has stopped"));
++                return promise;
++            }
++            m_ready_void_promises.append(promise);
++            signal_while_locked();
++        }
++        return promise;
++    }
++
++    void stop()
++    {
++        {
++            MutexLocker locker(m_mutex);
++            if (m_state == StreamState::Stopped)
++                return;
++            set_state_while_locked(StreamState::Stopped);
++            m_ready_void_promises.extend(move(m_drain_promises));
++            m_signal_count++;
++            m_wake_condition.broadcast();
++        }
++    }
++
++private:
++    enum class StreamState {
++        Playing,
++        Draining,
++        Suspended,
++        Underrun,
++        Stopped,
++    };
++
++    void signal_while_locked()
++    {
++        m_signal_count++;
++        m_wake_condition.signal();
++    }
++
++    bool is_advancing_while_locked() const
++    {
++        return m_state == StreamState::Playing || m_state == StreamState::Draining;
++    }
++
++    i64 elapsed_frames_since_anchor_while_locked(MonotonicTime now) const
++    {
++        auto elapsed_nanoseconds = max<i64>(0, (now - m_anchor_time).to_nanoseconds());
++        return elapsed_nanoseconds * NULL_OUTPUT_SAMPLE_RATE / 1'000'000'000;
++    }
++
++    i64 frames_played_while_locked(MonotonicTime now) const
++    {
++        if (!is_advancing_while_locked())
++            return m_anchor_frames_played;
++        return min(m_frames_written, m_anchor_frames_played + elapsed_frames_since_anchor_while_locked(now));
++    }
++
++    void reanchor_while_locked(MonotonicTime now)
++    {
++        if (!is_advancing_while_locked()) {
++            m_anchor_time = now;
++            return;
++        }
++        auto elapsed_frames = elapsed_frames_since_anchor_while_locked(now);
++        if (m_anchor_frames_played + elapsed_frames < m_frames_written) {
++            // Advance by whole frames, keeping the remainder in the anchor time so that reanchoring doesn't drift.
++            m_anchor_time = m_anchor_time + AK::Duration::from_time_units(elapsed_frames, 1, NULL_OUTPUT_SAMPLE_RATE);
++            m_anchor_frames_played += elapsed_frames;
++            return;
++        }
++        // Everything written has been played, so the time since then was spent in underrun.
++        m_anchor_frames_played = m_frames_written;
++        m_anchor_time = now;
++    }
++
++    void set_state_while_locked(StreamState state)
++    {
++        reanchor_while_locked(MonotonicTime::now());
++        m_state = state;
++    }
++
++    intptr_t thread_main()
++    {
++        auto const channel_count = sample_specification().channel_count();
++        while (true) {
++            Optional<i64> frames_to_request;
++            Optional<i64> wake_at_played_frame;
++            Vector<NonnullRefPtr<Core::ThreadedPromise<AK::Duration>>> resume_promises;
++            Vector<NonnullRefPtr<Core::ThreadedPromise<void>>> ready_void_promises;
++            Vector<NonnullRefPtr<Core::ThreadedPromise<void>>> drain_promises;
++            bool stopped = false;
++            u64 signal_count_at_decision;
++
++            {
++                MutexLocker locker(m_mutex);
++                signal_count_at_decision = m_signal_count;
++                resume_promises = move(m_resume_promises);
++                ready_void_promises = move(m_ready_void_promises);
++
++                auto now = MonotonicTime::now();
++                auto frames_played = frames_played_while_locked(now);
++                switch (m_state) {
++                case StreamState::Stopped:
++                    ready_void_promises.extend(move(m_drain_promises));
++                    stopped = true;
++                    break;
++                case StreamState::Playing:
++                    if (m_awaiting_data) {
++                        // Like a device underrun, stop requesting data until more is available, but keep playing
++                        // out what was already written.
++                        if (frames_played >= m_frames_written)
++                            set_state_while_locked(StreamState::Underrun);
++                        else
++                            wake_at_played_frame = m_frames_written;
++                    } else if (m_frames_written - frames_played <= m_target_lookahead_frames - PERIOD_FRAMES) {
++                        frames_to_request = m_target_lookahead_frames - (m_frames_written - frames_played);
++                        m_data_notified = false;
++                    } else {
++                        wake_at_played_frame = m_frames_written - m_target_lookahead_frames + PERIOD_FRAMES;
++                    }
++                    break;
++                case StreamState::Draining:
++                    if (frames_played >= m_frames_written) {
++                        set_state_while_locked(StreamState::Suspended);
++                        drain_promises = move(m_drain_promises);
++                    } else {
++                        wake_at_played_frame = m_frames_written;
++                    }
++                    break;
++                case StreamState::Suspended:
++                case StreamState::Underrun:
++                    break;
++                }
++            }
++
++            for (auto& promise : resume_promises)
++                promise->resolve(total_time_played());
++            for (auto& promise : ready_void_promises)
++                promise->resolve();
++            for (auto& promise : drain_promises)
++                promise->resolve();
++
++            if (stopped)
++                return 0;
++
++            if (frames_to_request.has_value()) {
++                auto requested_frames = static_cast<size_t>(frames_to_request.value());
++                m_request_buffer.resize(requested_frames * channel_count);
++                auto written_samples = m_data_request_callback(m_request_buffer.span());
++                auto written_frames = min(requested_frames, written_samples.size() / channel_count);
++                write_to_device(written_samples.trim(written_frames * channel_count));
++
++                MutexLocker locker(m_mutex);
++                if (is_advancing_while_locked()) {
++                    reanchor_while_locked(MonotonicTime::now());
++                    m_frames_written += static_cast<i64>(written_frames);
++                    // A notification that arrived during the request means that more data may already be available.
++                    if (m_state == StreamState::Playing && written_frames < requested_frames && !m_data_notified)
++                        m_awaiting_data = true;
++                }
++                continue;
++            }
++
++            MutexLocker locker(m_mutex);
++            // Anything signaled since the decision above may have changed what to do next.
++            if (m_signal_count != signal_count_at_decision)
++                continue;
++            if (wake_at_played_frame.has_value()) {
++                // If this wakes before the frame is reached, the next iteration waits for the remainder.
++                auto frames_until_wake = *wake_at_played_frame - frames_played_while_locked(MonotonicTime::now());
++                if (frames_until_wake > 0)
++                    m_wake_condition.wait_for(AK::Duration::from_time_units(frames_until_wake, 1, NULL_OUTPUT_SAMPLE_RATE));
++            } else if (m_state == StreamState::Suspended || m_state == StreamState::Underrun) {
++                m_wake_condition.wait();
++            }
++        }
++    }
++
++    // float samples to 16-bit PCM at the stream's volume, written to the device (it blocks only when the kernel's
++    // queue for the stream is full, which the target latency keeps it from being)
++    void write_to_device(ReadonlySpan<float> samples)
++    {
++        if (samples.is_empty())
++            return;
++        float volume = m_volume.load();
++        m_pcm.resize(samples.size());
++        for (size_t i = 0; i < samples.size(); i++) {
++            float v = clamp(samples[i] * volume, -1.0f, 1.0f);
++            m_pcm[i] = static_cast<i16>(v * 32767.0f);
++        }
++        auto const* bytes = reinterpret_cast<u8 const*>(m_pcm.data());
++        size_t left = m_pcm.size() * sizeof(i16);
++        while (left > 0) {
++            auto n = ::write(m_fd, bytes, left);
++            if (n <= 0)
++                break;
++            bytes += n;
++            left -= static_cast<size_t>(n);
++        }
++    }
++
++    int m_fd { -1 };
++    Atomic<float> m_volume { 1.0f };
++    Vector<i16> m_pcm;
++    AudioDataRequestCallback m_data_request_callback;
++    i64 m_target_lookahead_frames { 0 };
++
++    mutable Mutex m_mutex;
++    ConditionVariable m_wake_condition { m_mutex };
++    StreamState m_state { StreamState::Suspended };
++    Vector<NonnullRefPtr<Core::ThreadedPromise<AK::Duration>>> m_resume_promises;
++    Vector<NonnullRefPtr<Core::ThreadedPromise<void>>> m_drain_promises;
++    Vector<NonnullRefPtr<Core::ThreadedPromise<void>>> m_ready_void_promises;
++
++    i64 m_frames_written { 0 };
++    i64 m_anchor_frames_played { 0 };
++    MonotonicTime m_anchor_time { MonotonicTime::now() };
++    bool m_awaiting_data { false };
++    bool m_data_notified { false };
++    u64 m_signal_count { 0 };
++
++    Vector<float> m_request_buffer;
++};
++
++NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStream::create_platform_playback_stream(OutputState initial_output_state, u32 target_latency_ms, AudioDataRequestCallback&& data_request_callback)
++{
++    return PlaybackStreamOSS::create(initial_output_state, target_latency_ms, move(data_request_callback));
++}
++
++NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStreamOSS::create(OutputState initial_output_state, u32 target_latency_ms, AudioDataRequestCallback&& data_request_callback)
++{
++    auto promise = CreatePromise::construct();
++    int fd = ::open("/dev/dsp", O_WRONLY | O_CLOEXEC);
++    if (fd < 0) {
++        promise->reject(Error::from_errno(errno));
++        return promise;
++    }
++    int format = AFMT_S16_LE, channels = 2, rate = NULL_OUTPUT_SAMPLE_RATE;
++    if (::ioctl(fd, SNDCTL_DSP_SETFMT, &format) < 0 || ::ioctl(fd, SNDCTL_DSP_CHANNELS, &channels) < 0 || ::ioctl(fd, SNDCTL_DSP_SPEED, &rate) < 0
++        || format != AFMT_S16_LE || channels != 2 || rate != static_cast<int>(NULL_OUTPUT_SAMPLE_RATE)) {
++        ::close(fd);
++        promise->reject(Error::from_string_literal("/dev/dsp does not take 48 kHz stereo 16-bit PCM"));
++        return promise;
++    }
++    auto state = make_ref_counted<State>(fd, initial_output_state, target_latency_ms, move(data_request_callback));
++    state->start();
++    promise->resolve(adopt_ref(*new PlaybackStreamOSS(move(state))));
++    return promise;
++}
++
++PlaybackStreamOSS::PlaybackStreamOSS(NonnullRefPtr<State> state)
++    : m_state(move(state))
++{
++}
++
++PlaybackStreamOSS::~PlaybackStreamOSS()
++{
++    m_state->stop();
++}
++
++SampleSpecification PlaybackStreamOSS::sample_specification() const
++{
++    return m_state->sample_specification();
++}
++
++NonnullRefPtr<Core::ThreadedPromise<AK::Duration>> PlaybackStreamOSS::resume()
++{
++    return m_state->resume();
++}
++
++NonnullRefPtr<Core::ThreadedPromise<void>> PlaybackStreamOSS::drain_buffer_and_suspend()
++{
++    return m_state->drain_buffer_and_suspend();
++}
++
++NonnullRefPtr<Core::ThreadedPromise<void>> PlaybackStreamOSS::discard_buffer_and_suspend()
++{
++    return m_state->discard_buffer_and_suspend();
++}
++
++void PlaybackStreamOSS::notify_data_available()
++{
++    m_state->notify_data_available();
++}
++
++AK::Duration PlaybackStreamOSS::total_time_played() const
++{
++    return m_state->total_time_played();
++}
++
++NonnullRefPtr<Core::ThreadedPromise<void>> PlaybackStreamOSS::set_volume(double volume)
++{
++    return m_state->set_volume(volume);
++}
++
++}
+diff --git a/Libraries/LibMedia/Audio/PlaybackStreamOSS.h b/Libraries/LibMedia/Audio/PlaybackStreamOSS.h
+new file mode 100644
+index 00000000..7d2cc64a
+--- /dev/null
++++ b/Libraries/LibMedia/Audio/PlaybackStreamOSS.h
+@@ -0,0 +1,38 @@
++/*
++ * Copyright (c) 2026, Jelle Raaijmakers <jelle@ladybird.org>
++ * Copyright (c) 2026, the QRT authors
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#pragma once
++
++#include <LibMedia/Audio/PlaybackStream.h>
++
++namespace Audio {
++
++// Playback through an OSS device (/dev/dsp), as QRT provides it: the kernel mixes the stream with other sounds and
++// plays it on the current output. The timing is PlaybackStreamOSS's (a wall-clock played position, data requested to
++// keep the target latency written ahead): the kernel's mixer consumes streams in real time too.
++class MEDIA_API PlaybackStreamOSS final : public PlaybackStream {
++public:
++    static NonnullRefPtr<PlaybackStream::CreatePromise> create(OutputState initial_output_state, u32 target_latency_ms, AudioDataRequestCallback&&);
++
++    virtual SampleSpecification sample_specification() const override;
++    virtual NonnullRefPtr<Core::ThreadedPromise<AK::Duration>> resume() override;
++    virtual NonnullRefPtr<Core::ThreadedPromise<void>> drain_buffer_and_suspend() override;
++    virtual NonnullRefPtr<Core::ThreadedPromise<void>> discard_buffer_and_suspend() override;
++    virtual void notify_data_available() override;
++    virtual AK::Duration total_time_played() const override;
++    virtual NonnullRefPtr<Core::ThreadedPromise<void>> set_volume(double) override;
++
++private:
++    class State;
++
++    explicit PlaybackStreamOSS(NonnullRefPtr<State>);
++    virtual ~PlaybackStreamOSS() override;
++
++    NonnullRefPtr<State> m_state;
++};
++
++}
+diff --git a/Libraries/LibMedia/CMakeLists.txt b/Libraries/LibMedia/CMakeLists.txt
+index 315fe0b1..d2c263ab 100644
+--- a/Libraries/LibMedia/CMakeLists.txt
++++ b/Libraries/LibMedia/CMakeLists.txt
+@@ -156,6 +156,9 @@ elseif (LADYBIRD_AUDIO_BACKEND STREQUAL "AUDIO_UNIT")
+     find_library(CORE_AUDIO CoreAudio REQUIRED)
+     find_library(CORE_FOUNDATION CoreFoundation REQUIRED)
+     target_link_libraries(LibMedia PRIVATE ${AUDIO_TOOLBOX} ${CORE_AUDIO} ${CORE_FOUNDATION})
++elseif (LADYBIRD_AUDIO_BACKEND STREQUAL "OSS")
++    target_sources(LibMedia PRIVATE Audio/PlaybackStreamOSS.cpp)
++    target_compile_definitions(LibMedia PRIVATE LIBMEDIA_AUDIO_BACKEND=1)
+ elseif(LADYBIRD_AUDIO_BACKEND STREQUAL "WASAPI")
+     target_sources(LibMedia PRIVATE Audio/PlaybackStreamWasapi.cpp)
+     target_compile_definitions(LibMedia PRIVATE LIBMEDIA_AUDIO_BACKEND=1)
+diff --git a/Meta/CMake/audio.cmake b/Meta/CMake/audio.cmake
+index 2fa79829..1a44a909 100644
+--- a/Meta/CMake/audio.cmake
++++ b/Meta/CMake/audio.cmake
+@@ -1,7 +1,11 @@
+ include_guard()
+ 
+ # Audio backend -- how we output audio to the speakers.
+-if (APPLE AND NOT IOS)
++if (QRT)
++    # QRT: the kernel's sound core through OSS's /dev/dsp
++    set(LADYBIRD_AUDIO_BACKEND "OSS")
++    return()
++elseif (APPLE AND NOT IOS)
+     set(LADYBIRD_AUDIO_BACKEND "AUDIO_UNIT")
+     return()
+ elseif (NOT WIN32)
+-- 
+2.43.0
+

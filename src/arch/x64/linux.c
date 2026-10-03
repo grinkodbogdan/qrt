@@ -481,20 +481,22 @@ static i64 do_mmap(proc_t *p, u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u6
     if (shared && shm) { backing = shm; boff = off; }
     else if (shared && anon) { backing = made = shm_new("anon"); shm_truncate(made, len); }
     u64 va;
+    u64 vfl = proc_vma_lock();                                     /* place and map in one step (other threads mmap too) */
     if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) {
-        if (addr & (PAGE - 1)) { kobj_put(made); return -EINVAL; }
-        if (!urange(addr, addr + len)) { kobj_put(made); return -ENOMEM; }
+        if (addr & (PAGE - 1)) { proc_vma_unlock(vfl); kobj_put(made); return -EINVAL; }
+        if (!urange(addr, addr + len)) { proc_vma_unlock(vfl); kobj_put(made); return -ENOMEM; }
         va = addr;
         if ((flags & MAP_FIXED_NOREPLACE) && !(flags & MAP_FIXED))
-            if (proc_range_mapped(p, va, va + len)) { kobj_put(made); return -EEXIST; }
+            if (proc_range_mapped(p, va, va + len)) { proc_vma_unlock(vfl); kobj_put(made); return -EEXIST; }
         proc_unmap(p, va, va + len);                               /* MAP_FIXED replaces what was there */
     } else {
         u64 hint = addr & ~(PAGE - 1);
         va = hint && proc_range_free(p, hint, hint + len) ? hint : (flags & MAP_32BIT) ? proc_find_free_low(p, len) : proc_find_free(p, len);
-        if (!va) { kobj_put(made); return -ENOMEM; }
+        if (!va) { proc_vma_unlock(vfl); kobj_put(made); return -ENOMEM; }
     }
     int file_copy = !anon && !backing;                             /* a private copy of the contents */
     int e = proc_add_vma_flags(p, va, va + len, (u32)(prot & 7), backing, boff, file_copy ? VMA_FILE : 0);
+    proc_vma_unlock(vfl);
     kobj_put(made);                                                /* the VMA holds it now */
     if (e) return -ENOMEM;
     if (file_copy) {
@@ -512,14 +514,23 @@ static i64 do_mmap(proc_t *p, u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u6
 
 i64 map_shared(proc_t *p, kobj_t *o, u64 len) {
     len = (len + PAGE - 1) & ~(PAGE - 1);
+    u64 fl = proc_vma_lock();
     u64 va = proc_find_free(p, len);
-    if (!va) return -ENOMEM;
-    if (proc_add_vma_prot(p, va, va + len, PROT_READ | PROT_WRITE, o, 0)) return -ENOMEM;
-    return (i64)va;
+    int e = !va || proc_add_vma_prot(p, va, va + len, PROT_READ | PROT_WRITE, o, 0);
+    proc_vma_unlock(fl);
+    return e ? -ENOMEM : (i64)va;
 }
 
 /* mremap: shrink in place, grow in place when the range after is free, else move the pages */
+static i64 do_mremap_locked(proc_t *p, u64 old, u64 olen, u64 nlen, u64 flags, u64 naddr);
 static i64 do_mremap(proc_t *p, u64 old, u64 olen, u64 nlen, u64 flags, u64 naddr) {
+    u64 fl = proc_vma_lock();
+    i64 r = do_mremap_locked(p, old, olen, nlen, flags, naddr);
+    proc_vma_unlock(fl);
+    return r;
+}
+
+static i64 do_mremap_locked(proc_t *p, u64 old, u64 olen, u64 nlen, u64 flags, u64 naddr) {
     if ((old & (PAGE - 1)) || !nlen || (flags & ~7ull)) return -EINVAL;
     olen = (olen + PAGE - 1) & ~(PAGE - 1);
     nlen = (nlen + PAGE - 1) & ~(PAGE - 1);
@@ -552,7 +563,15 @@ static i64 do_mremap(proc_t *p, u64 old, u64 olen, u64 nlen, u64 flags, u64 nadd
 }
 
 /* MADV_DONTNEED: private anonymous pages read as zero afterwards (jemalloc relies on it) */
+static i64 do_madvise_locked(proc_t *p, u64 addr, u64 len, int advice);
 static i64 do_madvise(proc_t *p, u64 addr, u64 len, int advice) {
+    u64 fl = proc_vma_lock();
+    i64 r = do_madvise_locked(p, addr, len, advice);
+    proc_vma_unlock(fl);
+    return r;
+}
+
+static i64 do_madvise_locked(proc_t *p, u64 addr, u64 len, int advice) {
     if (addr & (PAGE - 1)) return -EINVAL;
     if (advice != 4) return 0;
     u64 end = addr + ((len + PAGE - 1) & ~(PAGE - 1));
@@ -657,7 +676,15 @@ static i64 do_futex(proc_t *p, u64 uaddr, int op, u32 val, u64 utime, u64 uaddr2
     }
 }
 
+static i64 do_brk_locked(proc_t *p, u64 want);
 static i64 do_brk(proc_t *p, u64 want) {
+    u64 fl = proc_vma_lock();
+    i64 r = do_brk_locked(p, want);
+    proc_vma_unlock(fl);
+    return r;
+}
+
+static i64 do_brk_locked(proc_t *p, u64 want) {
     if (want < p->brk_start || want >= USER_BRK_MAX) return (i64)p->brk;
     if (proc_range_mapped(p, p->brk, (want + PAGE - 1) & ~(PAGE - 1))) return (i64)p->brk;   /* never into a mapping */
     want = (want + PAGE - 1) & ~(PAGE - 1);

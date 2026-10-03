@@ -297,6 +297,39 @@ Not supported yet:
   are native QRT programs now: see above)
 - writes that survive a reboot (milestone 5)
 
+## Sound (0.9.2)
+
+QRT plays sound on **USB audio devices** and **Bluetooth headphones and speakers**:
+
+- **The sound core** (`src/kernel/sound.c`) mixes every stream - programs, the browser,
+  the system's own sounds - at the output's rate, applies the volume (the volume keys,
+  Settings → Sound) and hands the mix to the output.  The newest output plays: plug in
+  USB audio or connect headphones and the sound moves there.
+- **Programs** play through `/dev/dsp`, the OSS interface: open it, set the rate and
+  channels with ioctls, write 16-bit samples.  Ladybird does (videos and web audio have
+  sound), and so does `play` in the Terminal: `play song.wav`, or `play -t 440 2` for a
+  test tone.
+- **USB audio** (`src/drivers/usb/uaudio.c`): the USB Audio Class, versions 1 and 2 - USB
+  headsets, USB-C to 3.5 mm dongles, docks with a headphone jack.  QRT picks a 16/24/32-bit
+  stereo setting at 48 or 44.1 kHz and streams it with isochronous transfers, 40 ms ahead.
+- **Bluetooth headphones and speakers** (A2DP, `src/drivers/bt/`): in the **Bluetooth** app,
+  Scan, then **Connect** on the headphones (put them in pairing mode first).  QRT pairs the
+  way headphones expect ("just works"), keeps the link key so the next connection is
+  immediate, and streams SBC at 44.1 kHz, stereo, bitpool 53 (about 330 kbit/s).
+  Headphones that reconnect by themselves are accepted too.
+- **Settings → Sound** shows the output and has a **Test** button (a short chime);
+  System Monitor → Hardware → Sound shows the streams.
+- **Not yet**: the built-in speaker and headphone jack (they need a driver for Intel's SST
+  audio DSP and its firmware), microphones, Bluetooth headsets' call audio (HFP), AAC.
+
+How it is tested: `make check` checks the mixer (pitch after resampling, volume, clipping),
+the SBC encoder against ffmpeg's decoder (65.9 dB SNR), and the whole Bluetooth path against
+a simulated headset - pairing, SDP, AVDTP set-up (skipping an AAC end-point for the SBC
+one), two seconds of streaming that ffmpeg decodes back to the 1 kHz tone, and
+reconnecting with the stored key.  The QEMU test plays a tone with `play` and a WebM video
+in Ladybird on QEMU's USB audio device and checks the recording: 1000.0 Hz for 1 s, then
+the video's 660 Hz for 4 s.
+
 ## Wi-Fi and networking
 
 The 5855's Wi-Fi is an **Intel Wireless 8260** on PCIe. QRT's driver
@@ -368,7 +401,9 @@ from linux-firmware, under Intel's redistribution licence; see
 
 Since 0.9.0 the dock's **Browser** is **Ladybird**, ported natively (not through the
 Linux layer): full HTML, CSS and JavaScript, images and fonts, rendered with Skia on the
-CPU, with OpenSSL checking certificates. Its window has back, forward, reload, an address
+CPU, with OpenSSL checking certificates.  Since 0.9.2 videos play with sound (VP9, AV1,
+VP8 with Opus or Vorbis - what YouTube sends browsers like Ladybird); see
+[docs/gpu.md](docs/gpu.md) for drawing pages on the GPU and for YouTube. Its window has back, forward, reload, an address
 bar and a keyboard button. A finger drag scrolls the page and a tap clicks. The
 on-screen keyboard opens when a text field takes the focus. In desk mode, the mouse and
 the two-finger touchpad scroll work too. See [docs/ladybird.md](docs/ladybird.md).
@@ -449,11 +484,11 @@ FreeBSD's.
 | Wi-Fi | Intel 8260 driver, WPA2-Personal: **works** (scanning, connecting, DHCP) |
 | Backlight | LPSS PWM #1, native mode: brightness and sleep (**new in 0.5.5.3, untested on hardware**). QRT only takes control if the firmware left that PWM running. |
 | Sleep | backlight off and a slower frame loop; not ACPI suspend |
-| Audio | no sound yet: 0.6.1 identifies the codec over I2C2 - an RT5670/RT5672 on the tablet (System Monitor → Hardware → Sound); the volume keys drive a mock volume control |
+| Audio | 0.9.2: **USB audio** (headsets, USB-C dongles, docks' headphone jacks: USB Audio Class 1 and 2) and **Bluetooth headphones and speakers** (A2DP), mixed by QRT's sound core; the volume keys set the real volume. The built-in speaker is not driven yet: it sits behind Intel's SST audio DSP (the RT5670 codec is identified over I2C2 since 0.6.1). See [Sound](#sound-092) |
 | USB | 0.6.1: QRT's own xHCI driver in native mode: devices on the root ports and behind USB 2 hubs (0.6.3) are listed under System Monitor → Hardware → USB; USB keyboards work, also behind a hub (tested in QEMU); USB mice since 0.6.5. USB-C docks show up by name (USB billboard class). |
 | External display | 0.6.4: a monitor on a USB-C dock (DisplayPort Alt Mode, HDMI behind the dock's converter): **works** (detected and mirrored on the tablet). 0.6.5: desk mode - the shell moves to the monitor and the tablet becomes its touchpad and keyboard; see [External display](#external-display-064) |
 | Mouse | 0.6.5: USB mice, also wireless receivers and keyboard-and-mouse combos (HID report descriptors; buttons, wheel, absolute pointers); a cursor on whichever screen the shell is on |
-| Bluetooth | 0.6.2: the Intel 8260's Bluetooth (USB 8087:0a2b, root port 4): firmware download as Linux's btusb/btintel do it, then scanning for classic and LE devices in the **Bluetooth** app (works on the tablet: it finds devices); no pairing yet |
+| Bluetooth | 0.6.2: the Intel 8260's Bluetooth (USB 8087:0a2b, root port 4): firmware download as Linux's btusb/btintel do it, then scanning for classic and LE devices in the **Bluetooth** app (works on the tablet: it finds devices). 0.9.2: pairing (Secure Simple Pairing, link keys kept) and **A2DP audio** to headphones and speakers - tested against a simulated headset, **new on hardware** |
 | Camera, sensors, battery | no drivers yet (they need ACPI/PMIC support first; see docs/drivers.md) |
 | USB keyboard | both modes (native: QRT's xHCI driver, 0.6.1) |
 
@@ -615,9 +650,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.9.1.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.9.2.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.9.1.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.9.2.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.
