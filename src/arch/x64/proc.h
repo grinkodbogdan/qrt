@@ -17,7 +17,7 @@ struct upipe;
 
 /* Kernel objects behind descriptors and mappings, shared by every process that
  * holds one (dup, fork, SCM_RIGHTS): reference counted, freed by kobj_put. */
-enum { KO_SHM = 1, KO_EVENTFD, KO_TIMERFD, KO_SIGNALFD, KO_EPOLL, KO_UNIX };
+enum { KO_SHM = 1, KO_EVENTFD, KO_TIMERFD, KO_SIGNALFD, KO_EPOLL, KO_UNIX, KO_DSP };
 typedef struct kobj { int kind; volatile int refs; } kobj_t;
 void kobj_get(kobj_t *o);
 void kobj_put(kobj_t *o);

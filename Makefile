@@ -13,9 +13,9 @@ LINK    := lld-link
 PYTHON  ?= python3
 HOSTCC  ?= gcc
 
-SRC := src/kernel/kernel.c src/kernel/time.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
+SRC := src/kernel/kernel.c src/kernel/time.c src/kernel/sound.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
        src/kernel/acpi.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c src/drivers/backlight.c src/drivers/audio.c src/drivers/e1000.c \
-       src/drivers/iwm/iwm.c src/drivers/i915/gpu.c src/drivers/i915/display.c src/drivers/usb/xhci.c src/drivers/bt/hci.c src/drivers/bt/btusb.c src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
+       src/drivers/iwm/iwm.c src/drivers/i915/gpu.c src/drivers/i915/display.c src/drivers/usb/xhci.c src/drivers/usb/uaudio.c src/drivers/bt/hci.c src/drivers/bt/btusb.c src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
        src/ui/gfx.c src/ui/shell.c src/ui/clientwin.c src/ui/fontdata.c \
        src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c \
        src/apps/settings.c src/apps/life.c src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/apps/browser.c src/apps/bluetooth.c src/apps/html.c src/ui/osk.c \
@@ -88,7 +88,7 @@ LADYBIRD += $(if $(wildcard build/ladybird/bin/Ladybird),build/rootfs/bin/ladybi
             build/rootfs/etc/ssl/certs/ca-certificates.crt)
 FONT_DIRS := /usr/share/fonts/truetype/liberation /usr/share/fonts/truetype/dejavu
 ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
-          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/hello-window build/rootfs/bin/cxx-test $(RUST_HELLO) $(LADYBIRD) build/rootfs/lib64/ld-linux-x86-64.so.2
+          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/play build/rootfs/bin/hello-window build/rootfs/bin/cxx-test $(RUST_HELLO) $(LADYBIRD) build/rootfs/lib64/ld-linux-x86-64.so.2
 
 # Dynamically linked programs and the host's glibc / libstdc++ they run with
 # (ld.so in /lib64, the libraries in /lib/x86_64-linux-gnu, as on Debian/Ubuntu)
@@ -195,6 +195,10 @@ build/rootfs/bin/native-test: sdk/examples/native-test.c build/sdk/.stamp
 	@mkdir -p $(dir $@)
 	$(QRT_CC) -O2 -s -o $@ $<
 
+build/rootfs/bin/play: sdk/examples/play.c build/sdk/.stamp
+	@mkdir -p $(dir $@)
+	$(QRT_CC) -O2 -s -o $@ $< -lm
+
 build/rootfs/bin/hello-window: sdk/examples/hello-window.c build/sdk/.stamp
 	@mkdir -p $(dir $@)
 	$(QRT_CC) -O2 -s -o $@ $< -lqrt
@@ -249,6 +253,7 @@ check:
 	$(HOSTCC) -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -O1 -fshort-wchar -o build/test_display tests/test_display.c -lm && build/test_display
 	$(HOSTCC) -Wall -Wextra -O1 -o build/test_mouse tests/test_mouse.c && build/test_mouse
 	$(HOSTCC) -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -O1 -fshort-wchar -o build/test_bt tests/test_bt.c && build/test_bt
+	$(HOSTCC) -Wall -Wextra -O1 -o build/test_sound tests/test_sound.c -lm && build/test_sound
 
 # TLS 1.3 client against a local OpenSSL server (needs openssl and python3)
 check-tls:

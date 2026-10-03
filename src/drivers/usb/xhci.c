@@ -23,6 +23,7 @@
 #include "xhci.h"
 #include "usb.h"
 #include "../bt/bt.h"
+#include "uaudio.h"
 #include "../hidmouse.h"
 
 #if defined(__x86_64__)
@@ -38,6 +39,7 @@ typedef struct { trb_t *trb; u32 n, idx, cycle; } ring_t;
 #define T_SETUP         2
 #define T_DATA          3
 #define T_STATUS        4
+#define T_ISOCH         5
 #define T_LINK          6
 #define T_ENABLE_SLOT   9
 #define T_DISABLE_SLOT  10
@@ -54,6 +56,7 @@ typedef struct { trb_t *trb; u32 n, idx, cycle; } ring_t;
 #define TRB_IOC         (1u << 5)
 #define TRB_IDT         (1u << 6)
 #define TRB_DIR_IN      (1u << 16)
+#define TRB_SIA         (1u << 31)         /* isoch: start as soon as possible */
 #define CC_SUCCESS      1
 #define CC_SHORT        13
 
@@ -100,6 +103,12 @@ typedef struct {
     usb_in_cb cb;
     void *arg;
     volatile int done, cc, residue;
+    /* isochronous OUT: a ring of packets the class driver keeps filled */
+    int iso, iso_slot, iso_n;              /* bytes per packet buffer, packets in the ring */
+    u8 *iso_buf;
+    volatile u32 iso_queued, iso_done;     /* packets pushed / completed (free-running) */
+    usb_iso_fill fill;
+    u32 iso_errs;
 } uep_t;
 
 typedef struct { u8 addr, attr, iface; u16 mps; u8 ival; } epdesc_t;
@@ -118,6 +127,9 @@ struct udev {
     ring_t ep0;
     u8 *buf;                               /* DMA page for control data */
     u16 vid, pid, mps0;
+    u8 iproduct;
+    u8 *cfgdesc;                           /* the whole configuration descriptor, for class drivers */
+    int cfglen;
     u8 dclass, iclass, isub, iproto;
     char what[48];
     int max_dci;
@@ -239,6 +251,9 @@ static void events_locked(void) {
                 if ((cc == CC_SUCCESS || cc == CC_SHORT) && ep->cb && len > 0) ep->cb(ep->arg, ep->buf, len);
                 if (cc == CC_SUCCESS || cc == CC_SHORT) ep_queue(d, ep);
                 else klog("usb: port %d endpoint %u stopped (cc %u)", d->port, dci, cc);
+            } else if (ep && ep->iso) {
+                ep->iso_done++;
+                if (cc != CC_SUCCESS && cc != CC_SHORT) ep->iso_errs++;      /* missed service, underrun: the next packet starts afresh */
             } else if (ep) { ep->cc = (int)cc; ep->residue = (int)(e->status & 0xffffff); ep->done = 1; }
         } else if (type == E_PORT_CHANGE) {
             u32 port = (u32)(e->ptr >> 24) & 0xff;
@@ -386,6 +401,106 @@ int usb_find_ep(udev_t *d, int iface, int type, int in) {
     return 0;
 }
 
+/* ---- interfaces, strings, the configuration ---------------------------------------------- */
+int usb_set_interface(udev_t *d, int iface, int alt) { return usb_control(d, 0x01, 11, (u16)alt, (u16)iface, NULL, 0); }   /* SET_INTERFACE */
+
+const u8 *usb_config(udev_t *d, int *len) { *len = d->cfglen; return d->cfgdesc; }
+
+int usb_string(udev_t *d, int index, char *out, int cap) {
+    u8 b[128];
+    out[0] = 0;
+    if (!index || control(d, 0x80, 6, (u16)(0x0300 | index), 0x0409, b, 2) || b[0] < 2) return -1;
+    int n = MIN(b[0], (int)sizeof b);
+    if (control(d, 0x80, 6, (u16)(0x0300 | index), 0x0409, b, (u16)n)) return -1;
+    int o = 0;
+    for (int i = 2; i + 1 < n && o < cap - 1; i += 2) out[o++] = b[i + 1] || b[i] > 126 || b[i] < 32 ? '?' : (char)b[i];   /* UTF-16 -> ASCII */
+    out[o] = 0;
+    return o;
+}
+int usb_product_string(udev_t *d, char *out, int cap) { return usb_string(d, d->iproduct, out, cap); }
+int usb_speed(udev_t *d) { return d->speed; }
+
+/* ---- isochronous OUT (USB audio) -----------------------------------------------------------
+ * The class driver gives the endpoint's packet size and interval (from the alternate
+ * setting it chose) and a fill callback; usb_iso_pump() keeps 'ahead' packets queued,
+ * each an Isoch TRB that starts as soon as possible after the one before it.  Called
+ * from the sound thread every few milliseconds; completions are counted by the event loop. */
+int usb_iso_open(udev_t *d, u8 addr, int mps, int binterval, usb_iso_fill fill, void *arg) {
+    if (!d || !d->used || (addr & 0x80)) return -1;
+    uep_t *e = NULL;
+    for (int i = 0; i < MAX_EP; i++) if (d->ep[i].open && d->ep[i].dci == (addr & 15) * 2) e = &d->ep[i];   /* re-open after SET_INTERFACE */
+    if (!e) for (int i = 0; i < MAX_EP; i++) if (!d->ep[i].open) { e = &d->ep[i]; break; }
+    if (!e) return -1;
+    ring_t keep = e->ring;
+    u8 *buf = e->buf, *ib = e->iso_buf;
+    memset(e, 0, sizeof *e);
+    e->ring = keep; e->buf = buf;
+    if (!ring_reset(&e->ring)) return -1;
+    int base = mps & 0x7ff, extra = (mps >> 11) & 3;                   /* high speed: extra transactions per microframe */
+    e->iso = 1;
+    e->in = 0;
+    e->type = 1;
+    e->mps = base;
+    e->dci = (addr & 15) * 2;
+    e->iso_n = 64;
+    e->iso_slot = base * (extra + 1);
+    e->iso_buf = ib ? ib : hal_dma_alloc(64 * 3072);                   /* up to 3 x 1024 bytes a packet */
+    if (!e->iso_buf) return -1;
+    e->fill = fill;
+    e->arg = arg;
+    /* the interval as 2^n x 125 us: full speed counts frames (1 ms), high speed microframes */
+    int bi = CLAMP(binterval, 1, 16);
+    int ival = d->speed == SPEED_FULL || d->speed == SPEED_LOW ? bi - 1 + 3 : bi - 1;
+    if (e->dci > d->max_dci) d->max_dci = e->dci;
+    memset(d->in, 0, 4096);
+    ictx(d, 0)[0] = 1u << e->dci;                                      /* drop it first (re-open), then add */
+    ictx(d, 0)[1] = 1u | (1u << e->dci);
+    slot_ctx(d, d->max_dci);
+    u32 *c = ictx(d, 1 + e->dci);
+    c[0] = (u32)ival << 16 | (u32)(e->iso_slot >> 16) << 24;           /* Max ESIT payload (hi) */
+    c[1] = (1u << 3) | ((u32)base << 16) | ((u32)extra << 8);          /* type 1: isoch OUT, CErr 0, MaxBurst */
+    c[2] = (u32)phys(e->ring.trb) | 1;
+    c[3] = (u32)(phys(e->ring.trb) >> 32);
+    c[4] = (u32)e->iso_slot | ((u32)e->iso_slot << 16);                /* average TRB length, Max ESIT payload */
+    int cc = command(phys(d->in), 0, TRB_TYPE(T_CONFIG_EP) | ((u32)d->slot << 24), NULL);
+    if (cc != CC_SUCCESS) {
+        ictx(d, 0)[0] = 0;                                             /* nothing to drop the first time */
+        cc = command(phys(d->in), 0, TRB_TYPE(T_CONFIG_EP) | ((u32)d->slot << 24), NULL);
+    }
+    if (cc != CC_SUCCESS) { klog("usb: port %d: isochronous endpoint %02x not configured (cc %d)", d->port, addr, cc); return -1; }
+    e->open = 1;
+    return 0;
+}
+
+/* queue packets until 'ahead' are outstanding; returns how many are in flight */
+int usb_iso_pump(udev_t *d, u8 addr, int ahead) {
+    if (!d || !d->used) return -1;
+    usb_poll();                                                        /* count completions */
+    uep_t *e = NULL;
+    for (int i = 0; i < MAX_EP; i++) if (d->ep[i].open && d->ep[i].iso && d->ep[i].dci == (addr & 15) * 2) e = &d->ep[i];
+    if (!e) return -1;
+    ahead = MIN(ahead, e->iso_n - 2);
+    int pushed = 0;
+    LOCK();
+    while ((int)(e->iso_queued - e->iso_done) < ahead) {
+        u8 *b = e->iso_buf + (usize)(e->iso_queued % (u32)e->iso_n) * 3072;
+        int n = e->fill(e->arg, b, e->iso_slot);
+        if (n < 0) break;
+        ring_push(&e->ring, phys(b), (u32)n, TRB_TYPE(T_ISOCH) | TRB_IOC | TRB_SIA);
+        e->iso_queued++;
+        pushed++;
+    }
+    if (pushed) x.db[d->slot] = (u32)e->dci;
+    int inflight = (int)(e->iso_queued - e->iso_done);
+    UNLOCK();
+    return inflight;
+}
+
+u32 usb_iso_errors(udev_t *d, u8 addr) {
+    for (int i = 0; i < MAX_EP; i++) if (d->ep[i].open && d->ep[i].iso && d->ep[i].dci == (addr & 15) * 2) return d->ep[i].iso_errs;
+    return 0;
+}
+
 u16 usb_vid(udev_t *d) { return d->vid; }
 u16 usb_pid(udev_t *d) { return d->pid; }
 const char *usb_name(udev_t *d) { return d->what; }
@@ -507,6 +622,7 @@ static void port_reset(int p) {
 }
 
 static void free_dev(udev_t *d) {
+    uaudio_detach(d);                                                  /* class drivers let go first */
     if (d->slot) command(0, 0, TRB_TYPE(T_DISABLE_SLOT) | ((u32)d->slot << 24), NULL);
     if (d->slot >= 0 && d->slot <= x.slots) x.dcbaa[d->slot] = 0;
     d->used = 0;                                                       /* its DMA pages are kept for reuse */
@@ -527,7 +643,8 @@ static void enumerate(int root, int speed, udev_t *parent, int pport) {
     d->in = keep.in ? keep.in : hal_dma_alloc(4096);
     d->buf = keep.buf ? keep.buf : hal_dma_alloc(4096);
     d->ep0 = keep.ep0;
-    for (int i = 0; i < MAX_EP; i++) { d->ep[i].ring = keep.ep[i].ring; d->ep[i].buf = keep.ep[i].buf; }
+    for (int i = 0; i < MAX_EP; i++) { d->ep[i].ring = keep.ep[i].ring; d->ep[i].buf = keep.ep[i].buf; d->ep[i].iso_buf = keep.ep[i].iso_buf; }
+    if (keep.cfgdesc) kfree(keep.cfgdesc);
     if (!d->out || !d->in || !d->buf || !ring_reset(&d->ep0)) return;
     memset(d->out, 0, 4096);
     d->port = root;
@@ -568,11 +685,16 @@ static void enumerate(int root, int speed, udev_t *parent, int pport) {
     d->vid = (u16)(desc[8] | desc[9] << 8);
     d->pid = (u16)(desc[10] | desc[11] << 8);
     d->dclass = desc[4];
+    d->iproduct = desc[15];
     /* the first configuration: interfaces and endpoints */
-    u8 cfg[256];
+    static u8 cfg[1024];
     if (control(d, 0x80, 6, 0x0200, 0, cfg, 9)) { free_dev(d); return; }
     u16 total = (u16)MIN(cfg[2] | cfg[3] << 8, (int)sizeof cfg);
     if (control(d, 0x80, 6, 0x0200, 0, cfg, total)) { free_dev(d); return; }
+    if (d->cfgdesc) kfree(d->cfgdesc);
+    d->cfgdesc = kalloc(total);
+    memcpy(d->cfgdesc, cfg, total);
+    d->cfglen = total;
     int kbd_if = -1, kbd_ep = 0, cur_if = -1, cur_alt = 0, cur_cls = 0, cur_sub = 0, cur_proto = 0;
     typedef struct { int iface, ep, rlen, boot; } hidif_t;
     hidif_t hid[4];                                                    /* other HID interfaces: mice? */
@@ -616,6 +738,8 @@ static void enumerate(int root, int speed, udev_t *parent, int pport) {
     for (int i = 0; i < nhid && !d->mouse; i++) mouse_setup(d, hid[i].iface, hid[i].ep, hid[i].rlen, hid[i].boot);
     if (d->mouse && !d->kbd && !strcmp(d->what, "HID")) strlcpy(d->what, d->hm.x.rel || d->hm.boot ? "USB mouse" : "USB pointer (tablet)", sizeof d->what);
     if (kbd_if >= 0 || d->mouse) return;
+    /* USB audio: an Audio Control interface (class 1, subclass 1) somewhere in the configuration */
+    if (uaudio_probe(d)) return;
     /* Bluetooth: the wireless-controller class (e0/01/01), as Linux's btusb matches it */
     if (d->dclass == 0xe0 || (d->iclass == 0xe0 && d->isub == 1 && d->iproto == 1)) bt_usb_attach(d);
 }

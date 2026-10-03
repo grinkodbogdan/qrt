@@ -15,7 +15,7 @@
 #include "../../net/crypto.h"
 #include "mm.h"
 
-enum { EPERM = 1, ENOENT = 2, EINTR = 4, EBADF = 9, ECHILD = 10, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EEXIST = 17,
+enum { EPERM = 1, ENOENT = 2, EINTR = 4, EBADF = 9, ECHILD = 10, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EBUSY = 16, EEXIST = 17,
        ENOTDIR = 20, EISDIR = 21, EINVAL = 22, EMFILE = 24, ENOTTY = 25, ESPIPE = 29, ERANGE = 34,
        ENOSYS = 38, ENOTEMPTY = 39, ETIMEDOUT = 110 };
 
@@ -110,6 +110,11 @@ static i64 do_open(proc_t *p, int dirfd, u64 upath, int flags) {
         int fd = alloc_fd(p, 0);
         if (fd >= 0) { p->fd[fd] = (ufile_t){ F_NULL }; p->fd[fd].flags = path[5] == 'z' ? DEV_ZERO : DEV_RANDOM; }
         return fd;
+    }
+    if (!strcmp(path, "/dev/dsp") || !strcmp(path, "/dev/audio")) {          /* OSS sound (lfile.c) */
+        kobj_t *o = dsp_new();
+        if (!o) return -EBUSY;
+        return (int)fd_install_obj(p, o, flags);
     }
     if (!strcmp(path, "/dev/kmsg")) { int fd = alloc_fd(p, 0); if (fd >= 0) { p->fd[fd] = (ufile_t){ F_TTY }; p->fd[fd].flags = KMSG; } return fd; }
     abs_path(p, dirfd, path, full, sizeof full);
@@ -431,7 +436,7 @@ static i64 do_stat_path(proc_t *p, int dirfd, u64 upath, u64 ust, int flags) {
         fill_stat(st, p->fd[dirfd].vn, p->fd[dirfd].type == F_TTY);
         return 0;
     }
-    if (!strcmp(path, "/dev/null")) { fill_stat(st, NULL, 0); return 0; }
+    if (!strcmp(path, "/dev/null") || !strcmp(path, "/dev/dsp") || !strcmp(path, "/dev/audio")) { fill_stat(st, NULL, 0); return 0; }
     abs_path(p, dirfd, path, full, sizeof full);
     vnode_t *n = vfs_lookup(full);
     if (!n) return -ENOENT;
@@ -1069,6 +1074,7 @@ void syscall_dispatch(frame_t *f) {
             if (a1 == 0x541b && UOK(a2, 4)) { *(i32 *)(usize)a2 = is_unix(p, a0) ? (i32)unix_available(&p->fd[a0]) : 0; r = 0; }
             else if (a1 == 0x5421 && UOK(a2, 4)) { p->fd[a0].flags = (p->fd[a0].flags & ~04000) | (*(i32 *)(usize)a2 ? 04000 : 0); r = 0; }
             else if (a1 == 0x5451 || a1 == 0x5450) { p->fd[a0].cloexec = a1 == 0x5451; r = 0; }          /* FIOCLEX, FIONCLEX */
+            else if (p->fd[a0].obj->kind == KO_DSP) r = dsp_ioctl(p, p->fd[a0].obj, a1, a2);
             else r = -ENOTTY;
         } else if ((int)a0 >= 0 && (int)a0 < MAX_FDS && p->fd[a0].type == F_SOCK) {
             if (a1 == 0x541b && UOK(a2, 4)) { *(i32 *)(usize)a2 = (i32)lsock_available(p, (int)a0); r = 0; }      /* FIONREAD */

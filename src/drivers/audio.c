@@ -41,7 +41,7 @@ void audio_probe(void) {
     if (e) { fmt(status, sizeof status, "codec at I2C2 0x1c does not answer (%s)", dwi2c_strerror(e)); klog("audio: %s", status); return; }
     const char *name = dev == 0x6271 ? "Realtek RT5670/RT5672" : dev == 0x6231 ? "Realtek RT5640/RT5639" :
                        dev == 0x6281 ? "Realtek RT5651" : NULL;
-    if (name) fmt(status, sizeof status, "%s codec found (I2C2 0x1c, id %04x, vendor %04x); no sound driver yet", name, dev, vendor);
+    if (name) fmt(status, sizeof status, "%s codec found (I2C2 0x1c, id %04x, vendor %04x); the speaker needs the SST DSP driver, not written yet", name, dev, vendor);
     else fmt(status, sizeof status, "unknown codec at I2C2 0x1c (id %04x, vendor %04x)", dev, vendor);
     klog("audio: %s", status);
 }

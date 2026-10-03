@@ -56,7 +56,7 @@ void shell_go_home(void);
 void shell_set_rotation(int rot);
 void shell_set_dock_edge(int edge);      /* 0 right, 1 left, 2 bottom, 3 top */
 int  shell_dock_edge(void);
-int  shell_volume(void);                 /* mock audio volume 0..100 */
+int  shell_volume(void);                 /* the master volume 0..100 (sound.c) */
 void shell_set_volume(int v);            /* shows the volume indicator */
 int  shell_sleep_after(void);            /* seconds of inactivity before sleep; 0 = never */
 void shell_set_sleep_after(int seconds);

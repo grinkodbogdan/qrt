@@ -9,6 +9,7 @@
  * orientation) and pushed to the panel through GOP.
  */
 #include "shell.h"
+#include "../kernel/sound.h"
 #include "../kernel/smp.h"
 #include "osk.h"
 #include "../net/netstack.h"
@@ -1399,7 +1400,7 @@ static void power_act(int id) {
 }
 static void power_pointer(const event_t *e) { power_act(power_hit(e)); }
 
-/* ---- volume (mock audio: there is no sound driver yet) ---------------------------- */
+/* ---- volume: the sound core's master volume (src/kernel/sound.c) ------------------------ */
 static rect_t osd_rect(void) {
     int w = MIN(ui.W - dp(40), dp(320)), h = dp(60);
     return (rect_t){ (ui.W - w) / 2, STATUS_H + dp(14), w, h };
@@ -1452,7 +1453,7 @@ void shell_set_volume(int v) {
     sh.osd_until = k_now_ms() + 1500;
     sh.osd_shown = 1;
     shell_damage(osd_paint_rect());
-    klog("volume: %d%% (mock audio: no sound driver yet)", sh.volume);
+    snd_set_volume(sh.volume);
 }
 
 /* ---- lock screen and sleep --------------------------------------------------------- */
@@ -2073,11 +2074,13 @@ void shell_main(void) {
     sh.dock_edge = (int)hal_setting_get(u"QrtDockEdge", DOCK_RIGHT) & 3;
     sh.sleep_after = (int)hal_setting_get(u"QrtSleepAfter", 120);
     sh.volume = sh.volume_saved = CLAMP((int)hal_setting_get(u"QrtVolume", 50), 0, 100);
+    snd_set_volume(sh.volume);
     sh.launch_pressed = sh.dock_pressed = -1;
     sh.desk_auto = (int)hal_setting_get(u"QrtDeskAuto", 1) != 0;
     k.graphics_up = 1;
     gpu_autostart();
     display_start();
+    snd_init();                                  /* the mixer's thread (outputs attach as they appear) */
     if (!k.native) k.st->ConOut->EnableCursor(k.st->ConOut, 0);
     relayout();
     sh.mx = ui.W / 2.0f; sh.my = ui.H / 2.0f;

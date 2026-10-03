@@ -1,6 +1,7 @@
 /* Settings: a preferences page in the style of GNOME Settings.  Everything
  * is kept in UEFI NVRAM and survives reboots. */
 #include "../ui/shell.h"
+#include "../kernel/sound.h"
 #include "../drivers/backlight.h"
 #include "../drivers/i915/gpu.h"
 #include "../drivers/i915/display.h"
@@ -39,7 +40,7 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
 typedef struct {
     int x, w;                                   /* the clamped column */
     int y_look, y_power, y_sound, y_time, y_start, y_system, y_about;
-    rect_t accent[N_ACCENTS], rot[4], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], power[3], tz[2];
+    rect_t accent[N_ACCENTS], rot[4], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], power[3], tz[2], test;
     rect_t bright, vol;                         /* slider tracks */
     rect_t g_look, g_power, g_sound, g_time, g_start, g_system, g_about;   /* group boxes */
     int bottom;
@@ -74,8 +75,10 @@ static lay_t layout(rect_t a) {
 
     /* Sound */
     L.y_sound = y; y += title;
-    L.g_sound = (rect_t){ x, y, w, ROW_H };
+    L.g_sound = (rect_t){ x, y, w, 2 * ROW_H };
     L.vol = (rect_t){ x + w / 2, y + ROW_H / 2 - dp(3), w / 2 - pad, dp(6) };
+    int tbw = MIN(dp(110), w / 4);
+    L.test = (rect_t){ x + w - pad - tbw, y + ROW_H + dp(10), tbw, ROW_H - dp(20) };
     y += L.g_sound.h + dp(24);
 
     /* Date & time: the clock, the time zone */
@@ -165,9 +168,12 @@ static void draw(canvas_t *c, rect_t a) {
     for (int i = 0; i < N_SLEEP; i++) segment(c, L.sleep[i], sleep_label[i], sleep_secs[i] == shell_sleep_after(), i == 0, i == N_SLEEP - 1);
     if (bl()) { row_label(c, L.g_power, 2, "Screen brightness", NULL); slider(c, L.bright, backlight_level()); }
 
-    group(c, L.g_sound, L.y_sound, "Sound", 1);
+    group(c, L.g_sound, L.y_sound, "Sound", 2);
     row_label(c, L.g_sound, 0, "Volume", NULL);
     slider(c, L.vol, shell_volume());
+    const char *out = snd_output_name();
+    row_label(c, L.g_sound, 1, "Output", out[0] ? out : "None: plug in USB audio, or pair Bluetooth headphones");
+    ui_button(c, L.test, "Test", RGBA(255, 255, 255, 22), ui.text);
 
     {
         static const char *mon[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
@@ -258,6 +264,7 @@ static int event(const event_t *e, rect_t a) {
     for (int i = 0; i < N_ACCENTS; i++) if (in_rect(grab(L.accent[i]), e->x, e->y)) { shell_set_accent(i); return 1; }
     for (int i = 0; i < 4; i++) if (in_rect(L.rot[i], e->x, e->y)) { shell_set_rotation(i); return 1; }
     for (int i = 0; i < N_SLEEP; i++) if (in_rect(L.sleep[i], e->x, e->y)) { shell_set_sleep_after(sleep_secs[i]); return 1; }
+    if (in_rect(L.test, e->x, e->y)) { snd_beep(); return 1; }
     for (int i = 0; i < 2; i++)
         if (in_rect(L.tz[i], e->x, e->y)) { time_set_zone(time_zone() + (i ? 1800 : -1800)); shell_redraw(); return 1; }
     if (sizeof(void *) == 8)

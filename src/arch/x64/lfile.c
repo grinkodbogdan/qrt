@@ -10,8 +10,9 @@
  */
 #include "lfile.h"
 #include "mm.h"
+#include "../../kernel/sound.h"
 
-enum { EINTR = 4, EBADF = 9, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EEXIST = 17, EINVAL = 22, ENOENT = 2, EPERM = 1, ELOOP = 40 };
+enum { EINTR = 4, EBADF = 9, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EEXIST = 17, EINVAL = 22, ENOTTY = 25, ENOENT = 2, EPERM = 1, ELOOP = 40 };
 #define O_NONBLOCK 04000
 #define UOK(a, n) proc_user_ok(p, (u64)(a), (u64)(n))
 enum { POLLIN = 1, POLLOUT = 4, POLLERR = 8, POLLHUP = 0x10 };
@@ -20,6 +21,7 @@ void kobj_get(kobj_t *o) { u64 fl = irq_save(); o->refs++; irq_restore(fl); }
 
 static void shm_free(kobj_t *o);
 static void epoll_free(kobj_t *o);
+static void dsp_free(kobj_t *o);
 
 void kobj_put(kobj_t *o) {
     if (!o) return;
@@ -31,6 +33,7 @@ void kobj_put(kobj_t *o) {
     case KO_SHM: shm_free(o); break;
     case KO_EPOLL: epoll_free(o); break;
     case KO_UNIX: unix_release(o); break;
+    case KO_DSP: dsp_free(o); break;
     default: kfree(o); break;
     }
 }
@@ -446,6 +449,99 @@ i64 epoll_wait(proc_t *p, kobj_t *o, u64 events, int max, i64 timeout_ms) {
     }
 }
 
+/* ---- /dev/dsp ------------------------------------------------------------------------------------
+ * OSS, the sound interface every Unix player still speaks: open, set the format with
+ * ioctls, write 16-bit PCM.  Each open is a stream of the kernel's mixer; writes block
+ * while the stream's ring is full (about 0.7 s queued), as a sound card's would. */
+typedef struct { kobj_t h; snd_stream_t *s; } dsp_t;
+
+kobj_t *dsp_new(void) {
+    snd_stream_t *s = snd_open();
+    if (!s) return NULL;
+    dsp_t *d = kalloc(sizeof *d);
+    d->h = (kobj_t){ KO_DSP, 1 };
+    d->s = s;
+    return &d->h;
+}
+
+static void dsp_free(kobj_t *o) { snd_close(((dsp_t *)o)->s); kfree(o); }
+
+static i64 dsp_write(proc_t *p, ufile_t *f, dsp_t *d, u64 buf, u64 len) {
+    if (!UOK(buf, len)) return -EFAULT;
+    i64 done = 0;
+    while ((u64)done < len) {
+        int n = snd_write(d->s, (const u8 *)(usize)buf + done, (int)MIN(len - (u64)done, (u64)65536));
+        done += n;
+        if (n > 0) continue;
+        if (done && (f->flags & O_NONBLOCK)) break;
+        if (f->flags & O_NONBLOCK) return -EAGAIN;
+        if (proc_interrupted(p)) return done ? done : -EINTR;
+        if ((u64)(len - (u64)done) < (u64)(2 * snd_channels(d->s))) break;   /* less than a frame left */
+        thread_sleep_ms(5);
+    }
+    return done;
+}
+
+#define AFMT_S16_LE 0x10
+i64 dsp_ioctl(proc_t *p, kobj_t *o, u64 req, u64 arg) {
+    dsp_t *d = (dsp_t *)o;
+    snd_stream_t *s = d->s;
+    i32 *v = (i32 *)(usize)arg;
+    switch ((u32)req) {
+    case 0x5000: snd_reset(s); return 0;                                          /* SNDCTL_DSP_RESET */
+    case 0x5001:                                                                  /* SNDCTL_DSP_SYNC: wait until played */
+        while (snd_queued(s) > 2 * snd_channels(s)) { if (proc_interrupted(p)) return -EINTR; thread_sleep_ms(5); }
+        return 0;
+    case 0x5008: return 0;                                                        /* SNDCTL_DSP_POST */
+    case 0xc0045002:                                                              /* SNDCTL_DSP_SPEED */
+        if (!UOK(arg, 4)) return -EFAULT;
+        snd_config(s, CLAMP(*v, 4000, 192000), snd_channels(s));
+        *v = snd_rate(s);
+        return 0;
+    case 0xc0045003:                                                              /* SNDCTL_DSP_STEREO */
+        if (!UOK(arg, 4)) return -EFAULT;
+        snd_config(s, snd_rate(s), *v ? 2 : 1);
+        *v = snd_channels(s) == 2;
+        return 0;
+    case 0xc0045006:                                                              /* SNDCTL_DSP_CHANNELS */
+        if (!UOK(arg, 4)) return -EFAULT;
+        snd_config(s, snd_rate(s), *v >= 2 ? 2 : 1);
+        *v = snd_channels(s);
+        return 0;
+    case 0xc0045005:                                                              /* SNDCTL_DSP_SETFMT: 16-bit only */
+    case 0x8004500b:                                                              /* SNDCTL_DSP_GETFMTS */
+        if (!UOK(arg, 4)) return -EFAULT;
+        *v = AFMT_S16_LE;
+        return 0;
+    case 0xc004500a: return 0;                                                    /* SNDCTL_DSP_SETFRAGMENT: ours are fixed */
+    case 0x8004500f:                                                              /* SNDCTL_DSP_GETCAPS: trigger-less, realtime */
+        if (!UOK(arg, 4)) return -EFAULT;
+        *v = 0x00000400;
+        return 0;
+    case 0x8010500c: {                                                            /* SNDCTL_DSP_GETOSPACE */
+        if (!UOK(arg, 16)) return -EFAULT;
+        int frag = 4096, space = snd_space(s);
+        v[0] = space / frag; v[1] = SND_RING * 2 * snd_channels(s) / frag; v[2] = frag; v[3] = space;
+        return 0;
+    }
+    case 0x800c5012: {                                                            /* SNDCTL_DSP_GETOPTR: bytes played */
+        if (!UOK(arg, 12)) return -EFAULT;
+        u64 b = snd_played(s);
+        v[0] = (i32)b; v[1] = (i32)(b / 4096); v[2] = (i32)(b % (u64)(SND_RING * 2 * snd_channels(s)));
+        return 0;
+    }
+    case 0x80045017:                                                              /* SNDCTL_DSP_GETODELAY */
+        if (!UOK(arg, 4)) return -EFAULT;
+        *v = snd_queued(s);
+        return 0;
+    case 0x80045018:                                                              /* SNDCTL_DSP_GETTRIGGER */
+    case 0x40045010:                                                              /* SNDCTL_DSP_SETTRIGGER */
+        if (UOK(arg, 4) && req == 0x80045018) *v = 2;                            /* PCM_ENABLE_OUTPUT */
+        return 0;
+    }
+    return -ENOTTY;
+}
+
 /* ---- any object as a descriptor ------------------------------------------------------------------ */
 i64 kobj_read(proc_t *p, ufile_t *f, u64 buf, u64 len) {
     kobj_t *o = f->obj;
@@ -469,6 +565,7 @@ i64 kobj_write(proc_t *p, ufile_t *f, u64 buf, u64 len) {
     switch (o->kind) {
     case KO_EVENTFD: return eventfd_write(p, f, (eventfd_t *)o, buf, len);
     case KO_UNIX: return unix_sendto(p, f, buf, len, 0, 0, 0);
+    case KO_DSP: return dsp_write(p, f, (dsp_t *)o, buf, len);
     case KO_SHM: {
         if (!UOK(buf, len)) return -EFAULT;
         i64 r = shm_rw(o, f->off, (void *)(usize)buf, len, 1);
@@ -488,6 +585,7 @@ int kobj_poll(proc_t *p, ufile_t *f, int events) {
     case KO_EPOLL: return epoll_scan(p, (epoll_t *)o, NULL, 1) ? POLLIN & events : 0;
     case KO_UNIX: return unix_poll(p, f, events);
     case KO_SHM: return events & (POLLIN | POLLOUT);
+    case KO_DSP: return snd_space(((dsp_t *)o)->s) >= 4096 ? events & POLLOUT : 0;
     }
     return 0;
 }

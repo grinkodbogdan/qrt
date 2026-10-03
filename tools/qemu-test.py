@@ -143,7 +143,11 @@ def main():
     for p in (sock, serial, serial + ".sock", os.path.join(ROOT, "build", f"vars-{ARCH}.fd")):
         if os.path.exists(p):
             os.remove(p)
+    wav = os.path.join(ROOT, "build", f"audio-{ARCH}.wav")         # QEMU's USB audio device records here
+    if os.path.exists(wav):
+        os.remove(wav)
     qemu = subprocess.Popen([os.path.join(ROOT, "tools", "run-qemu.sh"), ARCH,
+                             "-audiodev", f"wav,id=snd0,path={wav}", "-device", "usb-audio,audiodev=snd0,bus=xhci.0,port=3",
                              "-display", "none", "-qmp", f"unix:{sock},server,nowait",
                              "-chardev", f"socket,id=ser0,path={serial}.sock,server=on,wait=off",
                              "-serial", "chardev:ser0"],
@@ -206,7 +210,42 @@ def main():
                 qemu.wait(5)
             except subprocess.TimeoutExpired:
                 qemu.kill()
+    if ok and AUDIO_EXPECTED and "--keep" not in sys.argv:
+        ok = check_audio(wav)
     return 0 if ok else 1
+
+
+AUDIO_EXPECTED = []          # set by native_test: the tone it played
+
+
+def check_audio(wav):
+    """The 1 kHz tone 'play -t' sent through /dev/dsp, the mixer and the USB audio driver,
+    as QEMU's usb-audio device recorded it: its pitch, its length, no dropouts."""
+    import wave, struct
+    try:
+        w = wave.open(wav)
+        n, ch, rate = w.getnframes(), w.getnchannels(), w.getframerate()
+        x = struct.unpack("<%dh" % (n * ch), w.readframes(n))[0::ch]
+    except Exception as e:  # noqa
+        print("FAIL: audio: no recording (%s)" % e)
+        return False
+    loud = [i for i, v in enumerate(x) if abs(v) > 500]
+    if len(loud) < rate // 2:
+        print("FAIL: audio: the tone was not heard (%d loud samples)" % len(loud))
+        return False
+    seg = x[loud[0]:loud[-1]]
+    cross = [i for i in range(1, len(seg)) if seg[i - 1] < 0 <= seg[i]]
+    hz = (len(cross) - 1) * rate / (cross[-1] - cross[0])
+    secs = len(seg) / rate
+    run = gaps = 0
+    for v in seg:
+        run = run + 1 if abs(v) < 30 else 0
+        gaps += run == 6
+    if abs(hz - 1000) > 5 or abs(secs - 1.0) > 0.05 or gaps:
+        print("FAIL: audio: %.1f Hz for %.3f s, %d dropouts (want 1000 Hz, 1 s, none)" % (hz, secs, gaps))
+        return False
+    print("audio: USB audio played the tone: %.1f Hz for %.3f s, no dropouts" % (hz, secs))
+    return True
 
 
 def pad_key(label, s=800 / 680):
@@ -242,6 +281,20 @@ def native_test(q, shots):
     for cmd in progs:
         if not any(f"proc: {cmd} (pid" in l and "exited with 0," in l for l in slog().splitlines()):
             raise RuntimeError(f"native: {cmd} did not exit cleanly\n  " + "\n  ".join(l for l in slog().splitlines() if "native" in l or "rust" in l)[-1200:])
+    # sound: a 1 kHz tone through /dev/dsp to QEMU's USB audio device (checked after QEMU exits)
+    if "sound: output USB audio" in slog():
+        q.keys(*"play -t 1000 1 >/dev/kmsg 2>&1; echo play-exit=$? >/dev/kmsg", settle=0.2)
+        q.keys("ret", settle=1)
+        for _ in range(30):
+            if "play-exit=" in slog():
+                break
+            time.sleep(1)
+        if "play-exit=0" not in slog():
+            raise RuntimeError("native: play did not finish\n  " + "\n  ".join(l for l in slog().splitlines() if "play" in l or "sound" in l)[-800:])
+        AUDIO_EXPECTED.append(1000)
+        progs.append("play (USB audio)")
+    elif ARCH == "x64":
+        raise RuntimeError("native: QEMU's USB audio device did not become the sound output\n  " + "\n  ".join(l for l in slog().splitlines() if "usb" in l or "sound" in l)[-800:])
     if os.path.exists(os.path.join(ROOT, "build", "rootfs", "bin", "js")):
         # Ladybird's JavaScript engine (ports/ladybird/build.sh), its output into the kernel log
         q.keys(*"js /share/tests/js-test.js >/dev/kmsg 2>&1; echo js-exit=$? >/dev/kmsg", settle=0.2)

@@ -32,6 +32,10 @@ i64  timerfd_gettime(proc_t *p, kobj_t *o, u64 cur);
 kobj_t *signalfd_new(u64 mask);
 void signalfd_set(kobj_t *o, u64 mask);
 
+/* /dev/dsp: an OSS-style sound stream (src/kernel/sound.c) */
+kobj_t *dsp_new(void);                                     /* NULL: every stream is in use */
+i64  dsp_ioctl(proc_t *p, kobj_t *o, u64 req, u64 arg);
+
 /* epoll */
 kobj_t *epoll_new(void);
 i64  epoll_ctl(proc_t *p, kobj_t *ep, int op, int fd, u64 ev);

@@ -1,5 +1,6 @@
 /* System Monitor: resources (CPU, memory, network, tasks), hardware, and the log. */
 #include "../ui/shell.h"
+#include "../kernel/sound.h"
 #include "../drivers/i915/gpu.h"
 #include "../drivers/i915/display.h"
 #include "../drivers/usb/xhci.h"
@@ -167,7 +168,8 @@ static void draw(canvas_t *c, rect_t a) {
             kv(&f, k.vol[i].boot ? "Boot drive" : "Drive", b);
         }
         heading(&f, "Sound");
-        kv(&f, "Codec", audio_status());
+        kv(&f, "Output", snd_status());
+        kv(&f, "Built-in codec", audio_status());
         heading(&f, "Graphics");
         kv(&f, "Acceleration", gpu_status());
         kv(&f, "External display", display_status());
