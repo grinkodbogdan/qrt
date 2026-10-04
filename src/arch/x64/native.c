@@ -23,6 +23,7 @@
 #include "../../ui/gfx.h"
 #include "sched.h"
 #include "proc.h"
+#include "../../acpi/acpidev.h"
 void smp_programs_start(void);
 int native_smp_workers(void);
 
@@ -234,5 +235,6 @@ static void native_main(void *arg) {
     strlcpy(k.boot_note, "Native kernel", sizeof k.boot_note);
     irq_init();                            /* I/O APICs from the MADT, every line masked */
     dev_init();                            /* enumerate PCI/ACPI/platform devices, bind drivers */
+    acpi_start();                          /* PCs: ACPICA - battery, AC, lid, buttons, hotkeys */
     shell_main();
 }

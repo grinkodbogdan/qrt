@@ -32,3 +32,5 @@ const u8 *acpi_table(const char *sig, int index) {
     }
     return NULL;
 }
+
+const u8 *acpi_rsdp(void) { if (!rsdp) acpi_init(); return rsdp; }

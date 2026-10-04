@@ -10,6 +10,7 @@
 #if defined(__x86_64__)
 #include "../arch/x64/sched.h"
 #include "../arch/x64/mm.h"
+#include "../acpi/acpidev.h"
 void native_present(const u32 *src, int stride, int x, int y, int w, int h);
 #endif
 
@@ -263,6 +264,7 @@ int hal_poll(event_t *out, int max) {
     if (k.native) {
         n += buttons_poll(out + n, max - n);
         n += xhci_poll(out + n, max - n);
+        n += acpi_poll(out + n, max - n);
         return n + serial_keys(out + n, max - n);
     }
     n += buttons_poll(out + n, max - n);                 /* firmware mode reads the pads too */

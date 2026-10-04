@@ -6,6 +6,9 @@
 #include "../drivers/usb/xhci.h"
 #include "../drivers/audio.h"
 #include "../drivers/hda.h"
+#if defined(__x86_64__)
+#include "../acpi/acpidev.h"
+#endif
 #include "../kernel/smp.h"
 #include "../kernel/vfs.h"
 #include "../kernel/dev.h"
@@ -163,6 +166,9 @@ static void draw(canvas_t *c, rect_t a) {
         fmt(b, sizeof b, "%u \xc3\x97 %u", k.fb_w, k.fb_h);
         kv(&f, "Display", b);
         kv(&f, "Firmware", k.bios_version[0] ? k.bios_version : k.fw_vendor);
+#if defined(__x86_64__)
+        kv(&f, "ACPI", acpi_status());
+#endif
         for (int i = 0; i < k.n_vol; i++) {
             fmt_bytes(b2, sizeof b2, k.vol[i].size);
             fmt(b, sizeof b, "%s, %s", k.vol[i].label[0] ? k.vol[i].label : "Volume", b2);

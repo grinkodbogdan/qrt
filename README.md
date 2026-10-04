@@ -189,6 +189,28 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.13.0: ACPI on PCs (battery, AC, lid, buttons, hotkeys)
+
+- **ACPICA**, the ACPI interpreter Linux uses (Intel's, BSD licence, unchanged in
+  `src/acpi/acpica` apart from one line in `acenv.h` choosing QRT's host header), runs
+  the firmware's AML on PCs such as the Panasonic FZ-G1.  `src/acpi/osl.c` is its
+  operating-system layer; `src/acpi/acpidev.c` does what Linux's ACPI drivers do:
+  - the **embedded controller** (drivers/acpi/ec.c): its address space for the AML, and
+    its events (each query runs the matching `_Qxx` method);
+  - **battery** (drivers/acpi/battery.c: `_BIX`/`_BIF`, `_BST`, milliwatts converted),
+    **AC adapter** (`_PSR`), **lid** (`_LID`): the top bar and System app show them, and
+    closing the lid puts QRT to sleep as on the Venue;
+  - the **power and sleep buttons** (fixed event or button devices);
+  - **Panasonic hotkeys** (drivers/platform/x86/panasonic-laptop.c: `HINF` after a
+    Notify): volume and brightness keys; the ACPI video brightness keys;
+  - every Notify goes to the kernel log with its device, so a button QRT does not
+    handle yet can be reported from System -> Log.
+  It runs in its own kernel thread, polling the SCI handler every 20 ms; the Venue keeps
+  its own drivers.  `QrtAcpi = 0` (NVRAM) turns it off.
+- Tested in QEMU: ACPICA loads QEMU's tables in 0.3 s, QEMU's ACPI power button locks
+  the screen, and a test SSDT's battery (milliwatt units), AC adapter, lid and
+  Panasonic HKEY device are found; the battery shows 75 % in the top bar.
+
 ## 0.12.1: FZ-G1 sound and touch
 
 - **Sound on the FZ-G1** (Realtek ALC269 codec): the codec setup Linux's patch_realtek

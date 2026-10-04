@@ -37,7 +37,12 @@ X64_SRC := src/arch/x64/mm.c src/arch/x64/cpu.c src/arch/x64/apic.c src/arch/x64
 X64_ASM := src/arch/x64/isr.S src/arch/x64/entry.S src/arch/x64/trampoline.S
 
 IA32_OBJ := $(SRC:src/%.c=build/ia32/%.o)
-X64_OBJ  := $(SRC:src/%.c=build/x64/%.o) $(X64_SRC:src/%.c=build/x64/%.o) $(X64_ASM:src/%.S=build/x64/%.o)
+# ACPICA (Intel's ACPI interpreter, as in Linux) and QRT's ACPI drivers on top of it
+ACPICA_SRC := $(wildcard src/acpi/acpica/*/*.c)
+ACPI_SRC   := src/acpi/osl.c src/acpi/acpidev.c
+ACPI_CFLAGS := -D__QRT__ -Isrc/acpi/acpica/include
+X64_OBJ  := $(SRC:src/%.c=build/x64/%.o) $(X64_SRC:src/%.c=build/x64/%.o) $(X64_ASM:src/%.S=build/x64/%.o) \
+            $(ACPICA_SRC:src/%.c=build/x64/%.o) $(ACPI_SRC:src/%.c=build/x64/%.o)
 
 OVMF_DIR  ?= /usr/share/OVMF
 OVMF32    := $(OVMF_DIR)/OVMF32_CODE_4M.fd
@@ -60,6 +65,14 @@ build/ia32/%.o: src/%.c $(wildcard src/*.h src/*/*.h src/*/*/*.h)
 
 # the clock's floor: a date before this commit means the RTC was reset (time.c)
 build/x64/kernel/time.o: CFLAGS += -DQRT_BUILD_EPOCH=$(shell git log -1 --format=%ct 2>/dev/null || echo 1767225600)ull
+
+build/x64/acpi/acpica/%.o: src/acpi/acpica/%.c $(wildcard src/acpi/acpica/include/*.h src/acpi/acpica/include/*/*.h)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(X64_CFLAGS) $(ACPI_CFLAGS) -w -c $< -o $@
+
+build/x64/acpi/%.o: src/acpi/%.c $(wildcard src/acpi/*.h src/acpi/acpica/include/*.h src/acpi/acpica/include/*/*.h src/*/*.h)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(X64_CFLAGS) $(ACPI_CFLAGS) -c $< -o $@
 
 build/x64/%.o: src/%.c $(wildcard src/*.h src/*/*.h src/*/*/*.h)
 	@mkdir -p $(dir $@)

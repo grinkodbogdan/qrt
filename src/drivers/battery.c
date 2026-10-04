@@ -14,6 +14,9 @@
 #include "battery.h"
 #include "dwi2c.h"
 #include "pci.h"
+#if defined(__x86_64__)
+#include "../acpi/acpidev.h"
+#endif
 
 #define EC_ADDR 0x78
 static dwi2c_t bus;
@@ -91,6 +94,9 @@ void battery_native_resume(void) {
 }
 
 void battery_poll(void) {
+#if defined(__x86_64__)
+    if (!bus.found) { acpi_battery_fill(&bat, status, sizeof status); return; }
+#endif
     if (!bus.found) return;
     u64 now = k_now_ms();
     if (!bat.present && now >= next_bat && tries_left <= 0) return;   /* gave up: no controller */
