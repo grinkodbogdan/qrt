@@ -82,6 +82,8 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
 
     sysinfo_probe();
     hal_probe();
+    install_if_asked();                       /* Settings -> Install QRT: copy QRT to the internal disk, then restart */
+    install_probe();
     if (!k.gop) panic("no Graphics Output Protocol - cannot start the shell");
     if (!hwreport_save()) klog("hwreport: boot volume not writable, skipped");
     hal_settings_prepare();
@@ -129,7 +131,13 @@ static int native_wanted(void) {
     if (!EFI_ERROR(k.st->ConIn->ReadKeyStroke(k.st->ConIn, &key))) return fw_because("a key was held at boot");
     ntouch_probe();
     if (!native_prepare()) return fw_because("the native kernel could not be prepared");
-    if (nt.primary < 0 && !uart_present()) return fw_because("no touchscreen found for the native kernel");
+    /* elsewhere (the Panasonic FZ-G1, PCs) the touchscreen, keyboard and mouse are USB devices,
+     * which the native kernel drives itself through the xHCI controller */
+    int usb_input = 0;
+    if (!k.is_venue)
+        for (int i = 0; i < pci_ndevs; i++)
+            if (pci_devs[i].class_code == 0x0c && pci_devs[i].subclass == 0x03 && pci_devs[i].prog_if == 0x30) usb_input = 1;
+    if (nt.primary < 0 && !uart_present() && !usb_input) return fw_because("no touchscreen found for the native kernel");
     return 1;
 }
 #endif

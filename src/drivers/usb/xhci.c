@@ -25,6 +25,7 @@
 #include "../bt/bt.h"
 #include "uaudio.h"
 #include "../hidmouse.h"
+#include "../hidparse.h"
 
 #if defined(__x86_64__)
 #include "../../arch/x64/mm.h"
@@ -139,6 +140,8 @@ struct udev {
     int kbd;                               /* boot keyboard */
     int mouse;                             /* a pointer: its report layout */
     hidmouse_t hm;
+    i2chid_t *touch;                       /* a touchscreen: its fingers (src/drivers/hidparse.c) */
+    int touch_fingers;
     u8 prev[8];
     volatile int ctl_done, ctl_cc;
 };
@@ -579,12 +582,95 @@ static void mouse_report(void *arg, const u8 *r, int len) {
     if (x.nkeys < (int)ARRAY_LEN(x.keys)) x.keys[x.nkeys++] = e;
 }
 
+/* ---- touchscreens (Digitizer page, Windows-style multi-touch) --------------------------------------
+ * The same finger tracking as the I2C touchscreen (hidparse.c): taps, drags, two-finger gestures. */
+static void touch_report(void *arg, const u8 *r, int len) {
+    udev_t *d = arg;
+    i2chid_t *h = d->touch;
+    if (h->uses_ids && len && r[0] != h->touch_report) {      /* not finger data: a mouse-mode report */
+        if (d->mouse) mouse_report(arg, r, len);
+        return;
+    }
+    if (!hid_touch_update(h, r, len)) return;
+    int ax = h->x, ay = h->y;
+    if (k.touch_map & TOUCH_SWAP_XY) { int t = ax; ax = ay; ay = t; }
+    int px = (int)((i64)ax * (k.fb_w - 1) / 65535), py = (int)((i64)ay * (k.fb_h - 1) / 65535);
+    if (k.touch_map & TOUCH_FLIP_X) px = (int)k.fb_w - 1 - px;
+    if (k.touch_map & TOUCH_FLIP_Y) py = (int)k.fb_h - 1 - py;
+    int f = h->fingers ? h->fingers : 1;
+    int type = !h->down ? EV_UP : d->touch_fingers ? EV_MOVE : EV_DOWN;
+    event_t e = { .type = type, .x = px, .y = py, .fingers = h->down ? f : 0 };
+    d->touch_fingers = h->down ? f : 0;
+    if (type == EV_MOVE && x.nkeys) {                          /* moves between two polls: the latest */
+        event_t *l = &x.keys[x.nkeys - 1];
+        if (l->type == EV_MOVE && l->fingers == e.fingers) { *l = e; return; }
+    }
+    if (x.nkeys < (int)ARRAY_LEN(x.keys)) x.keys[x.nkeys++] = e;
+}
+
+/* Windows touchscreens start as a mouse until told otherwise: the Device Configuration
+ * collection's Input Mode feature (Digitizer 0x52) set to 2, multi-touch (Microsoft's
+ * "Get/Set Input Mode"; Linux hid-multitouch does the same) */
+static void touch_input_mode(udev_t *d, int iface, const u8 *rd, int len) {
+    u32 page = 0, rsize = 0, rcount = 0;
+    u8 rid = 0, mode_id = 0;
+    u16 off[256], mode_off = 0xffff, mode_bits = 0;
+    u32 usages[8]; int nu = 0;
+    memset(off, 0, sizeof off);
+    for (int i = 0; i < len;) {
+        u8 b = rd[i++];
+        if (b == 0xfe) { if (i + 1 >= len) break; i += 2 + rd[i]; continue; }
+        int size = (b & 3) == 3 ? 4 : (b & 3), type = (b >> 2) & 3, tag = b >> 4;
+        if (i + size > len) break;
+        u32 v = 0;
+        for (int j = 0; j < size; j++) v |= (u32)rd[i + j] << (8 * j);
+        i += size;
+        if (type == 1) {
+            if (tag == 0) page = v; else if (tag == 7) rsize = v; else if (tag == 8) rid = (u8)v; else if (tag == 9) rcount = v;
+        } else if (type == 2 && tag == 0 && nu < 8) usages[nu++] = size == 4 ? v : (page << 16) | v;
+        else if (type == 0) {
+            if (tag == 0xb) {                                  /* Feature */
+                for (u32 k2 = 0; k2 < rcount; k2++) {
+                    u32 u = nu ? usages[k2 < (u32)nu ? k2 : (u32)nu - 1] : 0;
+                    if (u == ((0x0du << 16) | 0x52) && mode_off == 0xffff) { mode_id = rid; mode_off = off[rid]; mode_bits = (u16)rsize; }
+                    off[rid] += (u16)rsize;
+                }
+            }
+            if (tag == 8 || tag == 9 || tag == 0xb || tag == 0xa) nu = 0;
+        }
+    }
+    if (mode_off == 0xffff) return;
+    u8 rep[64];
+    int bytes = (off[mode_id] + 7) / 8;
+    if (bytes + 1 > (int)sizeof rep || mode_off / 8 >= bytes) return;
+    memset(rep, 0, sizeof rep);
+    rep[0] = mode_id;
+    rep[1 + mode_off / 8] |= (u8)(2 << (mode_off % 8));        /* Input Mode: 2 = multi-touch */
+    (void)mode_bits;
+    int err = control(d, 0x21, 0x09, (u16)(0x0300 | mode_id), (u16)iface, rep, (u16)(bytes + (mode_id ? 1 : 0)));
+    klog("usb: port %d: touchscreen set to multi-touch mode%s", d->port, err ? " (refused)" : "");
+}
+
 /* a HID interface that may be a pointer: its report descriptor says, else the boot protocol */
 static int mouse_setup(udev_t *d, int iface, int ep, int rdesc_len, int boot_mouse) {
     static u8 rd[1024];
     int ok = 0;
-    if (rdesc_len > 0 && rdesc_len <= (int)sizeof rd && !control(d, 0x81, 6, 0x2200, (u16)iface, rd, (u16)rdesc_len))
+    if (rdesc_len > 0 && rdesc_len <= (int)sizeof rd && !control(d, 0x81, 6, 0x2200, (u16)iface, rd, (u16)rdesc_len)) {
+        /* a touchscreen first: fingers, and its mouse-mode report as a fallback */
+        i2chid_t *h = kalloc(sizeof *h);
+        if (hid_parse_report_desc(h, rd, rdesc_len) && h->nfingers > 0) {
+            d->touch = h;
+            d->mouse = hm_parse(&d->hm, rd, rdesc_len);
+            touch_input_mode(d, iface, rd, rdesc_len);
+            control(d, 0x21, 0x0a, 0, (u16)iface, NULL, 0);            /* SET_IDLE 0 */
+            if (ep_open(d, (u8)ep, touch_report, d)) { d->touch = NULL; kfree(h); return 0; }
+            klog("usb: port %d: touchscreen ready (%d fingers, %d..%d x %d..%d)", d->port, h->nfingers, h->xmin, h->xmax, h->ymin, h->ymax);
+            d->mouse = 1;
+            return 1;
+        }
+        kfree(h);
         ok = hm_parse(&d->hm, rd, rdesc_len);
+    }
     if (!ok && boot_mouse) {
         hm_boot(&d->hm);
         control(d, 0x21, 0x0b, 0, (u16)iface, NULL, 0);                /* SET_PROTOCOL boot */

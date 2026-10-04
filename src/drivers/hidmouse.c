@@ -91,6 +91,16 @@ int hm_parse(hidmouse_t *m, const u8 *d, int len) {
             if (bn + 1 > m->nbuttons) m->nbuttons = bn + 1;
         }
     }
+    /* a touchscreen (Digitizer page): no buttons, but the first finger's Tip Switch says it
+     * touches - the primary button, as Linux's hid-multitouch makes of a single contact */
+    if (!m->nbuttons)
+        for (int i = 0; i < nf; i++)
+            if (fl[i].id == m->report_id && fl[i].usage == USAGE(0x0d, 0x42) && fl[i].f.bits == 1) {
+                m->btn_off[0] = fl[i].f.off;
+                m->nbuttons = 1;
+                m->touch = 1;
+                break;
+            }
     return m->y.present && m->x.bits && m->y.bits;
 }
 

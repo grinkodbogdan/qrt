@@ -19,6 +19,7 @@
 #include "usb/xhci.h"
 #include "audio.h"
 #include "speaker.h"
+#include "hda.h"
 #if defined(__x86_64__)
 #include "../arch/x64/irq.h"
 #endif
@@ -209,6 +210,17 @@ static void iwm_dev_status(device_t *d) { strlcpy(d->status, iwm_status(), sizeo
 static int iwm_dev_probe(device_t *d) { if (!iwm_probe(d->pci)) return DEV_NOT_MINE; iwm_dev_status(d); return 0; }
 static const driver_t drv_iwm = { "iwm (Wi-Fi)", iwm_pci, NULL, NULL, iwm_dev_probe, iwm_dev_status };
 
+/* ---- Intel High Definition Audio (PCs, the Panasonic FZ-G1, QEMU's intel-hda) ----------- */
+static const pci_match_t hda_pci[] = { { PCI_ANY_ID, PCI_ANY_ID, 0x04, 0x03 }, { 0 } };
+static void hda_dev_status(device_t *d) { fmt(d->status, sizeof d->status, "HD Audio: %s", hda_status()); }
+static int hda_dev_probe(device_t *d) {
+    if (!k.native) { strlcpy(d->status, "the firmware's driver (if any) runs it", sizeof d->status); return 0; }
+    hda_probe(d->pci);
+    hda_dev_status(d);
+    return 0;
+}
+static const driver_t drv_hda = { "hda", hda_pci, NULL, NULL, hda_dev_probe, hda_dev_status };
+
 /* ---- Intel e1000/e1000e (QEMU's NIC; used to test the network stack) ------------- */
 static const pci_match_t e1000_pci[] = { { 0x8086, 0x100e, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x100f, PCI_ANY_CLS, PCI_ANY_CLS },
                                          { 0x8086, 0x10d3, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x153a, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
@@ -221,4 +233,4 @@ static int e1000_dev_probe(device_t *d) {
 }
 static const driver_t drv_e1000 = { "e1000", e1000_pci, NULL, NULL, e1000_dev_probe, e1000_dev_status };
 
-const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_battery, &drv_pmic, &drv_ish, &drv_iwm, &drv_e1000, &drv_xhci, &drv_audio, &drv_chipset, NULL };
+const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_battery, &drv_pmic, &drv_ish, &drv_iwm, &drv_e1000, &drv_xhci, &drv_hda, &drv_audio, &drv_chipset, NULL };

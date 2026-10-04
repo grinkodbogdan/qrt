@@ -18,6 +18,7 @@
  * touches a PWM that drives something else.  Native mode only: in firmware
  * mode the GOP driver may own it.
  *
+ * 0.11.0: Intel Core graphics' PWM (the Panasonic FZ-G1; see try_pch).
  * 0.9.5: two more ways, tried in order when that PWM is not running:
  *  - the Crystal Cove PMIC's PWM0 (Linux's pwm-crc.c): BACKLIGHT_EN 0x51,
  *    PWM0_CLK_DIV 0x4B (bit 7 output on), PWM0_DUTY_CYCLE 0x4E (0..255),
@@ -29,13 +30,24 @@
 #include "backlight.h"
 #include "touch.h"
 #include "pmic.h"
+#include "pci.h"
 
 #define GNVS_P10A 376          /* PWM #1 MMIO base (DSDT field offset) */
 #define PWM_ENABLE (1u << 31)
 #define PWM_UPDATE (1u << 30)
 
-enum { BL_NONE, BL_LPSS, BL_PMIC, BL_SOFT };
-static struct { volatile u32 *ctrl; u32 saved; int level, on, mode; } bl;
+enum { BL_NONE, BL_LPSS, BL_PMIC, BL_PCH, BL_SOFT };
+static struct { volatile u32 *ctrl; u32 saved; int level, on, mode; volatile u8 *gfx; u32 max; } bl;
+
+/* Intel Core graphics (Sandy Bridge, Ivy Bridge - the Panasonic FZ-G1 - Haswell), as Linux's
+ * intel_panel.c drives them on a PCH: the period is BLC_PWM_PCH_CTL2's high half, the level
+ * is BLC_PWM_CPU_CTL's low half; taken only if the firmware left both PWMs enabled */
+#define BLC_PWM_CPU_CTL2 0x48250
+#define BLC_PWM_CPU_CTL  0x48254
+#define BLC_PWM_PCH_CTL1 0xc8250
+#define BLC_PWM_PCH_CTL2 0xc8254
+static u32 gfx_r(u32 o) { return *(volatile u32 *)(bl.gfx + o); }
+static void gfx_w(u32 o, u32 v) { *(volatile u32 *)(bl.gfx + o) = v; }
 static u64 save_at;
 
 #define CRC_PWM0_CLK_DIV 0x4b
@@ -44,6 +56,7 @@ static u64 save_at;
 
 static void write_level(int pct) {
     if (bl.mode == BL_PMIC) { pmic_write(CRC_PWM0_DUTY, (u8)((255 * pct + 50) / 100)); return; }
+    if (bl.mode == BL_PCH) { gfx_w(BLC_PWM_CPU_CTL, (gfx_r(BLC_PWM_CPU_CTL) & ~0xffffu) | (bl.max * (u32)pct / 100)); return; }
     if (bl.mode != BL_LPSS) return;
     u32 div = (u32)(255 - (255 * pct + 50) / 100);
     u32 v = (bl.saved & ~0xffu & ~PWM_UPDATE) | PWM_ENABLE | div;
@@ -83,14 +96,31 @@ static int try_pmic(void) {
     return start(BL_PMIC, duty * 100 / 255);
 }
 
+static int try_pch(void) {
+    for (int i = 0; i < pci_ndevs; i++) {
+        const pci_dev_t *p = &pci_devs[i];
+        if (p->vendor != 0x8086 || p->class_code != 0x03 || (p->device & 0xfffc) == 0x22b0) continue;   /* not Cherry Trail */
+        u64 bar = pci_bar(p->bus, p->dev, p->fn, 0);
+        if (!bar || bar >> 32) return 0;
+        bl.gfx = (volatile u8 *)(usize)bar;
+        u32 c2 = gfx_r(BLC_PWM_CPU_CTL2), p1 = gfx_r(BLC_PWM_PCH_CTL1), p2 = gfx_r(BLC_PWM_PCH_CTL2), lv = gfx_r(BLC_PWM_CPU_CTL);
+        klog("backlight: Intel graphics %04x: CPU PWM %08x, PCH PWM %08x/%08x, level %08x", p->device, c2, p1, p2, lv);
+        bl.max = p2 >> 16;
+        if (!bl.max || p2 == 0xffffffffu || !(c2 & (1u << 31)) || !(p1 & (1u << 31))) { klog("backlight: PCH PWM not running; left alone"); bl.gfx = NULL; return 0; }
+        return start(BL_PCH, (int)((lv & 0xffff) * 100 / bl.max));
+    }
+    return 0;
+}
+
 int backlight_init(void) {
     if (bl.mode) return bl.mode != BL_SOFT;
     if (k.native && k.is_venue && (try_lpss() || try_pmic())) return 1;
+    if (k.native && !k.is_venue && try_pch()) return 1;
     start(BL_SOFT, 100);                     /* the slider still works: the shell dims the picture */
     return 0;
 }
 
-int backlight_available(void) { return bl.mode == BL_LPSS || bl.mode == BL_PMIC; }
+int backlight_available(void) { return bl.mode == BL_LPSS || bl.mode == BL_PMIC || bl.mode == BL_PCH; }
 int backlight_level(void) { if (!bl.mode) backlight_init(); return bl.level; }
 
 /* software dimming: how dark a veil the shell lays over the picture (0 = none) */
@@ -111,7 +141,7 @@ void backlight_tick(void) {
 }
 
 const char *backlight_method(void) {
-    return bl.mode == BL_LPSS ? "Backlight PWM" : bl.mode == BL_PMIC ? "Power chip PWM" : "Dimmed in software (no backlight control found)";
+    return bl.mode == BL_LPSS ? "Backlight PWM" : bl.mode == BL_PMIC ? "Power chip PWM" : bl.mode == BL_PCH ? "Graphics PWM" : "Dimmed in software (no backlight control found)";
 }
 
 void backlight_power(int on) {
@@ -119,6 +149,7 @@ void backlight_power(int on) {
     bl.on = on;
     if (on) write_level(bl.level);
     else if (bl.mode == BL_PMIC) pmic_write(CRC_PWM0_DUTY, 0);
+    else if (bl.mode == BL_PCH) write_level(0);
     else { write_level(0); *bl.ctrl = (*bl.ctrl & ~PWM_ENABLE) | PWM_UPDATE; }
 }
 
@@ -126,6 +157,7 @@ void backlight_status(char *buf, usize cap) {
     switch (bl.mode) {
     case BL_LPSS: fmt(buf, cap, "LPSS PWM #1: %s, %d%% (control %08x)", bl.on ? "on" : "off (sleeping)", bl.level, *bl.ctrl); break;
     case BL_PMIC: fmt(buf, cap, "Crystal Cove PMIC PWM0: %s, %d%%", bl.on ? "on" : "off (sleeping)", bl.level); break;
+    case BL_PCH: fmt(buf, cap, "Intel graphics PWM: %s, %d%% (of %u)", bl.on ? "on" : "off (sleeping)", bl.level, bl.max); break;
     default: fmt(buf, cap, "no backlight control found (%s); dimmed in software, %d%%", k.native ? "PWM #1 and the PMIC's PWM are off" : "firmware mode", bl.level); break;
     }
 }

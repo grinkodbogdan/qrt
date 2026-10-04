@@ -147,7 +147,7 @@ def main():
     if os.path.exists(wav):
         os.remove(wav)
     qemu = subprocess.Popen([os.path.join(ROOT, "tools", "run-qemu.sh"), ARCH,
-                             "-audiodev", f"wav,id=snd0,path={wav}", "-device", "usb-audio,audiodev=snd0,bus=xhci.0,port=3",
+                             *([] if os.environ.get("QRT_NO_USB_AUDIO") else ["-audiodev", f"wav,id=snd0,path={wav}", "-device", "usb-audio,audiodev=snd0,bus=xhci.0,port=3"]),
                              "-display", "none", "-qmp", f"unix:{sock},server,nowait",
                              "-chardev", f"socket,id=ser0,path={serial}.sock,server=on,wait=off",
                              "-serial", "chardev:ser0"],

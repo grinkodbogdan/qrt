@@ -12,7 +12,7 @@
 #pragma once
 #include "rt.h"
 
-#define QRT_VERSION "0.10.0"
+#define QRT_VERSION "0.11.0"
 #define QRT_ARCH (sizeof(void *) == 8 ? "x86_64" : "ia32")
 
 #define MAX_ABS 8
@@ -135,6 +135,11 @@ const char *hal_mode(void);          /* "firmware-hosted" or "native" */
 
 /* ---- power / firmware ---- */
 void hal_shutdown(void);
+void power_off(void);                /* power.c */
+void install_if_asked(void);         /* install.c: at boot, when Settings asked for QRT on the internal disk */
+void install_probe(void);            /* at boot: which disk an install would erase */
+u64  install_target_bytes(void);     /* its size (0: nothing to install on) */
+void power_restart(void);
 void hal_reboot(void);
 int  hal_reboot_to_firmware(void);   /* returns 0 if unsupported */
 

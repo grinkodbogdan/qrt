@@ -14,6 +14,7 @@ typedef struct {
     int nbuttons;
     u16 btn_off[8];              /* buttons 1..8 */
     hm_field_t x, y, wheel, pan;
+    int touch;                   /* a touchscreen: button 1 is the first finger's Tip Switch */
 } hidmouse_t;
 
 typedef struct {

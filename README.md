@@ -189,6 +189,44 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.11.0: install, a proper shutdown, the Panasonic FZ-G1
+
+- **Install QRT on the internal disk.**  Settings -> System -> Install QRT on this
+  device -> Install... -> Erase and install.  The row names the disk it will erase
+  (the largest fixed disk that QRT did not start from).  QRT restarts and, while the
+  firmware's disk access still works, copies its GPT disk from the USB stick, writes
+  the partition table for the bigger disk (with new disk and partition GUIDs, so the
+  boot entry cannot point at the stick), adds a "QRT" boot entry first in the boot
+  order, and restarts from the internal disk.  **Everything on that disk, Windows
+  included, is erased.**  (Windows' licence key is in the firmware, not on the disk.)
+  Tested in QEMU with a second, empty disk: the copy, `sgdisk -v` ("No problems
+  found") and the next boot from the new disk through the new entry.
+- **Shutting down and restarting stop everything first**: every program is asked to
+  stop (SIGTERM), what is left after 3 s is stopped; Bluetooth audio and Wi-Fi
+  disconnect; the backlight goes off.  Then, to turn off, ACPI S5 as Linux does (the
+  \\_S5 values from the DSDT, through the PM1 control registers or, on
+  hardware-reduced ACPI machines like the Cherry Trail tablets, the sleep control
+  register), with the firmware's shutdown as the fallback; to restart, the firmware,
+  then the ACPI reset register, then the chipset (0xCF9), then the keyboard controller.
+- **Panasonic Toughpad FZ-G1 mk1** (Core i5 Ivy Bridge, 1920x1200), from its
+  specifications - please report what works:
+  - it boots the native kernel when there is a USB 3 controller (its touchscreen,
+    keyboards and mice are USB devices; the Venue's touchscreen is on I2C);
+  - **USB touchscreens**: multi-touch through the same finger tracking as the Venue's
+    (taps, drags, two-finger gestures), switched from their mouse mode to multi-touch
+    (the Input Mode feature report, as Linux's hid-multitouch does); their mouse-mode
+    reports still work;
+  - **HD Audio**: a new driver for Intel High Definition Audio (most PCs and laptops):
+    codecs found, a path from each speaker, headphone and line-out pin to a DAC,
+    amplifiers on, 48 kHz stereo.  Tested in QEMU (intel-hda): a 1 kHz tone recorded
+    from the codec;
+  - **brightness**: Intel Core graphics' backlight PWM, as Linux drives it;
+  - not yet: its Wi-Fi (Intel 6235 needs another driver than the Venue's 8260), the
+    battery level (ACPI methods), the accelerometer, the GPU (pages are drawn by the
+    CPU, as on the Venue).  If the touchscreen does not answer, hold a key of a USB
+    keyboard while QRT starts for firmware mode.
+- `tools/qemu-test.py`: `QRT_NO_USB_AUDIO=1` leaves QEMU's USB audio out.
+
 ## 0.10.0: every core, and memory that runs out without stopping the tablet
 
 - **Programs run on all four cores again by default.**  On the tablet the browser opened
@@ -809,9 +847,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.10.0.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.11.0.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.10.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.11.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

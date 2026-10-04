@@ -341,8 +341,8 @@ void hal_probe(void) {
 }
 
 /* ---- power ------------------------------------------------------------- */
-void hal_shutdown(void) { k.rt->ResetSystem(EfiResetShutdown, 0, 0, NULL); }
-void hal_reboot(void)   { k.rt->ResetSystem(EfiResetCold, 0, 0, NULL); }
+void hal_shutdown(void) { power_off(); }          /* power.c: programs, devices, then ACPI or the firmware */
+void hal_reboot(void)   { power_restart(); }
 
 int hal_reboot_to_firmware(void) {
     u64 supported = 0, ind = 0;

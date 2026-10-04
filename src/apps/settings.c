@@ -25,7 +25,7 @@ enum { SL_NONE, SL_BRIGHT, SL_VOL };
 static struct {
     tap_t tap;
     scroll_t sc;
-    int confirm;          /* power button waiting for a second tap (1..3) */
+    int confirm;          /* power button waiting for a second tap (1..3; 4: install) */
     int fw_mode;          /* cached QrtBootMode == 1 */
     int gpu_on;           /* cached gpu_enabled() */
     int ext_on;           /* cached display_enabled() */
@@ -49,7 +49,7 @@ typedef struct {
     int x, w;                                   /* the clamped column */
     int y_look, y_power, y_sound, y_time, y_start, y_system, y_about;
     rect_t outsel[5]; int nout; const char *outname[4];
-    rect_t accent[N_ACCENTS], rot[5], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], cores[2], power[3], tz[2], test;
+    rect_t accent[N_ACCENTS], rot[5], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], cores[2], power[3], tz[2], test, install;
     rect_t bright, vol;                         /* slider tracks */
     rect_t g_look, g_power, g_sound, g_time, g_start, g_system, g_about;   /* group boxes */
     int bottom;
@@ -117,9 +117,11 @@ static lay_t layout(rect_t a) {
 
     /* System: restart, shut down, firmware */
     L.y_system = y; y += title;
-    L.g_system = (rect_t){ x, y, w, ROW_H };
+    L.g_system = (rect_t){ x, y, w, 2 * ROW_H };
     int bw = (w - 2 * pad - 2 * dp(10)) / 3;
     for (int i = 0; i < 3; i++) L.power[i] = (rect_t){ x + pad + i * (bw + dp(10)), y + dp(10), bw, ROW_H - dp(20) };
+    int iw = MIN(dp(220), w / 3);
+    L.install = (rect_t){ x + w - pad - iw, y + ROW_H + dp(10), iw, ROW_H - dp(20) };
     y += L.g_system.h + dp(24);
 
     /* About */
@@ -254,7 +256,19 @@ static void draw(canvas_t *c, rect_t a) {
         segment(c, L.cores[1], "All cores", allc, 0, 1);
     }
 
-    group(c, L.g_system, L.y_system, "System", 1);
+    group(c, L.g_system, L.y_system, "System", 2);
+    {
+        /* Install: QRT onto the internal disk, erasing it (install.c, at the next start) */
+        u64 tb = install_target_bytes();
+        char sub[96], size[24];
+        fmt_bytes(size, sizeof size, tb);
+        if (!tb) strlcpy(sub, "No internal disk to install on", sizeof sub);
+        else fmt(sub, sizeof sub, "Erases the internal disk (%s): Windows and every file on it", size);
+        row_label(c, L.g_system, 1, "Install QRT on this device", sub);
+        int armed = st.confirm == 4;
+        ui_button(c, L.install, !tb ? "Unavailable" : armed ? "Erase and install" : "Install...",
+                  tb && armed ? RGB(0xc0, 0x1c, 0x28) : RGBA(255, 255, 255, tb ? 22 : 8), tb ? ui.text : ui.text3);
+    }
     for (int i = 0; i < 3; i++) {
         int armed = st.confirm == i + 1;
         ui_button(c, L.power[i], armed ? "Tap again" : power_label[i],
@@ -340,6 +354,14 @@ static int event(const event_t *e, rect_t a) {
                 return 1;
             }
         }
+    if (in_rect(L.install, e->x, e->y) && install_target_bytes()) {
+        if (st.confirm != 4) { st.confirm = 4; return 1; }
+        st.confirm = 0;
+        klog("settings: install QRT on the internal disk at the next start");
+        hal_setting_set(u"QrtInstall", 1);
+        hal_reboot();
+        return 1;
+    }
     for (int i = 0; i < 3; i++) {
         if (!in_rect(L.power[i], e->x, e->y)) continue;
         if (st.confirm != i + 1) { st.confirm = i + 1; return 1; }
