@@ -14,4 +14,6 @@ int  ivb_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int
 void ivb_display_start(void);
 const char *ivb_display_status(void);
 int  ivb_display_connected(void);
+int  ivb_display_size(int *w, int *h);
+void ivb_display_mirror(const u32 *px, int w, int h, int stride, int x, int y, int rw, int rh);
 const char *ivb_display_monitor(void);

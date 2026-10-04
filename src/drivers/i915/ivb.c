@@ -265,16 +265,17 @@ static void fail(const char *why) {
     if (g.guard) { hal_setting_set(u"QrtGpuGuard", 0); g.guard = 0; }
 }
 
-static void gtt_map(u32 off, u64 phys, usize pages) {
+static void gtt_map_as(u32 off, u64 phys, usize pages, u32 cache) {
     volatile u32 *pte = g.gsm + (off >> 12);
     for (usize i = 0; i < pages; i++) {
         u64 a = phys + i * 4096;
-        pte[i] = (u32)(a | ((a >> 28) & 0xff0)) | GEN6_PTE_CACHE_LLC | GEN6_PTE_VALID;
+        pte[i] = (u32)(a | ((a >> 28) & 0xff0)) | cache | GEN6_PTE_VALID;
     }
     (void)pte[pages - 1];
     wr(GFX_FLSH_CNTL_GEN6, 1);
     (void)rd(GFX_FLSH_CNTL_GEN6);
 }
+static void gtt_map(u32 off, u64 phys, usize pages) { gtt_map_as(off, phys, pages, GEN6_PTE_CACHE_LLC); }
 
 /* intel_uncore.c for Ivy Bridge: the multi-threaded forcewake first (ECOBUS reads 0 while
  * the GT sleeps, so it cannot tell which one the BIOS set up before a wake); then the
@@ -472,6 +473,9 @@ static struct {
     int port;                       /* 0 none; 1 HDMI B, 2 C, 3 D */
     int up, misses;
     hmode_t m;
+    int hdmi_sink;                  /* the EDID has an HDMI vendor block: HDMI mode, AVI infoframe */
+    int desk;                       /* plane B shows the desk buffer (control mode), not the panel */
+    u32 *deskbuf; u32 desk_gtt; int desk_w, desk_h;
 } H;
 
 static const u32 hdmi_reg[4] = { 0, 0xe1140, 0xe1150, 0xe1160 };
@@ -511,6 +515,56 @@ static int read_edid(int port, u8 *e) {
     u8 sum = 0;
     for (int i = 0; i < 128; i++) sum += e[i];
     return sum ? -1 : 0;
+}
+
+/* a CEA-861 extension with the HDMI vendor-specific data block (OUI 00-0c-03) */
+static int hdmi_sink(int port, const u8 *e) {
+    u8 x[128];
+    if (!e[126] || ddc_read(port, 128, x, 128) || x[0] != 2) return 0;
+    int end = x[2];
+    for (int o = 4; o < end && o < 127; ) {
+        int tag = x[o] >> 5, len = x[o] & 31;
+        if (tag == 3 && len >= 3 && x[o + 1] == 0x03 && x[o + 2] == 0x0c && x[o + 3] == 0) return 1;
+        o += len + 1;
+    }
+    return 0;
+}
+
+/* the AVI infoframe (intel_hdmi_set_avi_infoframe, cpt_write_infoframe): RGB, full range,
+ * underscanned (no TV overscan), 16:9 or as the picture, the CEA video code when there is one */
+#define TVIDEO_DIP_CTL_B   0xe1200
+#define TVIDEO_DIP_DATA_B  0xe1208
+#define VIDEO_DIP_ENABLE   (1u << 31)
+#define VIDEO_DIP_ENABLE_AVI (1u << 21)
+#define VIDEO_DIP_ENABLES_OTHER (0xeu << 21 | 1u << 25)
+#define VIDEO_DIP_SELECT_MASK (3u << 19)
+#define VIDEO_DIP_FREQ_VSYNC (1u << 16)
+#define VIDEO_DIP_FREQ_MASK (3u << 16)
+static void avi_infoframe(const hmode_t *m) {
+    u8 f[32] = { 0 };
+    int vic = 0;
+    if (m->hdisplay == 1920 && m->vdisplay == 1080 && m->clock > 148000 && m->clock < 149000) vic = 16;
+    else if (m->hdisplay == 1280 && m->vdisplay == 720 && m->clock > 74000 && m->clock < 75000) vic = 4;
+    u8 pb[14] = { 0 };
+    pb[1] = 0x02;                                                     /* RGB, scan: underscanned */
+    pb[2] = (u8)((vic ? 2 : 0) << 4 | 8);                             /* 16:9 for CEA modes; active = picture */
+    pb[3] = 2 << 2;                                                   /* RGB quantization: full range */
+    pb[4] = (u8)vic;
+    u8 sum = 0x82 + 0x02 + 13;
+    for (int i = 1; i <= 13; i++) sum += pb[i];
+    f[0] = 0x82; f[1] = 0x02; f[2] = 13; f[3] = 0;                    /* the "hole" at byte 3 */
+    f[4] = (u8)(0x100 - sum);
+    for (int i = 1; i <= 13; i++) f[4 + i] = pb[i];
+    u32 v = rd(TVIDEO_DIP_CTL_B);
+    v |= VIDEO_DIP_ENABLE | VIDEO_DIP_ENABLE_AVI | VIDEO_DIP_FREQ_VSYNC;
+    v &= ~VIDEO_DIP_ENABLES_OTHER;
+    wr(TVIDEO_DIP_CTL_B, v);
+    v &= ~(VIDEO_DIP_SELECT_MASK | 0xf);                               /* AVI, data offset 0 */
+    wr(TVIDEO_DIP_CTL_B, v);
+    for (int i = 0; i < 32; i += 4) wr(TVIDEO_DIP_DATA_B, (u32)f[i] | (u32)f[i + 1] << 8 | (u32)f[i + 2] << 16 | (u32)f[i + 3] << 24);
+    v = (v & ~VIDEO_DIP_FREQ_MASK) | VIDEO_DIP_FREQ_VSYNC | VIDEO_DIP_ENABLE_AVI;
+    wr(TVIDEO_DIP_CTL_B, v);
+    (void)rd(TVIDEO_DIP_CTL_B);
 }
 
 static int dtd(const u8 *b, hmode_t *m) {
@@ -578,6 +632,7 @@ static void compute_m_n(u64 m, u64 n, u32 *rm, u32 *rn) {     /* compute_m_n: N 
 static void say(const char *f, const char *a) { fmt(H.status, sizeof H.status, f, a); LOG("hdmi: %s", H.status); }
 
 static void hdmi_disable(void) {
+    H.desk = 0;
     u32 hr = hdmi_reg[H.port];
     wr(hr, rd(hr) & ~SDVO_ENABLE);
     wr(DSPBCNTR, 0); wr(DSPBSURF, 0);
@@ -675,9 +730,11 @@ static int hdmi_enable(void) {
 
     /* the encoder's pre-enable: the port, not yet on (intel_hdmi_prepare) */
     u32 hr = hdmi_reg[H.port];
-    u32 hv = SDVO_ENCODING_HDMI | SDVO_PIPE_SEL_CPT(1) | (m->pvsync ? SDVO_VSYNC_ACTIVE_HIGH : 0) | (m->phsync ? SDVO_HSYNC_ACTIVE_HIGH : 0);
+    u32 hv = SDVO_ENCODING_HDMI | SDVO_PIPE_SEL_CPT(1) | (m->pvsync ? SDVO_VSYNC_ACTIVE_HIGH : 0) | (m->phsync ? SDVO_HSYNC_ACTIVE_HIGH : 0) |
+             (H.hdmi_sink ? HDMI_MODE_SELECT_HDMI : 0);
     wr(hr, hv);
     (void)rd(hr);
+    if (H.hdmi_sink) avi_infoframe(m);
 
     /* ironlake_fdi_pll_enable */
     u32 r = rd(FDI_RXB_CTL) & ~(FDI_DP_PORT_WIDTH_MASK | (7u << 16));
@@ -768,6 +825,8 @@ static void hdmi_thread(void *arg) {
                 H.port = p;
                 H.misses = 0;
                 pick_mode(e);
+                H.hdmi_sink = hdmi_sink(p, e);
+                H.desk = 0;
                 LOG("hdmi: %s on port %c, %d x %d at %d kHz", H.monitor, 'A' + p, H.m.hdisplay, H.m.vdisplay, H.m.clock);
                 if (!hdmi_enable()) thread_sleep_ms(8000);           /* do not retry at once */
                 break;
@@ -785,6 +844,67 @@ void ivb_display_start(void) {
 }
 const char *ivb_display_status(void) { return H.status[0] ? H.status : "not started"; }
 int ivb_display_connected(void) { return H.up; }
+int ivb_display_size(int *w, int *h) { *w = H.m.hdisplay; *h = H.m.vdisplay; return H.up; }
+
+/* plane B: the panel's own framebuffer, scaled by the panel fitter (mirroring) ... */
+static void plane_mirror(void) {
+    u32 fbw = k.fb_w, fbh = k.fb_h;
+    const hmode_t *m = &H.m;
+    int ww = m->hdisplay, wh = (int)((u64)m->hdisplay * fbh / fbw);
+    if (wh > m->vdisplay) { wh = m->vdisplay; ww = (int)((u64)m->vdisplay * fbw / fbh); }
+    ww &= ~1; wh &= ~1;
+    wr(PIPEBSRC, (fbw - 1) << 16 | (fbh - 1));
+    wr(PFB_CTL, PF_ENABLE | PF_FILTER_MED_3x3 | PF_PIPE_SEL_IVB(1));
+    wr(PFB_WIN_POS, (u32)((m->hdisplay - ww) / 2) << 16 | (u32)((m->vdisplay - wh) / 2));
+    wr(PFB_WIN_SZ, (u32)ww << 16 | (u32)wh);
+    wr(DSPBCNTR, DISPLAY_PLANE_ENABLE | DISPPLANE_BGRX888 | DISPPLANE_TRICKLE_FEED_DISABLE | (rd(DSPACNTR) & DISPPLANE_TILED));
+    wr(DSPBSTRIDE, rd(DSPASTRIDE));
+    wr(DSPBSURF, rd(DSPASURF));
+    H.desk = 0;
+}
+/* ... or a buffer of the monitor's own size that the shell draws into (control mode) */
+static int plane_desk(void) {
+    int w = H.m.hdisplay, h = H.m.vdisplay;
+    if (!H.deskbuf || H.desk_w != w || H.desk_h != h) {
+        usize bytes = ((usize)w * h * 4 + 4095) & ~(usize)4095;
+        if (bytes > (32u << 20) || !g.gsm) return 0;
+        if (!H.deskbuf) H.deskbuf = hal_dma_alloc(32u << 20);       /* room for any mode up to 4K-ish */
+        if (!H.deskbuf) return 0;
+        H.desk_gtt = (u32)(g.ggtt_size - (1u << 20) - SCENE_WINDOW - (32u << 20));
+        gtt_map_as(H.desk_gtt, (u64)(usize)H.deskbuf, bytes / 4096, 0);   /* uncached: the display reads memory */
+        H.desk_w = w; H.desk_h = h;
+    }
+    memset(H.deskbuf, 0, (usize)w * h * 4);
+    for (usize a = (usize)H.deskbuf; a < (usize)H.deskbuf + (usize)w * h * 4; a += 64) __asm__ volatile("clflush (%0)" :: "r"(a) : "memory");
+    wr(PFB_CTL, 0);
+    wr(PIPEBSRC, (u32)(w - 1) << 16 | (u32)(h - 1));
+    wr(DSPBCNTR, DISPLAY_PLANE_ENABLE | DISPPLANE_BGRX888 | DISPPLANE_TRICKLE_FEED_DISABLE);
+    wr(DSPBSTRIDE, (u32)w * 4);
+    wr(DSPBSURF, H.desk_gtt);
+    H.desk = 1;
+    LOG("hdmi: control mode, the shell draws %d x %d on %s", w, h, H.monitor);
+    return 1;
+}
+
+int shell_desk(void);
+void ivb_display_mirror(const u32 *px, int w, int h, int stride, int x, int y, int rw, int rh) {
+    if (!H.up) return;
+    if (!shell_desk()) { if (H.desk) plane_mirror(); return; }       /* the hardware mirrors the panel */
+    if (!H.desk && !plane_desk()) return;
+    if (w != H.desk_w || h != H.desk_h) return;                       /* the shell has not re-laid out yet */
+    if (g.state == S_READY && stride * 4 <= 32767) {
+        u32 s = map_canvas(px, (usize)stride * 4 * (usize)h);
+        if (s) {
+            blit(s, stride * 4, x, y, H.desk_gtt, w * 4, 0, x, y, rw, rh);
+            if (submit_and_wait("a control-mode frame")) return;
+        }
+    }
+    for (int r = y; r < y + rh; r++) {
+        u32 *d = H.deskbuf + (usize)r * w + x;
+        memcpy(d, px + (usize)r * stride + x, (usize)rw * 4);
+        for (usize a = (usize)d & ~(usize)63; a < (usize)(d + rw); a += 64) __asm__ volatile("clflush (%0)" :: "r"(a) : "memory");
+    }
+}
 const char *ivb_display_monitor(void) { return H.monitor; }
 
 #else
@@ -801,5 +921,7 @@ int ivb_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int 
 void ivb_display_start(void) {}
 const char *ivb_display_status(void) { return "needs the 64-bit native kernel"; }
 int ivb_display_connected(void) { return 0; }
+int ivb_display_size(int *w, int *h) { *w = *h = 0; return 0; }
+void ivb_display_mirror(const u32 *px, int w, int h, int stride, int x, int y, int rw, int rh) {}
 const char *ivb_display_monitor(void) { return ""; }
 #endif

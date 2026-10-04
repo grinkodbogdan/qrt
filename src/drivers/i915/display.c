@@ -900,9 +900,9 @@ void display_set_enabled(int on) {
     else if (D.state == D_DISABLED) { D.state = D_SEARCHING; strlcpy(D.status, "No external display connected", sizeof D.status); }
 }
 
-int display_connected(void) { return D.state == D_ON && D.fb && !D.busy; }
-int display_size(int *w, int *h) { *w = D.m.hd; *h = D.m.vd; return display_connected(); }
-const char *display_monitor(void) { return D.monitor; }
+int display_connected(void) { if (!k.is_venue && ivb_present_supported()) return ivb_display_connected(); return D.state == D_ON && D.fb && !D.busy; }
+int display_size(int *w, int *h) { if (!k.is_venue && ivb_present_supported()) return ivb_display_size(w, h); *w = D.m.hd; *h = D.m.vd; return display_connected(); }
+const char *display_monitor(void) { if (!k.is_venue && ivb_present_supported()) return ivb_display_monitor(); return D.monitor; }
 
 /* tests (QEMU has no DisplayPort): a monitor that is only a buffer in memory */
 void display_virtual(int w, int h) {
@@ -935,7 +935,9 @@ u32 display_checksum(void) {
 }
 
 /* ---- mirroring --------------------------------------------------------------------------- */
+#define IVB() (!k.is_venue && ivb_present_supported())
 void display_mirror(const u32 *px, int w, int h, int stride, int x, int y, int rw, int rh) {
+    if (IVB()) { ivb_display_mirror(px, w, h, stride, x, y, rw, rh); return; }
     if (D.state != D_ON || D.busy || !D.fb) return;
     int W = D.m.hd, H = D.m.vd;
     if (w != D.last_w || h != D.last_h) {                                /* new canvas size: refit, redraw all */
