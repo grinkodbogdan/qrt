@@ -421,8 +421,9 @@ static int ladybird_open(void) {
     /* and the shell's density, so its toolbar and pages are sized for this screen */
     static char scale[32];
     fmt(scale, sizeof scale, "--qrt-scale=%d", (int)(ui.s * 100 + 0.5f));
-    const char *const argv[] = { "ladybird", "--disable-http-disk-cache", scale, NULL };
-    proc_t *p = proc_spawn("/bin/ladybird", 3, argv, NULL, LB.err, sizeof LB.err);
+    /* and the home page: Google */
+    const char *const argv[] = { "ladybird", "--disable-http-disk-cache", scale, "https://www.google.com/", NULL };
+    proc_t *p = proc_spawn("/bin/ladybird", 4, argv, NULL, LB.err, sizeof LB.err);
     if (!p) { klog("browser: Ladybird did not start: %s", LB.err); return 0; }
     LB.pid = p->pid;
     cw_host(LB.pid, &app_browser);                     /* one app in the dock: this one shows its window */

@@ -189,6 +189,39 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.9.9: the network a web page needs
+
+The tablet's log showed pages failing with "Unable to connect" and "can't resolve host".
+A test page like a real site's (121 requests to 20 host names, through real DNS) failed
+101 of its 121 requests in QEMU.  The causes, all fixed:
+
+- **TCP had 16 connections for the whole system**, the socket layer 32, UDP 16 ports, and
+  only 8 packets could wait for an address lookup (ARP).  A browser opens dozens of
+  connections and two DNS sockets per host name at once; the rest failed straight away.
+  Now: 256 TCP connections, 512 sockets, 256 UDP ports, 64 waiting packets, and 1024
+  descriptors per program (and `RLIMIT_NOFILE` says so).
+- **Two threads could get the same descriptor number.**  Finding a free descriptor and
+  taking it were two steps, and a system call can be preempted between them: a DNS
+  thread opening a socket and the main thread making a socket pair got the same number,
+  and the first close pulled it from under the other.  Ladybird's RequestServer then
+  crashed and every request in flight failed.  A descriptor is now taken at once.
+- **TCP kept only segments that arrived in order.**  On Wi-Fi one lost packet made the
+  server wait for its timeout (a second or more) and resend everything after it.  Early
+  segments are now kept and the gap is acknowledged at once, so the server resends just
+  the missing one; three duplicate ACKs make QRT resend its own.  Receive buffers are
+  128 KB with window scaling (they were 64 KB).
+- **The network ran only when the shell got the processor.**  With the browser busy on
+  its one core, the shell (which drives Wi-Fi and TCP) waited behind every browser
+  thread.  The shell and the sound mixer now run at the tick they wake up.
+- The kernel log keeps 240-character lines (was 96) without colour codes, and System
+  Monitor's log wraps them, so an error's reason is no longer cut off.
+- A test-channel command dumps every program thread (state, last system call) and the
+  descriptors that have data waiting: for the next "the page never loads".
+
+With all that, the test page loads all 121 requests (and a 3 MB file) in QEMU.
+
+- The browser opens **Google** as its home page.
+
 ## 0.9.8: a browser sized for the tablet
 
 - **Bigger browser**: the toolbar is 1.25 times the shell's own controls, and pages
@@ -755,9 +788,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.9.8.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.9.9.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.9.8.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.9.9.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.
