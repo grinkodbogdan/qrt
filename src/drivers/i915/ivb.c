@@ -276,15 +276,29 @@ static void gtt_map(u32 off, u64 phys, usize pages) {
     (void)rd(GFX_FLSH_CNTL_GEN6);
 }
 
-static int forcewake(void) {                   /* __gen7_gt_force_wake_mt_get, or the legacy one */
-    if (rd(ECOBUS) & FORCEWAKE_MT_ENABLE) {
-        wait_reg(FORCEWAKE_MT_ACK, 1, 0, 50);
-        wr(FORCEWAKE_MT, MASKED_ENABLE(1u));
-        return wait_reg(FORCEWAKE_MT_ACK, 1, 1, 50);
-    }
-    wait_reg(FORCEWAKE_ACK, 1, 0, 50);
-    wr(FORCEWAKE, 1);
-    return wait_reg(FORCEWAKE_ACK, 1, 1, 50);
+/* intel_uncore.c for Ivy Bridge: the multi-threaded forcewake first (ECOBUS reads 0 while
+ * the GT sleeps, so it cannot tell which one the BIOS set up before a wake); then the
+ * legacy one; then wait for the GT threads to leave C6 (__gen6_gt_wait_for_thread_c0) */
+static int forcewake(void) {
+    wait_reg(FORCEWAKE_MT_ACK, 1, 0, 50);
+    wr(FORCEWAKE_MT, MASKED_ENABLE(1u));
+    (void)rd(ECOBUS);                                                    /* posting read */
+    int ok = wait_reg(FORCEWAKE_MT_ACK, 1, 1, 50);
+    u32 eco = rd(ECOBUS);
+    if (!ok || !(eco & FORCEWAKE_MT_ENABLE)) {
+        if (ok) { wr(FORCEWAKE_MT, MASKED_DISABLE(1u)); wait_reg(FORCEWAKE_MT_ACK, 1, 0, 50); }
+        wait_reg(FORCEWAKE_ACK, 1, 0, 50);
+        wr(FORCEWAKE, 1);
+        (void)rd(ECOBUS);
+        ok = wait_reg(FORCEWAKE_ACK, 1, 1, 50);
+        if (!ok) {
+            LOG("forcewake: no ack (MT ack %08x, ack %08x, ECOBUS %08x)", rd(FORCEWAKE_MT_ACK), rd(FORCEWAKE_ACK), rd(ECOBUS));
+            return 0;
+        }
+        LOG("forcewake: legacy (ECOBUS %08x)", eco);
+    } else LOG("forcewake: multi-threaded (ECOBUS %08x)", eco);
+    wait_reg(0x13805c, 0x7, 0, 5);                                       /* GEN6_GT_THREAD_STATUS_REG */
+    return 1;
 }
 
 static u32 *ring(void) { return (u32 *)(g.arena + A_RING); }

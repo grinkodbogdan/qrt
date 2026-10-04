@@ -189,6 +189,14 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.14.1: Ivy Bridge GPU wakes
+
+- The FZ-G1 reported "the GT did not wake": QRT chose the forcewake method from ECOBUS,
+  which reads 0 while the GT sleeps.  Now as Linux's intel_uncore.c: the multi-threaded
+  forcewake first, the legacy one if that is not acknowledged, then a wait for the GT
+  threads to leave C6; the log names the method used, or the acknowledge registers.
+- Wi-Fi (6235) confirmed working on the FZ-G1; HDMI found an LG TV at 1920 x 1080.
+
 ## 0.14.0: Ivy Bridge GPU and HDMI (FZ-G1), Wi-Fi firmware fix
 
 - **The FZ-G1's GPU draws the shell** (`src/drivers/i915/ivb.c`, Intel HD Graphics
