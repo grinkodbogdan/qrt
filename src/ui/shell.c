@@ -2149,6 +2149,9 @@ void shell_main(void) {
 
         u64 now = k_now_ms();
         netstack_poll();
+#if defined(__x86_64__)
+        { void proc_oom_check(void); if (k.native) proc_oom_check(); }   /* memory running low: stop the largest program */
+#endif
         backlight_tick();                             /* the brightness the slider asked for */
         if (now >= sh.power_next) {                   /* battery, charger and cover (battery.c) */
             sh.power_next = now + 2000;

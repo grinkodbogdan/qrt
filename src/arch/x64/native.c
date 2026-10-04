@@ -213,7 +213,7 @@ static void native_main(void *arg) {
     vfs_relocate();                        /* file data out of firmware pool memory */
     proc_init();                           /* SYSCALL entry, fault handlers for user processes */
     native_smp_start();
-    if (hal_setting_get(u"QrtSmpPrograms", 0) && native_smp_workers()) {   /* 0.9.5: programs on every core */
+    if (hal_setting_get(u"QrtSmpPrograms", 1) && native_smp_workers()) {   /* 0.9.5: programs on every core */
         sched_smp_enable();
         smp_programs_start();
         klog("smp: programs run on all %d cores", native_smp_workers() + 1);

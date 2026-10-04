@@ -77,7 +77,13 @@ static u64 bump(range_t *r, int n, usize pages) {
     return 0;
 }
 
+/* Memory runs low: below this, a program's page still comes (from the reserve) but the
+ * shell is asked to stop the program that has the most (proc_oom_check), so the kernel
+ * never meets an empty pool - it used to stop the whole tablet ("out of physical memory"). */
+#define USER_RESERVE (96ull << 20)
+volatile int pmm_low;
 u64 pmm_alloc(int high) {
+    if (!high && total_bytes - used_frames * PAGE < USER_RESERVE) pmm_low = 1;   /* a program's page */
     u64 flags = irq_save();
     u64 f = 0;
     for (usize i = n_freed; i > 0 && !f; i--)          /* reuse a released frame of the right pool */
@@ -481,6 +487,26 @@ static void free_pdpt(u64 *pdpt) {
         }
         pmm_free(pdpt[g] & PTE_ADDR);
     }
+}
+
+/* pages a process has of its own (not shared objects' or files'), for memory reports */
+static u64 count_pdpt(u64 *pdpt) {
+    u64 n = 0;
+    for (int g = 0; g < 512; g++) {
+        if (!(pdpt[g] & PTE_P) || !(pdpt[g] & PTE_U)) continue;
+        u64 *pd = tbl(pdpt[g]);
+        for (int i = 0; i < 512; i++) {
+            if (!(pd[i] & PTE_P)) continue;
+            u64 *pt = tbl(pd[i]);
+            for (int j = 0; j < 512; j++) if (PTE_HAS(pt[j]) && !(pt[j] & PTE_SOFT_SHARED)) n++;
+        }
+    }
+    return n;
+}
+u64 as_private_pages(u64 cr3) {
+    u64 *pml4 = tbl(cr3), n = count_pdpt(tbl(pml4[0]));
+    for (int i = PML4_USER_FIRST; i < PML4_USER_END; i++) if (pml4[i] & PTE_P) n += count_pdpt(tbl(pml4[i]));
+    return n;
 }
 
 void as_destroy(u64 cr3) {

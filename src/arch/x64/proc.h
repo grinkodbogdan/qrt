@@ -152,3 +152,4 @@ void    sig_deliver_pending(proc_t *p, frame_t *f, u64 nr, u64 entry_nr, i64 *re
 int     sig_fault(proc_t *p, frame_t *f);                                     /* 1: a handler takes the fault */
 int     sig_take(proc_t *p, u64 mask, ksiginfo_t *info);                      /* dequeue one of mask (signalfd, sigtimedwait) */
 u64     sig_deliverable(proc_t *p);
+void proc_oom_check(void);                   /* the shell, every frame: stop the largest program when memory runs low */

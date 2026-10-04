@@ -248,7 +248,7 @@ static void draw(canvas_t *c, rect_t a) {
         row_label(c, L.g_start, 3, "When a monitor is connected", da ? "The tablet becomes its touchpad and keyboard" : "The tablet's screen is mirrored to it");
         segment(c, L.desk[0], "Control", da, 1, 0);
         segment(c, L.desk[1], "Mirror", !da, 0, 1);
-        int allc = (int)hal_setting_get(u"QrtSmpPrograms", 0) != 0;
+        int allc = (int)hal_setting_get(u"QrtSmpPrograms", 1) != 0;
         row_label(c, L.g_start, 4, "Programs run on", allc != smp_programs_on() ? "Applies after a restart" : allc ? "All four cores (experimental)" : "One core (the others help drawing)");
         segment(c, L.cores[0], "One core", !allc, 1, 0);
         segment(c, L.cores[1], "All cores", allc, 0, 1);

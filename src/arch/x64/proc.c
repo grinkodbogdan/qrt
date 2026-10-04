@@ -526,8 +526,12 @@ static int load_elf(proc_t *p, const u8 *img, u64 size, u64 base, image_t *out, 
         /* a read-only segment of a file held in whole pages maps those pages, shared;
          * other pages get a private copy (zeroed past the file's bytes) */
         int share = file_pages(img) && !(ph->flags & 2) && ((ph->offset - ph->vaddr) & (PAGE - 1)) == 0;
+        u64 file_end = (va + ph->filesz + PAGE - 1) & ~(PAGE - 1);
         for (u64 a = va & ~(PAGE - 1); a < end; a += PAGE) {
             u64 lo = MAX(a, va), hi = MIN(a + PAGE, va + ph->filesz);
+            /* zero-filled pages past the file's bytes (.bss: 17 MB in Ladybird, in every one of
+             * its processes) are given on first touch by the page fault handler, as Linux does */
+            if (a >= file_end && !as_translate(p->cr3, a)) continue;
             if (!as_translate(p->cr3, a)) {
                 u64 fo = ph->offset + (a - va);          /* wraps below va: the page's file offset */
                 if (share && a + PAGE <= va + ph->filesz && fo + PAGE <= ((size + PAGE - 1) & ~(PAGE - 1))) {
@@ -1058,6 +1062,13 @@ void sched_dump_threads(void) {
         klog("thread: %s pid %d tid %d %s%s sys %u(%llx) cpu %llu", t->proc->name, t->proc->pid, t->tid,
              st[t->state & 7], t->in_sys ? " in-sys" : "", t->sys_nr, t->sys_a0, t->cpu_ticks);
     }
+    /* memory: free, shared objects, each program's own pages */
+    extern volatile i64 shm_live_objects, shm_live_pages;
+    u64 as_private_pages(u64 cr3);
+    klog("mem: %llu MB free of %llu; shared memory %lld objects, %lld MB", pmm_free_bytes() >> 20, pmm_total_bytes() >> 20,
+         shm_live_objects, (shm_live_pages * PAGE) >> 20);
+    for (int i = 0; i < nprocs; i++)
+        if (!procs[i]->exited) klog("mem: pid %d %s %llu MB", procs[i]->pid, procs[i]->name, (as_private_pages(procs[i]->cr3) * PAGE) >> 20);
     /* and the descriptors that are ready to read: data nobody picks up shows here */
     int fd_poll(proc_t *p, int fd, int events);
     for (int i = 0; i < nprocs; i++) {
@@ -1073,4 +1084,30 @@ void sched_dump_threads(void) {
         }
         if (any) klog("%s", line);
     }
+}
+
+/* Called by the shell every frame: when memory runs low (mm.c), the program with the most
+ * pages of its own is stopped - usually a web page's WebContent, which Ladybird restarts -
+ * instead of the kernel running out and stopping the tablet. */
+void proc_oom_check(void) {
+    extern volatile int pmm_low;
+    static u64 last;
+    if (!pmm_low) return;
+    pmm_low = 0;
+    u64 now = k_now_ms();
+    if (now - last < 1500 || pmm_free_bytes() > (128ull << 20)) return;   /* the last one is still exiting, or it passed */
+    u64 as_private_pages(u64 cr3);
+    proc_t *victim = NULL;
+    u64 most = 0;
+    for (int i = 0; i < nprocs; i++) {
+        proc_t *p = procs[i];
+        if (p->exited || p->exiting || p->killed) continue;
+        u64 n = as_private_pages(p->cr3);
+        if (n > most) { most = n; victim = p; }
+    }
+    if (!victim) return;
+    last = now;
+    klog("mem: out of memory (%llu MB free): stopping %s (pid %d), which had %llu MB",
+         pmm_free_bytes() >> 20, victim->name, victim->pid, (most * PAGE) >> 20);
+    proc_kill(victim);
 }

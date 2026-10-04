@@ -189,6 +189,27 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.10.0: every core, and memory that runs out without stopping the tablet
+
+- **Programs run on all four cores again by default.**  On the tablet the browser opened
+  and ran faster with all cores; the descriptor race fixed in 0.9.9 (two threads given
+  one descriptor number, far likelier with four cores running them) is the probable
+  cause of the multi-core hang seen since 0.9.5.  Settings -> Startup -> Programs run on
+  still offers One core.
+- **Running out of memory no longer stops QRT.**  The tablet stopped with "out of
+  physical memory" while a page loaded.  Now, when free memory falls under 96 MB, the
+  program with the most memory is stopped (a web page's WebContent, normally) and the
+  rest carries on; the browser says "This page stopped" and reload tries again.  Tested
+  in QEMU with a page that allocates until memory runs out (it got to 1.3 GB).
+- **120 MB less memory for the browser.**  Zero-filled program memory (.bss: 17 MB in
+  Ladybird, which runs as seven processes) was allocated when a program started; now
+  each page is given when first touched, as Linux does.  With the browser open, 1425 MB
+  are free instead of 1307.
+- Web pages are laid out at their own size (device pixel ratio 1); the browser's
+  toolbar is 1.5 times its first size.
+- The test-channel dump (Ctrl-T p) also reports free memory, shared memory and each
+  program's own pages.
+
 ## 0.9.9: the network a web page needs
 
 The tablet's log showed pages failing with "Unable to connect" and "can't resolve host".
@@ -788,9 +809,9 @@ descriptor. Hardware notes are in `docs/hardware/venue-8-pro-5855.md`.
 
 Your Windows install on the eMMC is not touched: QRT runs entirely from the stick.
 
-1. Use `dist/qrt-0.9.9.img.gz`, or build the image with `make`.
+1. Use `dist/qrt-0.10.0.img.gz`, or build the image with `make`.
 2. Write it to a USB stick with Rufus or balenaEtcher, or on Linux:
-   `gunzip -c dist/qrt-0.9.9.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+   `gunzip -c dist/qrt-0.10.0.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
 3. Plug the stick into the tablet's USB-C port (directly, with an adapter, or through a dock).
 4. In the firmware setup, disable **Secure Boot** (the image is not signed)
    and boot from the stick.

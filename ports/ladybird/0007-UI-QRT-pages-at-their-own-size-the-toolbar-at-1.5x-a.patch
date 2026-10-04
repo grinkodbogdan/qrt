@@ -1,0 +1,69 @@
+From af1d931a3ac123cf002594ea22e012d3db9dd20d Mon Sep 17 00:00:00 2001
+From: qrt <qrt@localhost>
+Date: Sun, 4 Oct 2026 13:35:41 +0000
+Subject: [PATCH] UI/QRT: pages at their own size, the toolbar at 1.5x, a
+ message when the page's process stops
+
+Pages are laid out at a device pixel ratio of 1 (a whole desktop page fits); the
+toolbar is 1.5 times its first size. When the page's WebContent process stops (QRT
+stops the largest program when memory runs low, or it crashed), the page area says
+so; reload tries again.
+---
+ UI/QRT/BrowserWindow.cpp | 24 +++++++++++++++++++-----
+ 1 file changed, 19 insertions(+), 5 deletions(-)
+
+diff --git a/UI/QRT/BrowserWindow.cpp b/UI/QRT/BrowserWindow.cpp
+index 7a2f925a..46879eb5 100644
+--- a/UI/QRT/BrowserWindow.cpp
++++ b/UI/QRT/BrowserWindow.cpp
+@@ -100,14 +100,13 @@ BrowserWindow::~BrowserWindow()
+ 
+ ErrorOr<void> BrowserWindow::initialize(Vector<URL::URL> const& urls)
+ {
+-    // The toolbar is a little larger than the shell's own controls, for fingers, and pages
+-    // are laid out at a device pixel ratio that makes their text readable on a dense panel
+-    // (1.5 on the Venue's 8" 800x1280: a 533 CSS px wide page in portrait, as a phone has).
+-    m_ui = max(1.0f, g_shell_scale * 1.25f);
++    // The toolbar is 1.5 times its first size, for fingers; pages are laid out at their own
++    // size (a device pixel ratio of 1), so a whole desktop page fits the screen.
++    m_ui = max(1.5f, g_shell_scale * 1.25f);
+     m_button_w = scaled(base_button_w);
+     m_pad = scaled(base_pad);
+     m_toolbar_height = scaled(base_toolbar_h);
+-    m_page_ratio = max(1.0, round(g_shell_scale * 1.25 * 4) / 4.0);
++    m_page_ratio = 1.0;
+ 
+     m_window = qrt_window_create("Ladybird");
+     if (m_window < 0)
+@@ -151,6 +150,12 @@ ErrorOr<void> BrowserWindow::initialize(Vector<URL::URL> const& urls)
+         draw_toolbar();
+         qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
+     };
++    // the page's process stopped (QRT stops the largest program when memory runs out, or it
++    // crashed): say so in the page's place; reload tries again
++    m_view->on_crash_overlay_state_change = [this](bool) {
++        draw_page();
++        qrt_window_present(m_window, 0, content_top(), m_buffer.w, m_buffer.h - content_top());
++    };
+     m_view->on_loading_state_change = [this](bool loading) {
+         m_loading = loading;
+         draw_toolbar();
+@@ -261,6 +266,15 @@ void BrowserWindow::draw_page()
+     if (vw <= 0 || vh <= 0)
+         return;
+ 
++    if (m_view && m_view->crash_overlay_active()) {
++        qrt_fill(b, 0, top, vw, vh, 0xf6f5f4);
++        int lh = qrt_text_height(QRT_TEXT_TITLE), y = top + vh / 3, x = scaled(16);
++        qrt_text(b, x, y, "This page stopped.", 0x241f31, QRT_TEXT_TITLE);
++        qrt_text(b, x, y + lh * 3 / 2, "It needed more memory than the tablet has left, or it crashed.", 0x5e5c64, QRT_TEXT_BODY);
++        qrt_text(b, x, y + lh * 3 / 2 + qrt_text_height(QRT_TEXT_BODY) * 3 / 2, "Tap reload to try again.", 0x5e5c64, QRT_TEXT_BODY);
++        return;
++    }
++
+     Gfx::IntSize size;
+     auto bitmap = m_view ? m_view->frame(size) : nullptr;
+     int bw = 0, bh = 0;
+-- 
+2.43.0
+

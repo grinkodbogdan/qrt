@@ -55,8 +55,12 @@ typedef struct {
 #define MAX_NAMED 64
 static shm_t *named[MAX_NAMED];
 
+/* what shared memory holds, for thread dumps and memory reports */
+volatile i64 shm_live_objects, shm_live_pages;
+
 kobj_t *shm_new(const char *name) {
     shm_t *s = kalloc(sizeof *s);
+    __atomic_add_fetch(&shm_live_objects, 1, __ATOMIC_RELAXED);
     s->h.kind = KO_SHM;
     s->h.refs = 1;
     strlcpy(s->name, name ? name : "", sizeof s->name);
@@ -65,8 +69,9 @@ kobj_t *shm_new(const char *name) {
 
 static void shm_free(kobj_t *o) {
     shm_t *s = (shm_t *)o;
+    __atomic_sub_fetch(&shm_live_objects, 1, __ATOMIC_RELAXED);
     if (s->ext) kfree(s->ext);
-    else for (u64 i = 0; i < s->cap; i++) if (s->frames[i]) pmm_free(s->frames[i]);
+    else for (u64 i = 0; i < s->cap; i++) if (s->frames[i]) { pmm_free(s->frames[i]); __atomic_sub_fetch(&shm_live_pages, 1, __ATOMIC_RELAXED); }
     if (s->frames) kfree(s->frames);
     kfree(s);
 }
@@ -103,7 +108,7 @@ u64 shm_frame(kobj_t *o, u64 page) {
     shm_t *s = (shm_t *)o;
     /* a mapping may run past the end of the object (Linux: SIGBUS); give it a page anyway */
     if (!shm_reserve(s, page + 1)) return 0;
-    if (!s->frames[page]) s->frames[page] = pmm_alloc(1);
+    if (!s->frames[page]) { s->frames[page] = pmm_alloc(1); __atomic_add_fetch(&shm_live_pages, 1, __ATOMIC_RELAXED); }
     return s->frames[page];
 }
 
