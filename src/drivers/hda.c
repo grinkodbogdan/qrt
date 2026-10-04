@@ -140,6 +140,36 @@ static int route(int cad, int nid, int depth) {
     return 0;
 }
 
+/* Realtek ALC269 (the Panasonic FZ-G1, many laptops): what Linux's patch_realtek does
+ * before the generic parser - the processing coefficients behind node 0x20 that power
+ * the outputs (alc_fill_eapd_coef, alc_fix_pll, alc269_fill_coef) */
+static u32 coef_read(int cad, int idx) { u32 v = 0; set4(cad, 0x20, 0x5, (u32)idx); cmd(verb4(cad, 0x20, 0xc, 0), &v); return v & 0xffff; }
+static void coef_write(int cad, int idx, u32 v) { set4(cad, 0x20, 0x5, (u32)idx); set4(cad, 0x20, 0x4, v); }
+static void coef_update(int cad, int idx, u32 mask, u32 bits) { coef_write(cad, idx, (coef_read(cad, idx) & ~mask) | bits); }
+
+static void alc269_init(int cad) {
+    u32 c0 = coef_read(cad, 0);
+    int variant = (int)((c0 >> 4) & 0xf);                    /* 0: VA, 1: VB, 2: VC, 3: VD */
+    if (variant == 1) coef_update(cad, 0xd, 0, 1 << 14);     /* alc_fill_eapd_coef */
+    if (variant == 2) coef_update(cad, 0x4, 1 << 15, 0);
+    if (variant == 3) coef_update(cad, 0x10, 1 << 9, 0);
+    if (variant > 3 || variant == 0) coef_update(cad, 0x4, 1 << 15, 0);   /* alc_fix_pll (VA) */
+    if (variant == 1) {                                      /* alc269_fill_coef */
+        u32 rev = c0 & 0xff;
+        if (rev < 0x15) { coef_write(cad, 0xf, 0x960b); coef_write(cad, 0xe, 0x8817); }
+        if (rev == 0x16) { coef_write(cad, 0xf, 0x960b); coef_write(cad, 0xe, 0x8814); }
+        if (rev == 0x17) coef_update(cad, 0x4, 0, 1 << 11);
+        if (rev == 0x18) {
+            u32 v = coef_read(cad, 0xd);
+            if (((v & 0x0c00) >> 10) != 1) coef_write(cad, 0xd, v | (1 << 10));
+            v = coef_read(cad, 0x17);
+            if (((v & 0x01c0) >> 6) != 4) coef_write(cad, 0x17, v | (1 << 7));
+        }
+        coef_update(cad, 0x4, 0, 1 << 11);
+    }
+    klog("hda: Realtek ALC269 (variant V%c, coef0 %04x): Linux's initialization applied", 'A' + variant, c0);
+}
+
 static void setup_codec(int cad) {
     u32 vid = param(cad, 0, 0x00);
     u32 sub = param(cad, 0, 0x04);
@@ -151,6 +181,7 @@ static void setup_codec(int cad) {
         afg = fg;
         set12(cad, fg, 0x705, 0);                            /* D0 */
         hal_delay_us(10000);
+        if (vid == 0x10ec0269) alc269_init(cad);
         u32 ws = param(cad, fg, 0x04);
         int w0 = (int)((ws >> 16) & 0xff), wn = (int)(ws & 0xff);
         for (int nid = w0; nid < w0 + wn && nid < w0 + MAXN; nid++) {
@@ -190,6 +221,7 @@ static void pump(snd_output_t *o) {
         if (!n) break;
         snd_mix(H.mix, (int)(n / 4), 48000, 2);
         memcpy(H.ring + at, H.mix, n);
+        for (u32 o = 0; o < n; o += 64) __asm__ volatile("clflush (%0)" : : "r"(H.ring + at + o) : "memory");
         H.wpos += n;
     }
 }
@@ -223,6 +255,12 @@ void hda_probe(const pci_dev_t *p) {
     if (H.ok) { strlcpy(H.status, "another HD Audio controller (one is used)", sizeof H.status); return; }
     u32 cmdreg = pci_read32(p->bus, p->dev, p->fn, 4);
     pci_write32(p->bus, p->dev, p->fn, 4, cmdreg | 0x6);     /* memory, bus master */
+    if (p->vendor == 0x8086) {                               /* azx_init_pci: TC0, and snooped DMA on Intel PCHs */
+        u32 tc = pci_read32(p->bus, p->dev, p->fn, 0x44);
+        pci_write32(p->bus, p->dev, p->fn, 0x44, tc & ~7u);
+        u32 devc = pci_read32(p->bus, p->dev, p->fn, 0x78);
+        if (devc & 0x800) pci_write32(p->bus, p->dev, p->fn, 0x78, devc & ~0x800u);
+    }
     H.m = (volatile u8 *)(usize)pci_bar(p->bus, p->dev, p->fn, 0);
     if (!H.m) { strlcpy(H.status, "no registers", sizeof H.status); return; }
     u16 gcap = r16(GCAP);

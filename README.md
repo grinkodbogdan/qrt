@@ -189,6 +189,17 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.12.1: FZ-G1 sound and touch
+
+- **Sound on the FZ-G1** (Realtek ALC269 codec): the codec setup Linux's patch_realtek
+  does before playing (the processing coefficients that power the outputs, by codec
+  variant), and the PCH settings Linux's azx_init_pci makes (traffic class 0, snooped
+  DMA); the audio ring is flushed from the CPU cache after each fill.
+- **Touch is faster**: USB touchscreens (and every interrupt endpoint) now keep 8
+  transfers queued, as Linux's usbhid keeps its request resubmitted.  Before, one
+  report was read per frame, so a touchscreen sending a report per finger fell behind.
+- System -> Hardware -> Built-in codec shows the HD Audio codec on PCs.
+
 ## 0.12.0: Wi-Fi on the Panasonic FZ-G1
 
 - **Intel Centrino Advanced-N 6235 and 6230** (the FZ-G1's Wi-Fi card): a new driver,

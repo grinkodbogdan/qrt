@@ -110,6 +110,7 @@ typedef struct {
     volatile u32 iso_queued, iso_done;     /* packets pushed / completed (free-running) */
     usb_iso_fill fill;
     u32 iso_errs;
+    int nq, qnext;                         /* interrupt IN: transfers kept queued, the next buffer slice */
 } uep_t;
 
 typedef struct { u8 addr, attr, iface; u16 mps; u8 ival; } epdesc_t;
@@ -224,8 +225,15 @@ static udev_t *dev_by_slot(u32 slot) {
     return NULL;
 }
 
+/* Interrupt IN endpoints keep several transfers queued, each in its own slice of the buffer,
+ * as Linux's usbhid keeps its URB resubmitted: a touchscreen in "hybrid" mode sends one
+ * report per finger, and they must not wait for the next poll one at a time. */
+#define EP_SLICE(e) ((u32)(((e)->mps + 63) & ~63))
 static void ep_queue(udev_t *d, uep_t *e) {
-    ring_push(&e->ring, phys(e->buf), e->type == 3 ? (u32)e->mps : IN_BUF, TRB_TYPE(T_NORMAL) | TRB_IOC | TRB_ISP);
+    if (e->type == 3 && e->nq > 1) {
+        ring_push(&e->ring, phys(e->buf + (usize)e->qnext * EP_SLICE(e)), (u32)e->mps, TRB_TYPE(T_NORMAL) | TRB_IOC | TRB_ISP);
+        e->qnext = (e->qnext + 1) % e->nq;
+    } else ring_push(&e->ring, phys(e->buf), e->type == 3 ? (u32)e->mps : IN_BUF, TRB_TYPE(T_NORMAL) | TRB_IOC | TRB_ISP);
     x.db[d->slot] = (u32)e->dci;
 }
 
@@ -251,7 +259,9 @@ static void events_locked(void) {
             if (d && dci == 1) { d->ctl_cc = (int)cc; d->ctl_done = 1; }
             else if (ep && ep->in) {
                 int len = (ep->type == 3 ? ep->mps : IN_BUF) - (int)(e->status & 0xffffff);
-                if ((cc == CC_SUCCESS || cc == CC_SHORT) && ep->cb && len > 0) ep->cb(ep->arg, ep->buf, len);
+                const u8 *data = ep->buf;
+                if (ep->nq > 1) data = (const u8 *)(usize)((const trb_t *)(usize)e->ptr)->ptr;   /* the slice this transfer used */
+                if ((cc == CC_SUCCESS || cc == CC_SHORT) && ep->cb && len > 0) ep->cb(ep->arg, data, len);
                 if (cc == CC_SUCCESS || cc == CC_SHORT) ep_queue(d, ep);
                 else klog("usb: port %d endpoint %u stopped (cc %u)", d->port, dci, cc);
             } else if (ep && ep->iso) {
@@ -376,7 +386,10 @@ static int ep_open(udev_t *d, u8 addr, usb_in_cb cb, void *arg) {
     if (cc != CC_SUCCESS) { klog("usb: port %d: endpoint %02x not configured (cc %d)", d->port, addr, cc); return -1; }
     LOCK();
     e->open = 1;
-    if (e->in) ep_queue(d, e);
+    if (e->in && e->type == 3 && e->mps <= 1024) {
+        e->nq = MIN(8, (int)(IN_BUF / EP_SLICE(e)));
+        for (int i = 0; i < e->nq; i++) ep_queue(d, e);
+    } else if (e->in) ep_queue(d, e);
     UNLOCK();
     return 0;
 }

@@ -5,6 +5,7 @@
 #include "../drivers/i915/display.h"
 #include "../drivers/usb/xhci.h"
 #include "../drivers/audio.h"
+#include "../drivers/hda.h"
 #include "../kernel/smp.h"
 #include "../kernel/vfs.h"
 #include "../kernel/dev.h"
@@ -169,7 +170,7 @@ static void draw(canvas_t *c, rect_t a) {
         }
         heading(&f, "Sound");
         kv(&f, "Output", snd_status());
-        kv(&f, "Built-in codec", audio_status());
+        kv(&f, "Built-in codec", k.is_venue ? audio_status() : hda_status());
         heading(&f, "Graphics");
         kv(&f, "Acceleration", gpu_status());
         kv(&f, "External display", display_status());
