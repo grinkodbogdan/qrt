@@ -15,7 +15,7 @@ HOSTCC  ?= gcc
 
 SRC := src/kernel/kernel.c src/kernel/time.c src/kernel/sound.c src/kernel/rt.c src/kernel/hal.c src/kernel/sysinfo.c src/kernel/hwreport.c src/kernel/smp.c \
        src/kernel/acpi.c src/kernel/power.c src/kernel/install.c src/kernel/vfs.c src/kernel/dev.c src/drivers/pci.c src/drivers/uart.c src/drivers/builtin.c src/drivers/buttons.c src/drivers/backlight.c src/drivers/audio.c src/drivers/speaker.c src/drivers/hda.c src/drivers/ish.c src/drivers/battery.c src/drivers/pmic.c src/drivers/e1000.c \
-       src/drivers/iwm/iwm.c src/drivers/iwn/iwn.c src/drivers/wifi.c src/drivers/i915/gpu.c src/drivers/i915/display.c src/drivers/usb/xhci.c src/drivers/usb/ehci.c src/drivers/usb/uaudio.c src/drivers/bt/hci.c src/drivers/bt/l2cap.c src/drivers/bt/a2dp.c src/drivers/bt/sbc.c src/drivers/bt/btusb.c src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
+       src/drivers/iwm/iwm.c src/drivers/iwn/iwn.c src/drivers/wifi.c src/drivers/i915/gpu.c src/drivers/i915/ivb.c src/drivers/i915/display.c src/drivers/usb/xhci.c src/drivers/usb/ehci.c src/drivers/usb/uaudio.c src/drivers/bt/hci.c src/drivers/bt/l2cap.c src/drivers/bt/a2dp.c src/drivers/bt/sbc.c src/drivers/bt/btusb.c src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c src/net/wlan.c src/net/netstack.c \
        src/ui/gfx.c src/ui/shell.c src/ui/clientwin.c src/ui/fontdata.c \
        src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c \
        src/apps/settings.c src/apps/life.c src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/apps/browser.c src/apps/bluetooth.c src/apps/html.c src/ui/osk.c \
@@ -34,7 +34,7 @@ LDFLAGS := -subsystem:efi_application -entry:efi_main -nodefaultlib
 # the native kernel (ExitBootServices, own MM/interrupts/SMP) is 64-bit only
 X64_SRC := src/arch/x64/mm.c src/arch/x64/cpu.c src/arch/x64/apic.c src/arch/x64/native.c \
            src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c src/arch/x64/lsock.c src/arch/x64/signal.c src/arch/x64/lfile.c src/arch/x64/unix.c src/arch/x64/qrtcall.c
-X64_ASM := src/arch/x64/isr.S src/arch/x64/entry.S src/arch/x64/trampoline.S
+X64_ASM := src/arch/x64/isr.S src/arch/x64/entry.S src/arch/x64/trampoline.S src/drivers/iwn/fw.S
 
 IA32_OBJ := $(SRC:src/%.c=build/ia32/%.o)
 # ACPICA (Intel's ACPI interpreter, as in Linux) and QRT's ACPI drivers on top of it
@@ -78,6 +78,7 @@ build/x64/%.o: src/%.c $(wildcard src/*.h src/*/*.h src/*/*/*.h)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(X64_CFLAGS) -c $< -o $@
 
+build/x64/drivers/iwn/fw.o: firmware/iwlwifi-6000g2b-6.ucode
 build/x64/%.o: src/%.S
 	@mkdir -p $(dir $@)
 	$(CC) -target x86_64-unknown-windows-gnu -c $< -o $@

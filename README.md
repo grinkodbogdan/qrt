@@ -189,6 +189,29 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.14.0: Ivy Bridge GPU and HDMI (FZ-G1), Wi-Fi firmware fix
+
+- **The FZ-G1's GPU draws the shell** (`src/drivers/i915/ivb.c`, Intel HD Graphics
+  2500/4000): the blitter engine copies every changed part of the shell's picture to
+  the screen (XY_SRC_COPY_BLT on the blitter ring, as Linux's i915 and the X server did
+  on this generation): forcewake, our pages in the GTT with LLC caching (coherent, no
+  cache flushes), a fence written by MI_FLUSH_DW.  A self-test at start; a failure or a
+  copy that takes over 100 ms hands the screen back to the CPU, and a start that froze
+  is skipped on the next boot.  Settings' GPU switch turns it off.
+- **HDMI output**: plug a monitor into the FZ-G1's HDMI port and it mirrors the screen.
+  The display engine is set up as Linux's `ironlake_crtc_enable` does it for a chipset
+  HDMI port: EDID over GMBUS, the PCH DPLL, pipe B timings and FDI M/N, FDI link
+  training, the PCH transcoder, the HDMI port; plane B shows the panel's own picture
+  and the panel fitter scales it to the monitor's mode (shape kept), so mirroring costs
+  nothing.  Checked every two seconds; unplugging turns it off.  System -> Hardware ->
+  External display shows the monitor and mode, or the step that failed.
+- **Wi-Fi firmware**: the 6235's firmware is also linked into the kernel, so the Wi-Fi
+  driver no longer depends on how the tablet's firmware reports the stick's file names
+  (the FZ-G1 log said "not found"); when the file is missing the log lists what
+  `/lib/firmware` holds.
+- QEMU has no Intel GPU: these paths were not run here.  The suite passes; please
+  report what System -> Hardware says about Acceleration and External display.
+
 ## 0.13.1: EHCI (the FZ-G1's internal USB), its Bluetooth
 
 - **EHCI**, the USB 2 host controller, `src/drivers/usb/ehci.c`: on Intel 7-series

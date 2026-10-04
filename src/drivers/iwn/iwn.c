@@ -320,7 +320,41 @@ static int read_eeprom(void) {
 /* ---- the firmware file (iwn_read_firmware_tlv) ----------------------------------------- */
 static int read_firmware(void) {
     vnode_t *n = vfs_lookup(FW_PATH);
-    if (!n || !n->data || n->size < (u64)sizeof(struct iwn_fw_tlv_hdr)) { LOG("firmware %s not found on the boot stick", FW_PATH); return -1; }
+    if (!n || !n->data || n->size < (u64)sizeof(struct iwn_fw_tlv_hdr)) {
+        /* some firmware FAT drivers list the 8.3 names (IWLWIF~1.UCO): find it by its header */
+        vnode_t *dir = vfs_lookup("/lib/firmware");
+        n = NULL;
+        for (int i = 0; dir && vfs_child_at(dir, i); i++) {
+            vnode_t *c = vfs_child_at(dir, i);
+            if (c->dir || !c->data || c->size < (u64)sizeof(struct iwn_fw_tlv_hdr)) continue;
+            if (!memcmp(c->data + 8, "6000g2b fw", 10)) { n = c; LOG("firmware found as /lib/firmware/%s", c->name); break; }
+        }
+        if (!n) {
+#if defined(__x86_64__)
+            extern const u8 iwn_fw_blob[], iwn_fw_blob_end[];
+            static vnode_t builtin;                           /* the copy linked into the kernel (fw.S) */
+            builtin.data = (u8 *)iwn_fw_blob;
+            builtin.size = (u64)(iwn_fw_blob_end - iwn_fw_blob);
+            if (builtin.size >= (u64)sizeof(struct iwn_fw_tlv_hdr) && !memcmp(iwn_fw_blob + 8, "6000g2b fw", 10)) {
+                n = &builtin;
+                LOG("firmware: using the copy built into the kernel (%llu bytes)", builtin.size);
+            }
+        }
+        if (!n) {
+#endif
+            char names[200] = "";
+            for (int i = 0; dir && vfs_child_at(dir, i); i++) {
+                vnode_t *c = vfs_child_at(dir, i);
+                if (strlen(names) + strlen(c->name) + 12 < sizeof names) {
+                    char one[48];
+                    fmt(one, sizeof one, " %s(%llu)", c->name, c->size);
+                    strlcat(names, one, sizeof names);
+                }
+            }
+            LOG("firmware %s not found on the boot stick; /lib/firmware has:%s", FW_PATH, dir ? names : " (no such directory)");
+            return -1;
+        }
+    }
     sc.fw = n->data;
     sc.fw_len = (usize)n->size;
     const struct iwn_fw_tlv_hdr *h = (const void *)sc.fw;

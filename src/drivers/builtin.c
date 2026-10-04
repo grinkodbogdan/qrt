@@ -46,10 +46,11 @@ static int chipset_probe(device_t *d) {
 }
 static const driver_t drv_chipset = { "chipset", chipset_pci, chipset_acpi, NULL, chipset_probe, NULL };
 
-/* ---- Intel Gen8 graphics (Cherry Trail): the 3D engine presents the screen ---- */
-static const pci_match_t gpu_pci[] = { { 0x8086, 0x22b0, 0x03, PCI_ANY_CLS }, { 0x8086, 0x22b1, 0x03, PCI_ANY_CLS },
+/* ---- Intel graphics: Gen8 (Cherry Trail, 3D engine) and Ivy Bridge (blitter, HDMI: ivb.c) ---- */
+static const pci_match_t gpu_pci[] = { { 0x8086, 0x0166, 0x03, PCI_ANY_CLS }, { 0x8086, 0x0162, 0x03, PCI_ANY_CLS }, { 0x8086, 0x016a, 0x03, PCI_ANY_CLS },
+    { 0x8086, 0x0156, 0x03, PCI_ANY_CLS }, { 0x8086, 0x0152, 0x03, PCI_ANY_CLS }, { 0x8086, 0x015a, 0x03, PCI_ANY_CLS }, { 0x8086, 0x22b0, 0x03, PCI_ANY_CLS }, { 0x8086, 0x22b1, 0x03, PCI_ANY_CLS },
                                        { 0x8086, 0x22b2, 0x03, PCI_ANY_CLS }, { 0x8086, 0x22b3, 0x03, PCI_ANY_CLS }, { 0 } };
-static void gpu_dev_status(device_t *d) { fmt(d->status, sizeof d->status, "Intel HD Graphics (Gen8): %s", gpu_status()); }
+static void gpu_dev_status(device_t *d) { fmt(d->status, sizeof d->status, "Intel HD Graphics: %s", gpu_status()); }
 static int gpu_dev_probe(device_t *d) {
     if (!k.native) return DEV_NOT_MINE;           /* under the firmware GOP keeps the display */
     gpu_probe(d->pci);

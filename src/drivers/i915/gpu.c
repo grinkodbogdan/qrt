@@ -33,6 +33,7 @@
  */
 #include "../../kernel/kernel.h"
 #include "gpu.h"
+#include "ivb.h"
 
 #if defined(__x86_64__)
 #include "../../arch/x64/mm.h"
@@ -600,6 +601,7 @@ static int bring_up(void) {
 }
 
 int gpu_probe(pci_dev_t *d) {
+    if (ivb_matches(d)) return ivb_probe(d);                         /* Ivy Bridge: ivb.c */
     if (!k.native || d->vendor != 0x8086 || (d->device & 0xfffc) != 0x22b0) return 0;
     g.pci = d;
     const char *why = map_regs();
@@ -634,10 +636,11 @@ int gpu_probe(pci_dev_t *d) {
     return 1;
 }
 
-int gpu_supported(void) { return g.pci != NULL; }
-int gpu_active(void) { return g.state == G_READY; }
-int gpu_enabled(void) { return g.pci && hal_setting_get(u"QrtGpuMode", 0) != 1; }
+int gpu_supported(void) { return g.pci != NULL || ivb_present_supported(); }
+int gpu_active(void) { return g.state == G_READY || ivb_active(); }
+int gpu_enabled(void) { return (g.pci || ivb_present_supported()) && hal_setting_get(u"QrtGpuMode", 0) != 1; }
 const char *gpu_status(void) {
+    if (ivb_present_supported()) return ivb_status();
     if (g.pci) return g.status;
     if (!k.native) return "Off: needs the native kernel (this boot is in firmware mode)";
     static char b[80];
@@ -647,7 +650,9 @@ const char *gpu_status(void) {
 
 /* Start the GPU even if the device list did not hand it to the driver. */
 void gpu_autostart(void) {
-    if (!k.native || g.pci) return;
+    if (!k.native || g.pci || ivb_present_supported()) return;
+    for (int i = 0; i < pci_ndevs; i++)
+        if (ivb_matches(&pci_devs[i])) { klog("gpu: Ivy Bridge not bound by the device list - starting it from the shell"); ivb_probe(&pci_devs[i]); return; }
     for (int i = 0; i < pci_ndevs; i++)
         if (pci_devs[i].vendor == 0x8086 && (pci_devs[i].device & 0xfffc) == 0x22b0) {
             klog("gpu: not bound by the device list - starting it from the shell");
@@ -657,6 +662,7 @@ void gpu_autostart(void) {
 }
 
 void gpu_set_enabled(int on) {
+    if (ivb_present_supported()) { ivb_set_enabled(on); return; }
     if (!g.pci) return;
     hal_setting_set(u"QrtGpuMode", on ? 0 : 1);
     if (!on) {
@@ -671,6 +677,7 @@ void gpu_set_enabled(int on) {
 }
 
 void gpu_stats(u32 *frames, u32 *avg_us, int *coherent) {
+    if (ivb_present_supported()) { ivb_stats(frames, avg_us); *coherent = 1; return; }
     *frames = g.frames;
     *avg_us = g.frames ? (u32)(g.busy_us / g.frames) : 0;
     *coherent = !g.clflush;
@@ -697,6 +704,7 @@ found:
 }
 
 int gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int y, int w, int h) {
+    if (ivb_active()) return ivb_present(src, sw, sh, stride, rot, x, y, w, h);
     if (g.state != G_READY || w <= 0 || h <= 0) return 0;
     u32 src_gtt = map_canvas(src, (usize)stride * 4 * sh);
     if (!src_gtt) return 0;

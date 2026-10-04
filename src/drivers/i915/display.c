@@ -26,6 +26,7 @@
  */
 #include "display.h"
 #include "gpu.h"
+#include "ivb.h"
 
 void shell_redraw(void);
 
@@ -867,6 +868,7 @@ static void display_thread(void *arg) {
 }
 
 void display_start(void) {
+    if (k.native && !k.is_venue && ivb_present_supported()) { ivb_display_start(); return; }   /* Ivy Bridge HDMI: ivb.c */
     if (!k.native || !k.is_venue || D.R) return;
     D.R = gpu_regs();
     if (!D.R) { strlcpy(D.status, "Off: the graphics registers are not mapped", sizeof D.status); return; }
@@ -883,7 +885,8 @@ void display_start(void) {
 const char *display_status(void) {
     if (D.virt) return D.status;
     if (!k.native) return "Needs the native kernel";
-    if (!k.is_venue) return "Only on the Venue 8 Pro 5855 (Cherry Trail DisplayPort)";
+    if (!k.is_venue && ivb_present_supported()) return ivb_display_status();
+    if (!k.is_venue) return "Only on the Venue 8 Pro 5855 (Cherry Trail DisplayPort) and Ivy Bridge PCs (HDMI)";
     if (!D.R && !D.status[0]) return "Not started";
     return D.status;
 }
