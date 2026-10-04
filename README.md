@@ -189,6 +189,22 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.12.0: Wi-Fi on the Panasonic FZ-G1
+
+- **Intel Centrino Advanced-N 6235 and 6230** (the FZ-G1's Wi-Fi card): a new driver,
+  `src/drivers/iwn`, ported from OpenBSD's iwn(4) like the Venue's 8260 driver was from
+  iwm(4).  It reads the card's EEPROM (MAC address, regulatory domain, the 2.4 and 5 GHz
+  channels it may use, crystal calibration), runs Intel's initialization firmware for
+  its calibration results and hands them to the runtime firmware, sets up Bluetooth
+  coexistence, scans, associates and encrypts with WPA2 (CCMP in the card) through the
+  same Wi-Fi app and network stack as the Venue.  Legacy rates up to 54 Mb/s (no
+  802.11n yet).  Firmware: `iwlwifi-6000g2b-6.ucode` (Intel's, from linux-firmware),
+  installed under `\lib\firmware` like the 8260's.
+- `src/drivers/wifi.c` hands the Wi-Fi layer's calls to whichever driver found a card.
+- Tested in QEMU, which has no Intel Wi-Fi: the firmware file is found and parsed
+  (both images and their sizes appear in the Wi-Fi log); the card itself needs the
+  tablet - please send the Wi-Fi log (Wi-Fi app) if it does not connect.
+
 ## 0.11.0: install, a proper shutdown, the Panasonic FZ-G1
 
 - **Install QRT on the internal disk.**  Settings -> System -> Install QRT on this
@@ -221,8 +237,7 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
     amplifiers on, 48 kHz stereo.  Tested in QEMU (intel-hda): a 1 kHz tone recorded
     from the codec;
   - **brightness**: Intel Core graphics' backlight PWM, as Linux drives it;
-  - not yet: its Wi-Fi (Intel 6235 needs another driver than the Venue's 8260), the
-    battery level (ACPI methods), the accelerometer, the GPU (pages are drawn by the
+  - not yet (0.12.0 adds Wi-Fi): the battery level (ACPI methods), the accelerometer, the GPU (pages are drawn by the
     CPU, as on the Venue).  If the touchscreen does not answer, hold a key of a USB
     keyboard while QRT starts for firmware mode.
 - `tools/qemu-test.py`: `QRT_NO_USB_AUDIO=1` leaves QEMU's USB audio out.
@@ -652,6 +667,7 @@ Built in:
 - **gpio-buttons**: the Venue's power, volume and Windows buttons
 - **backlight**: the panel backlight through LPSS PWM #1
 - **iwm**: Intel Wireless 8260 (Wi-Fi)
+- **iwn**: Intel Centrino Advanced-N 6230/6235 (Wi-Fi, the Panasonic FZ-G1)
 - **xhci**: USB 3 host controller; devices on root ports, boot-protocol
   keyboards (written from the xHCI specification, with OpenBSD's xhci(4)
   as the reference)
@@ -889,13 +905,13 @@ src/arch/x64/          native kernel: memory, CPU/IDT, APIC, I/O APIC + MSI, sch
                        SMP trampoline, processes, Linux system calls
 src/arch/x64/lsock.c   Linux sockets over the network stack
 src/drivers/           PCI, UART, DesignWare I2C, HID over I2C, touch service, GPIO buttons,
-                       e1000, iwm/ (Intel 8260 Wi-Fi), i915/ (Gen8 GPU), driver table
+                       e1000, iwm/ (Intel 8260 Wi-Fi), iwn/ (Intel 6235 Wi-Fi), i915/ (Gen8 GPU), driver table
 src/net/               802.11 client + WPA2 (wlan.c), ARP/IP/ICMP/UDP/DHCP/DNS (net.c), TCP (tcp.c),
                        HTTP client (http.c), TLS 1.3 client (tls.c), crypto (crypto.c, crypto_tls.c)
 src/ui/                gfx (anti-aliased shapes, text), font atlases, shell (dock, launcher), on-screen keyboard
 src/apps/              Files, Terminal, Browser (+ html.c), Wi-Fi, Settings, System Monitor, Clock, Drawing
                        (Touch Lab and Life are built but not listed)
-firmware/              Intel 8260 firmware (Intel redistributable licence)
+firmware/              Intel 8260 and 6235 firmware (Intel redistributable licence)
 tests/                 HID parser, crypto vectors, WPA2 client (simulated AP), HTTP, HTML, TLS, Linux test program
 tools/                 mkfont.py, mkimage.sh, run-qemu.sh, qemu-test.py, gen_isr.py
 assets/                Inter (SIL OFL 1.1), DejaVu Sans Mono (Bitstream Vera licence)

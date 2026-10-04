@@ -5,7 +5,7 @@
 #include "../net/wlan.h"
 #include "../net/net.h"
 #include "../net/wifilog.h"
-#include "../drivers/iwm/iwm.h"
+#include "../drivers/wifi.h"
 #include "../net/netstack.h"
 
 static struct {
@@ -311,7 +311,7 @@ static int event(const event_t *e, rect_t a) {
 }
 
 static void on_open(void) {
-    if (!wlan_available()) iwm_check_firmware();
+    if (!wlan_available()) wifi_check_firmware();
     st.pressed = -1;
     st.sheet = 0;
     st.sc.off = 0;

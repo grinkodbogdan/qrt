@@ -15,6 +15,7 @@
 #include "ish.h"
 #include "e1000.h"
 #include "iwm/iwm.h"
+#include "iwn/iwn.h"
 #include "i915/gpu.h"
 #include "usb/xhci.h"
 #include "audio.h"
@@ -210,6 +211,13 @@ static void iwm_dev_status(device_t *d) { strlcpy(d->status, iwm_status(), sizeo
 static int iwm_dev_probe(device_t *d) { if (!iwm_probe(d->pci)) return DEV_NOT_MINE; iwm_dev_status(d); return 0; }
 static const driver_t drv_iwm = { "iwm (Wi-Fi)", iwm_pci, NULL, NULL, iwm_dev_probe, iwm_dev_status };
 
+/* ---- Intel Centrino Advanced-N 6230/6235 (src/drivers/iwn, the Panasonic FZ-G1) ------ */
+static const pci_match_t iwn_pci[] = { { 0x8086, 0x088e, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x088f, PCI_ANY_CLS, PCI_ANY_CLS },
+                                       { 0x8086, 0x0090, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x0091, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
+static void iwn_dev_status(device_t *d) { strlcpy(d->status, iwn_status(), sizeof d->status); }
+static int iwn_dev_probe(device_t *d) { if (!iwn_probe(d->pci)) return DEV_NOT_MINE; iwn_dev_status(d); return 0; }
+static const driver_t drv_iwn = { "iwn (Wi-Fi)", iwn_pci, NULL, NULL, iwn_dev_probe, iwn_dev_status };
+
 /* ---- Intel High Definition Audio (PCs, the Panasonic FZ-G1, QEMU's intel-hda) ----------- */
 static const pci_match_t hda_pci[] = { { PCI_ANY_ID, PCI_ANY_ID, 0x04, 0x03 }, { 0 } };
 static void hda_dev_status(device_t *d) { fmt(d->status, sizeof d->status, "HD Audio: %s", hda_status()); }
@@ -233,4 +241,4 @@ static int e1000_dev_probe(device_t *d) {
 }
 static const driver_t drv_e1000 = { "e1000", e1000_pci, NULL, NULL, e1000_dev_probe, e1000_dev_status };
 
-const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_battery, &drv_pmic, &drv_ish, &drv_iwm, &drv_e1000, &drv_xhci, &drv_hda, &drv_audio, &drv_chipset, NULL };
+const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_battery, &drv_pmic, &drv_ish, &drv_iwm, &drv_iwn, &drv_e1000, &drv_xhci, &drv_hda, &drv_audio, &drv_chipset, NULL };
