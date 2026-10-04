@@ -18,10 +18,12 @@ typedef struct thread {
     int tid;                    /* Linux thread id (user threads) */
     u64 clear_tid;              /* CLONE_CHILD_CLEARTID / set_tid_address: zeroed and woken at exit */
     volatile int in_sys;        /* inside a system call: may hold kernel locks */
+    u32 sys_nr; u64 sys_a0;     /* the last system call it made, and its first argument (thread dumps) */
     int kbuf;                   /* sendfile: the kernel's own buffer stands in for a user one */
     int irq_depth;              /* inside interrupt handlers: a fault there is the kernel's, not the program's */
     volatile int on_cpu;        /* the core running it, -1 if none */
     u64 cpu_ticks;              /* ticks spent running */
+    int prio;                   /* the shell, sound: runs at the tick it wakes, ahead of the round */
     u64 sig_mask, sig_pending;  /* blocked signals; signals sent to this thread */
     u64 sig_saved_mask;         /* rt_sigsuspend: the mask to restore after the handler */
     int sig_suspended;
@@ -31,6 +33,8 @@ typedef struct thread {
     u8 fpu[512] __attribute__((aligned(16)));
 } thread_t;
 
+void      thread_set_prio(thread_t *t);            /* see thread_t.prio */
+void      sched_dump_threads(void);                 /* every program thread to the kernel log */
 void      sched_init(void);                         /* current context -> thread "shell" */
 thread_t *thread_create_suspended(const char *name, void (*fn)(void *), void *arg, u64 cr3);   /* runs after thread_wake() */
 void      thread_stop(thread_t *t);                 /* a thread of a stopped process: never runs again (any core) */

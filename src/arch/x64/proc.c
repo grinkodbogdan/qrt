@@ -1046,3 +1046,31 @@ i64 proc_signal(proc_t *p, int pid, int sig) {
     }
     return n ? 0 : -3;                                         /* ESRCH */
 }
+
+/* tests and bug reports: what every program thread is doing (Ctrl-T p ; on the serial test channel) */
+void sched_dump_threads(void) {
+    static const char *const st[] = { "runnable", "sleeping", "blocked", "dead", "?", "?", "?", "?" };
+    thread_t *all[256];
+    int n = sched_threads(all, 256);
+    for (int i = 0; i < n; i++) {
+        thread_t *t = all[i];
+        if (!t->proc) continue;
+        klog("thread: %s pid %d tid %d %s%s sys %u(%llx) cpu %llu", t->proc->name, t->proc->pid, t->tid,
+             st[t->state & 7], t->in_sys ? " in-sys" : "", t->sys_nr, t->sys_a0, t->cpu_ticks);
+    }
+    /* and the descriptors that are ready to read: data nobody picks up shows here */
+    int fd_poll(proc_t *p, int fd, int events);
+    for (int i = 0; i < nprocs; i++) {
+        proc_t *p = procs[i];
+        if (p->exited) continue;
+        char line[200];
+        usize o = fmt(line, sizeof line, "fds: pid %d readable:", p->pid);
+        int any = 0;
+        for (int fd = 0; fd < MAX_FDS && o < sizeof line - 16; fd++) {
+            int ty = p->fd[fd].type;
+            if (!ty || ty == F_FILE || ty == F_DIR || ty == F_TTY || ty == F_NULL) continue;
+            if (fd_poll(p, fd, 1) & 1) { o += fmt(line + o, sizeof line - o, " %d%c", fd, "?fdtnSPO"[ty & 7]); any = 1; }
+        }
+        if (any) klog("%s", line);
+    }
+}

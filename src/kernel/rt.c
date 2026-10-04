@@ -243,13 +243,14 @@ void kfree(void *p) {
 }
 
 /* ---- logging ------------------------------------------------------------ */
-#define LOG_LINES 64
-static char log_ring[LOG_LINES][96];
+#define LOG_LINES 128
+#define LOG_COLS  240
+static char log_ring[LOG_LINES][LOG_COLS];
 static int log_count;
 
 void klog(const char *f, ...) {
-    char line[96];
-    c16 wide[100];
+    char line[LOG_COLS];
+    c16 wide[LOG_COLS + 4];
     va_list ap;
     va_start(ap, f);
     vfmt(line, sizeof line, f, ap);
@@ -267,7 +268,7 @@ void klog(const char *f, ...) {
         if (k.native) irq_restore(fl);
 #endif
     } else if (k.st && k.st->ConOut) {
-        utf8_to_str16(wide, 98, line);
+        utf8_to_str16(wide, LOG_COLS + 2, line);
         usize n = str16len(wide);
         wide[n] = '\r'; wide[n + 1] = '\n'; wide[n + 2] = 0;
         k.st->ConOut->OutputString(k.st->ConOut, wide);

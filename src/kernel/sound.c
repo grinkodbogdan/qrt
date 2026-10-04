@@ -271,7 +271,7 @@ static void sound_thread(void *arg) {
 
 void snd_init(void) {
     if (!k.native) return;
-    thread_create("sound", sound_thread, NULL, 0);
+    thread_set_prio(thread_create("sound", sound_thread, NULL, 0));
     klog("sound: mixer ready, %s", snd_status());
 }
 #else

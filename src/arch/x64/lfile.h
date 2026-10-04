@@ -3,7 +3,7 @@
 #include "proc.h"
 
 /* linux.c helpers the objects use */
-int  fd_alloc(proc_t *p, int from);                       /* lowest free descriptor >= from, or -EMFILE */
+int  fd_alloc(proc_t *p, int from);                       /* lowest free descriptor >= from, taken (F_RESV) for the caller to fill in; or -EMFILE */
 int  fd_poll(proc_t *p, int fd, int events);              /* poll() readiness of one descriptor */
 void ufile_ref(ufile_t *f);                               /* one more holder of this open file (dup, fork, in flight) */
 void ufile_unref(ufile_t *f);

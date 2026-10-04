@@ -76,7 +76,7 @@ typedef struct { u32 ip; u8 mac[6]; u64 expires; } arp_entry_t;
 static arp_entry_t arp[16];
 
 typedef struct { int used; u32 hop; u64 since, last_req; u8 pkt[1500]; usize len; } pending_t;
-static pending_t pending[8];
+static pending_t pending[64];
 
 static arp_entry_t *arp_find(u32 ip) {
     u64 now = k_now_ms();
@@ -226,7 +226,7 @@ int net_ping(u32 dst, u16 id, u16 seq, const void *data, usize len) {
 
 /* ---- UDP -------------------------------------------------------------------------- */
 typedef struct { u16 port; udp_fn fn; void *ctx; } udp_bind_t;
-static udp_bind_t binds[16];
+static udp_bind_t binds[256];              /* a browser resolves many names at once: two sockets each */
 static u16 next_ephemeral = 49152;
 
 int udp_bind(u16 port, udp_fn fn, void *ctx) {

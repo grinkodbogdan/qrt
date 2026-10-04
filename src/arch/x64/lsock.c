@@ -9,6 +9,7 @@
 #include "../../net/net.h"
 #include "../../net/netstack.h"
 #include "sched.h"
+#include "lfile.h"
 
 enum { EBADF = 9, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EINVAL = 22, EMFILE = 24, ENOTSOCK = 88, EDESTADDRREQ = 89,
        EMSGSIZE = 90, EPROTONOSUPPORT = 93, EOPNOTSUPP = 95, EAFNOSUPPORT = 97, EADDRINUSE = 98, ENETUNREACH = 101,
@@ -16,7 +17,7 @@ enum { EBADF = 9, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EINVAL = 22, EMFILE = 2
        EHOSTUNREACH = 113, EINTR = 4 };
 enum { K_STREAM = 1, K_DGRAM = 2, K_ICMP = 3 };
 
-#define NSOCKS 32
+#define NSOCKS 512
 #define QLEN   16
 
 typedef struct { u32 ip; u16 port; u16 len; u8 data[1500]; } dgram_t;
@@ -162,12 +163,13 @@ i64 lsock_socket(proc_t *p, int domain, int type, int proto) {
     int kind = type & 0xf, flags = type & ~0xf;
     int k2 = kind == 1 ? K_STREAM : (kind == 2 && proto == 1) ? K_ICMP : kind == 2 ? K_DGRAM : (kind == 3 && proto == 1) ? K_ICMP : 0;
     if (!k2) return -EPROTONOSUPPORT;
-    int si = -1;
-    for (int i = 0; i < NSOCKS; i++) if (!socks[i].used) { si = i; break; }
-    if (si < 0) return -ENOMEM;
-    int fd = -1;
-    for (int i = 0; i < MAX_FDS; i++) if (!p->fd[i].type) { fd = i; break; }
+    int fd = fd_alloc(p, 0);                               /* taken at once (see alloc_fd) */
     if (fd < 0) return -EMFILE;
+    int si = -1;
+    u64 fl = irq_save();                                   /* the table is shared by every program */
+    for (int i = 0; i < NSOCKS; i++) if (!socks[i].used) { si = i; socks[i].used = 1; break; }
+    irq_restore(fl);
+    if (si < 0) { p->fd[fd].type = F_NONE; return -ENOMEM; }
     lsock_t *s = &socks[si];
     memset(s, 0, sizeof *s);
     s->used = 1; s->refs = 1; s->kind = k2; s->tcp = -1;

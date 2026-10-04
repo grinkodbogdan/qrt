@@ -137,6 +137,9 @@ static int inject_key(c16 ch, event_t *out) {
         else if (*p >= '0' && *p <= '9') *v = *v * 10 + (*p - '0');
     }
     if (buf[0] == 'v') { display_virtual(x, y); return 1; }   /* tests: plug a monitor of x by y (0: unplug) */
+#if defined(__x86_64__)
+    if (buf[0] == 'p') { if (k.native) sched_dump_threads(); return 1; }   /* tests: what every program thread is doing */
+#endif
     out->x = CLAMP(x, 0, (int)k.fb_w - 1);
     out->y = CLAMP(y, 0, (int)k.fb_h - 1);
     /* upper case: the same with two fingers on the glass (D, M, U) */

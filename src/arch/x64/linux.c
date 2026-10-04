@@ -68,8 +68,16 @@ static void abs_path(proc_t *p, int dirfd, const char *in, char *out, usize cap)
 static u64 now_ns(void) { return k_now_us() * 1000; }
 static u64 epoch_now(void) { return k.epoch_at_boot + k_now_ms() / 1000; }
 
+/* The lowest free descriptor from 'from', taken at once (F_RESV) for the caller to fill in.
+ * Finding it and taking it must not be split: system calls can be preempted, and another
+ * thread of the program (a DNS lookup opening a socket, say) would get the same number -
+ * two owners of one descriptor, and the first close pulls it from under the other. */
 static int alloc_fd(proc_t *p, int from) {
-    for (int i = from; i < MAX_FDS; i++) if (p->fd[i].type == F_NONE) return i;
+    if (from < 0) from = 0;
+    u64 fl = irq_save();
+    for (int i = from; i < MAX_FDS; i++)
+        if (p->fd[i].type == F_NONE) { p->fd[i] = (ufile_t){ F_RESV }; irq_restore(fl); return i; }
+    irq_restore(fl);
     return -EMFILE;
 }
 int fd_alloc(proc_t *p, int from) { return alloc_fd(p, from); }
@@ -232,9 +240,17 @@ static i64 do_write(proc_t *p, int fd, u64 buf, u64 len) {
         if (f->flags & KMSG) {                                    /* /dev/kmsg: lines of the kernel log */
             const char *s = (const char *)(usize)buf;
             for (u64 i = 0; i < len;) {
-                char line[200];
+                char line[240];
                 usize n = 0;
-                while (i < len && s[i] != '\n' && n < sizeof line - 1) { if (s[i] != '\r') line[n++] = s[i]; i++; }
+                while (i < len && s[i] != '\n' && n < sizeof line - 1) {
+                    if (s[i] == 0x1b && i + 1 < len && s[i + 1] == '[') {     /* colours (ESC [ ... m): not for the log */
+                        for (i += 2; i < len && s[i] != '\n' && !(s[i] >= 0x40 && s[i] <= 0x7e); i++) {}
+                        if (i < len && s[i] != '\n') i++;
+                        continue;
+                    }
+                    if (s[i] != '\r') line[n++] = s[i];
+                    i++;
+                }
                 if (i < len && s[i] == '\n') i++;
                 line[n] = 0;
                 klog("%s: %s", p->name, line);
@@ -864,6 +880,7 @@ static void syscall_dispatch_locked(frame_t *f) {
     thread_t *me = thread_current();
     p->syscalls++;
     me->in_sys = 1;
+    me->sys_nr = (u32)nr; me->sys_a0 = a0;
     /* native QRT programs: QRT's own numbers (sdk/syscalls.txt); the QRT-only calls,
      * and the rest mapped onto the kernel service with the same semantics */
     if (p->native) {
@@ -1122,7 +1139,7 @@ static void syscall_dispatch_locked(frame_t *f) {
         break;
     case 72:                                            /* fcntl */
         if ((int)a0 < 0 || (int)a0 >= MAX_FDS || !p->fd[a0].type) { r = -EBADF; break; }
-        if (a1 == 0 || a1 == 1030) { int fd = alloc_fd(p, (int)a2); if (fd >= 0) { p->fd[fd] = p->fd[a0]; fd_addref(p, fd); p->fd[fd].cloexec = a1 == 1030; } r = fd; }
+        if (a1 == 0 || a1 == 1030) { int fd = alloc_fd(p, (int)a2); if (fd >= 0) { p->fd[fd] = p->fd[a0]; fd_addref(p, fd); p->fd[fd].cloexec = a1 == 1030; } r = fd; }   /* F_DUPFD(_CLOEXEC) */
         else if (a1 == 1) r = p->fd[a0].cloexec;           /* F_GETFD */
         else if (a1 == 1033 || a1 == 1034) r = 0;          /* F_ADD_SEALS, F_GET_SEALS: no seals are enforced */
         else if (a1 == 2) { p->fd[a0].cloexec = (int)(a2 & 1); r = 0; }   /* F_SETFD */
@@ -1136,8 +1153,8 @@ static void syscall_dispatch_locked(frame_t *f) {
         break;
     case 32: {
         int fd = alloc_fd(p, 0);
-        if (fd >= 0 && (int)a0 >= 0 && (int)a0 < MAX_FDS && p->fd[a0].type) { p->fd[fd] = p->fd[a0]; fd_addref(p, fd); p->fd[fd].cloexec = 0; }
-        else if (fd >= 0) fd = -EBADF;
+        if (fd >= 0 && (int)a0 >= 0 && (int)a0 < MAX_FDS && p->fd[a0].type && p->fd[a0].type != F_RESV) { p->fd[fd] = p->fd[a0]; fd_addref(p, fd); p->fd[fd].cloexec = 0; }
+        else if (fd >= 0) { p->fd[fd].type = F_NONE; fd = -EBADF; }
         r = fd;
         break;
     }
@@ -1205,7 +1222,7 @@ static void syscall_dispatch_locked(frame_t *f) {
         if (!out) { r = 0; break; }
         if (!UOK(out, 16)) { r = -EFAULT; break; }
         u64 *rl = (u64 *)(usize)out;
-        rl[0] = rl[1] = res == 3 ? USER_STACK_SIZE : ~0ull;     /* RLIMIT_STACK */
+        rl[0] = rl[1] = res == 3 ? USER_STACK_SIZE : res == 7 ? MAX_FDS : ~0ull;     /* RLIMIT_STACK, RLIMIT_NOFILE */
         r = 0; break;
     }
     case 204:                                                   /* sched_getaffinity */

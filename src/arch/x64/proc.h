@@ -12,7 +12,7 @@ typedef struct {
 } term_t;
 void term_append(term_t *t, const char *s, usize n);
 
-enum { F_NONE, F_FILE, F_DIR, F_TTY, F_NULL, F_SOCK, F_PIPE, F_OBJ };
+enum { F_NONE, F_FILE, F_DIR, F_TTY, F_NULL, F_SOCK, F_PIPE, F_OBJ, F_RESV /* taken, being filled in */ };
 struct upipe;
 
 /* Kernel objects behind descriptors and mappings, shared by every process that
@@ -33,7 +33,7 @@ typedef struct {
     int cloexec;                  /* FD_CLOEXEC: closed by execve */
 } ufile_t;
 
-#define MAX_FDS  256
+#define MAX_FDS  1024
 
 /* PROT_* as Linux numbers them */
 #define PROT_READ  1

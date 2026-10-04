@@ -41,6 +41,11 @@ static int smp_sched;            /* other cores take threads */
  * frame in Ladybird passes through several processes (input, the UI, WebContent, the shell),
  * and each hand-over used to wait for the quantum */
 static volatile int wake_pending;
+/* A prio thread that just woke (the shell, which also drives the network, and sound) runs
+ * next on the boot core, for one quantum: with a busy browser in the round it used to wait
+ * for every one of its threads, and packets, frames and sound waited with it. */
+static thread_t *boost;
+void thread_set_prio(thread_t *t) { if (t) t->prio = 1; }
 
 thread_t *thread_current(void) { percpu_t *c = this_cpu(); return c ? c->cur : NULL; }
 u64 sched_idle_ticks(void) { return cpus[0] ? cpus[0]->idle_ticks : 0; }
@@ -139,6 +144,11 @@ static int may_run(thread_t *t, percpu_t *c) { return c->index == 0 || t->proc !
 /* under slock */
 static thread_t *pick_next(percpu_t *c) {
     thread_t *cur = c->cur;
+    if (c->index == 0 && boost) {
+        thread_t *b = boost;
+        boost = NULL;
+        if (b->state == T_RUNNABLE && (b->on_cpu < 0 || b == cur)) return b;
+    }
     if (threads) {
         thread_t *start = rr ? rr->next : threads, *t = start;
         for (int i = 0; i < 4096; i++) {
@@ -217,7 +227,7 @@ static void on_tick(frame_t *f) {
     slock_get();
     thread_t *t = threads;
     if (t) do {
-        if (t->state == T_SLEEPING && ticks >= t->wake_tick) { t->state = T_RUNNABLE; woke = 1; if (t->proc) kick(t); }
+        if (t->state == T_SLEEPING && ticks >= t->wake_tick) { t->state = T_RUNNABLE; woke = 1; if (t->prio) boost = t; if (t->proc) kick(t); }
         t = t->next;
     } while (t != threads);
     slock_put();
@@ -290,6 +300,7 @@ void sched_init(void) {
     __asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
     shell->kstack_top = (rsp + 4096) & ~4095ull;   /* approximate: the boot stack */
     shell->name = "shell";
+    shell->prio = 1;
     shell->cr3 = kernel_cr3();
     shell->state = T_RUNNABLE;
     shell->on_cpu = 0;
@@ -406,7 +417,7 @@ void thread_wake(thread_t *t) {
     u64 fl = irq_save();
     slock_get();
     int woke = 0;
-    if (t->state == T_BLOCKED || t->state == T_SLEEPING) { t->state = T_RUNNABLE; woke = 1; }
+    if (t->state == T_BLOCKED || t->state == T_SLEEPING) { t->state = T_RUNNABLE; woke = 1; if (t->prio) boost = t; }
     slock_put();
     if (woke) kick(t);
     irq_restore(fl);

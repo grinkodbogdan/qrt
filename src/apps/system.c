@@ -221,13 +221,23 @@ static void draw(canvas_t *c, rect_t a) {
     } else {
         const font_t *m = font_pick(F_MONO, dp(12));
         rect_t box = { body.x, f.y + dp(4), body.w, 0 };
-        int n = 0;
-        while (klog_line(n)) n++;
-        box.h = n * m->line + dp(20);
+        /* long lines wrap (the font is monospaced), so the end of an error is not cut off */
+        int cols = MAX(20, (box.w - dp(24)) / MAX(1, text_width(m, "M")));
+        int n = 0, rows = 0;
+        while (klog_line(n)) rows += MAX(1, ((int)strlen(klog_line(n)) + cols - 1) / cols), n++;
+        box.h = rows * m->line + dp(20);
         gfx_rrect(c, box, dp(12), RGB(0x1d, 0x1d, 0x20));
         int y = box.y + dp(10);
-        for (int i = 0; i < n; i++, y += m->line)
-            if (y + m->line > body.y && y < body.y + body.h) gfx_text_fit(c, m, box.x + dp(12), y, box.w - dp(24), klog_line(i), RGB(0xde, 0xdd, 0xda));
+        for (int i = 0; i < n; i++) {
+            const char *l = klog_line(i);
+            int len = (int)strlen(l);
+            for (int o = 0; o == 0 || o < len; o += cols, y += m->line) {
+                if (y + m->line <= body.y || y >= body.y + body.h) continue;
+                char seg[256];
+                strlcpy(seg, l + o, (usize)MIN(cols + 1, (int)sizeof seg));
+                gfx_text(c, m, box.x + dp(12), y, seg, RGB(0xde, 0xdd, 0xda));
+            }
+        }
         f.y = box.y + box.h;
     }
     f.y += dp(24);
