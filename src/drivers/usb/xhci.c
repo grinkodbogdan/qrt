@@ -31,8 +31,7 @@
 #include "../../arch/x64/mm.h"
 #include "../../arch/x64/sched.h"
 
-typedef struct { volatile u64 ptr; volatile u32 status, flags; } trb_t;
-typedef struct { trb_t *trb; u32 n, idx, cycle; } ring_t;
+#include "usbint.h"
 
 /* TRB types and fields (xHCI 6.4) */
 #define TRB_TYPE(t)     ((u32)(t) << 10)
@@ -86,66 +85,6 @@ typedef struct { trb_t *trb; u32 n, idx, cycle; } ring_t;
 #define PS_CSC      (1u << 17)
 #define PS_PRC      (1u << 21)
 #define PS_KEEP     0x0e00c3e0u            /* never write back RW1C bits or PED */
-#define SPEED_FULL  1
-#define SPEED_LOW   2
-#define SPEED_HIGH  3
-#define SPEED_SUPER 4
-
-#define MAX_DEV     16
-#define RING_N      256
-
-#define MAX_EP 8
-#define IN_BUF 4096
-
-typedef struct {
-    int open, dci, in, type, mps;          /* type: 2 bulk, 3 interrupt (USB attributes) */
-    ring_t ring;
-    u8 *buf;                               /* IN: receive buffer; OUT: bounce buffer */
-    usb_in_cb cb;
-    void *arg;
-    volatile int done, cc, residue;
-    /* isochronous OUT: a ring of packets the class driver keeps filled */
-    int iso, iso_slot, iso_n;              /* bytes per packet buffer, packets in the ring */
-    u8 *iso_buf;
-    volatile u32 iso_queued, iso_done;     /* packets pushed / completed (free-running) */
-    usb_iso_fill fill;
-    u32 iso_errs;
-    int nq, qnext;                         /* interrupt IN: transfers kept queued, the next buffer slice */
-} uep_t;
-
-typedef struct { u8 addr, attr, iface; u16 mps; u8 ival; } epdesc_t;
-
-struct udev {
-    int used, slot, port, speed;           /* port: the root port the device's tree hangs from */
-    u32 route;                             /* route string: a hub port number per tier below the root */
-    int depth;                             /* 0: on a root port */
-    struct udev *parent;                   /* the hub it is plugged into (NULL: root port) */
-    int pport;                             /* the port on that hub */
-    int tt_slot, tt_port;                  /* full/low speed behind a high-speed hub: its transaction translator */
-    int hub_ports;                         /* a hub: number of downstream ports */
-    u32 hub_present;                       /* bit n: a device is attached to hub port n+1 */
-    int hub_ival;                          /* hubs: next status poll */
-    u8 *out, *in;                          /* device context, input context */
-    ring_t ep0;
-    u8 *buf;                               /* DMA page for control data */
-    u16 vid, pid, mps0;
-    u8 iproduct;
-    u8 *cfgdesc;                           /* the whole configuration descriptor, for class drivers */
-    int cfglen;
-    u8 dclass, iclass, isub, iproto;
-    char what[48];
-    int max_dci;
-    uep_t ep[MAX_EP];
-    epdesc_t eps[16];
-    int neps;
-    int kbd;                               /* boot keyboard */
-    int mouse;                             /* a pointer: its report layout */
-    hidmouse_t hm;
-    i2chid_t *touch;                       /* a touchscreen: its fingers (src/drivers/hidparse.c) */
-    int touch_fingers;
-    u8 prev[8];
-    volatile int ctl_done, ctl_cc;
-};
 
 static struct {
     pci_dev_t *pci;
@@ -221,7 +160,7 @@ static u64 ring_push(ring_t *r, u64 ptr, u32 status, u32 flags) {
 
 /* ---- events ------------------------------------------------------------------------ */
 static udev_t *dev_by_slot(u32 slot) {
-    for (int i = 0; i < MAX_DEV; i++) if (x.dev[i].used && x.dev[i].slot == (int)slot) return &x.dev[i];
+    for (int i = 0; i < MAX_DEV; i++) if (x.dev[i].used && !x.dev[i].hc && x.dev[i].slot == (int)slot) return &x.dev[i];
     return NULL;
 }
 
@@ -279,9 +218,9 @@ static void events_locked(void) {
 }
 
 void usb_poll(void) {
-    if (!x.evt) return;
     LOCK();
-    events_locked();
+    if (x.evt) events_locked();
+    ehci_poll_locked();
     UNLOCK();
 }
 
@@ -329,6 +268,7 @@ static void ep_ctx(u32 *c, int type, int mps, int interval, u64 ring, int avg) {
 
 /* ---- control transfers ------------------------------------------------------------------ */
 static int control(udev_t *d, u8 rtype, u8 req, u16 val, u16 idx, void *data, u16 len) {
+    if (d->hc) return ehci_control(d, rtype, req, val, idx, data, len);
     int in = rtype & 0x80;
     if (len > 4096) return -1;
     if (!in && len) memcpy(d->buf, data, len);
@@ -368,9 +308,17 @@ static int ep_open(udev_t *d, u8 addr, usb_in_cb cb, void *arg) {
     e->in = (addr & 0x80) != 0;
     e->type = de->attr & 3;
     e->mps = de->mps & 0x7ff;
+    e->iso_slot = de->ival;                                                /* EHCI: the polling interval (until opened) */
     e->dci = (addr & 15) * 2 + (e->in ? 1 : 0);
     e->cb = cb;
     e->arg = arg;
+    if (d->hc) {
+        if (ehci_ep_open(d, e)) return -1;
+        LOCK();
+        e->open = 1;
+        UNLOCK();
+        return 0;
+    }
     int ival = 0;
     if (e->type == 3) {
         if (d->speed == SPEED_HIGH || d->speed == SPEED_SUPER) ival = MAX(de->ival, 1) - 1;
@@ -401,6 +349,7 @@ int usb_bulk_out(udev_t *d, u8 addr, const void *data, int len) {
     uep_t *e = NULL;
     for (int i = 0; i < MAX_EP; i++) if (d->ep[i].open && d->ep[i].dci == (addr & 15) * 2) e = &d->ep[i];
     if (!e || len > IN_BUF) return -1;
+    if (d->hc) return ehci_bulk_out(d, e, data, len);
     memcpy(e->buf, data, (usize)len);
     LOCK();
     e->done = 0;
@@ -442,6 +391,7 @@ int usb_speed(udev_t *d) { return d->speed; }
  * each an Isoch TRB that starts as soon as possible after the one before it.  Called
  * from the sound thread every few milliseconds; completions are counted by the event loop. */
 int usb_iso_open(udev_t *d, u8 addr, int mps, int binterval, usb_iso_fill fill, void *arg) {
+    if (d->hc) return -1;                                                  /* isochronous on EHCI: not yet */
     if (!d || !d->used || (addr & 0x80)) return -1;
     uep_t *e = NULL;
     for (int i = 0; i < MAX_EP; i++) if (d->ep[i].open && d->ep[i].dci == (addr & 15) * 2) e = &d->ep[i];   /* re-open after SET_INTERFACE */
@@ -728,8 +678,11 @@ static void port_reset(int p) {
 
 static void free_dev(udev_t *d) {
     uaudio_detach(d);                                                  /* class drivers let go first */
-    if (d->slot) command(0, 0, TRB_TYPE(T_DISABLE_SLOT) | ((u32)d->slot << 24), NULL);
-    if (d->slot >= 0 && d->slot <= x.slots) x.dcbaa[d->slot] = 0;
+    if (d->hc) ehci_free_dev(d);
+    else {
+        if (d->slot) command(0, 0, TRB_TYPE(T_DISABLE_SLOT) | ((u32)d->slot << 24), NULL);
+        if (d->slot >= 0 && d->slot <= x.slots) x.dcbaa[d->slot] = 0;
+    }
     d->used = 0;                                                       /* its DMA pages are kept for reuse */
 }
 
@@ -737,7 +690,7 @@ static void hub_setup(udev_t *d);
 
 /* Address and configure a device that has just been reset and enabled:
  * on root port root (1-based) at the given speed, or behind hub parent's port. */
-static void enumerate(int root, int speed, udev_t *parent, int pport) {
+static void enumerate(int hc, int ehc, int root, int speed, udev_t *parent, int pport) {
     udev_t *d = NULL;
     for (int i = 0; i < MAX_DEV; i++) if (!x.dev[i].used) { d = &x.dev[i]; break; }
     if (!d) { klog("usb: too many devices"); return; }
@@ -754,6 +707,8 @@ static void enumerate(int root, int speed, udev_t *parent, int pport) {
     memset(d->out, 0, 4096);
     d->port = root;
     d->speed = speed;
+    d->hc = hc;
+    d->ehc = ehc;
     d->parent = parent;
     d->pport = pport;
     if (parent) {
@@ -763,7 +718,14 @@ static void enumerate(int root, int speed, udev_t *parent, int pport) {
         else { d->tt_slot = parent->tt_slot; d->tt_port = parent->tt_port; }
     }
     u32 slot = 0;
-    int cc = command(0, 0, TRB_TYPE(T_ENABLE_SLOT), &slot);
+    int cc;
+    if (hc) {
+        d->mps0 = d->speed == SPEED_HIGH ? 64 : 8;
+        d->used = 1;
+        if (ehci_address(d)) { klog("usb: port %d: could not address the device", root); free_dev(d); return; }
+        goto addressed;
+    }
+    cc = command(0, 0, TRB_TYPE(T_ENABLE_SLOT), &slot);
     if (cc != CC_SUCCESS || !slot || (int)slot > x.slots) { klog("usb: port %d: no slot (cc %d)", root, cc); return; }
     d->slot = (int)slot;
     d->used = 1;
@@ -776,9 +738,11 @@ static void enumerate(int root, int speed, udev_t *parent, int pport) {
     cc = command(phys(d->in), 0, TRB_TYPE(T_ADDRESS_DEV) | (slot << 24), NULL);
     if (cc != CC_SUCCESS) { klog("usb: port %d: address device failed (cc %d)", d->port, cc); free_dev(d); return; }
     hal_delay_us(2000);
+addressed:;
     u8 desc[18];
     if (control(d, 0x80, 6, 0x0100, 0, desc, 8)) { klog("usb: port %d: no device descriptor", d->port); free_dev(d); return; }
-    if (desc[7] && desc[7] != d->mps0 && d->speed != SPEED_SUPER) {    /* full speed: the real EP0 packet size */
+    if (desc[7] && desc[7] != d->mps0 && d->speed != SPEED_SUPER && hc) { d->mps0 = desc[7]; ehci_set_mps0(d); }
+    else if (desc[7] && desc[7] != d->mps0 && d->speed != SPEED_SUPER) {    /* full speed: the real EP0 packet size */
         d->mps0 = desc[7];
         memset(d->in, 0, 4096);
         ictx(d, 0)[1] = 2;
@@ -853,7 +817,7 @@ static void attach(int p) {
     port_reset(p);
     u32 v = rd(x.op, PORTSC(p));
     if (!(v & PS_CCS) || !(v & PS_PED)) { klog("usb: port %d did not enable (%08x)", p + 1, v); return; }
-    enumerate(p + 1, PS_SPEED(v), NULL, 0);
+    enumerate(0, 0, p + 1, PS_SPEED(v), NULL, 0);
 }
 
 /* free a device and everything plugged into it */
@@ -862,6 +826,10 @@ static void detach_tree(udev_t *d) {
     klog("usb: port %d: %s unplugged", d->port, d->what);
     free_dev(d);
 }
+
+void usb_enumerate(int hc, int ehc, int root, int speed, udev_t *parent, int pport) { enumerate(hc, ehc, root, speed, parent, pport); }
+void usb_detach_tree(udev_t *d) { detach_tree(d); }
+udev_t *usb_devices(void) { return x.dev; }
 
 /* ---- USB 2 hubs (USB 2.0 chapter 11) -------------------------------------------------------- */
 #define HUB_PORT_POWER   8
@@ -885,13 +853,16 @@ static void hub_setup(udev_t *h) {
         return;
     }
     h->hub_ports = MIN(hd[2], 15);
+    int cc = 0;
+    if (h->hc) goto powered;
     /* tell the controller it is a hub: slot context Hub, Number of Ports (and TT think time) */
     memset(h->in, 0, 4096);
     ictx(h, 0)[1] = 1;
     slot_ctx(h, MAX(h->max_dci, 1));
     if (h->speed == SPEED_HIGH) ictx(h, 1)[2] |= (u32)((hd[3] >> 5) & 3) << 16;
-    int cc = command(phys(h->in), 0, TRB_TYPE(T_EVAL_CTX) | ((u32)h->slot << 24), NULL);
+    cc = command(phys(h->in), 0, TRB_TYPE(T_EVAL_CTX) | ((u32)h->slot << 24), NULL);
     if (cc != CC_SUCCESS) cc = command(phys(h->in), 0, TRB_TYPE(T_CONFIG_EP) | ((u32)h->slot << 24), NULL);
+powered:
     fmt(h->what, sizeof h->what, "USB hub, %d ports", h->hub_ports);
     klog("usb: port %d%s: %04x:%04x hub with %d ports, %s speed (context cc %d)", h->port, h->parent ? " (behind a hub)" : "",
          h->vid, h->pid, h->hub_ports, h->speed == SPEED_HIGH ? "high" : "full", cc);
@@ -920,7 +891,7 @@ static void hub_poll(udev_t *h) {
             thread_sleep_ms(10);
             int speed = (st & 0x200) ? SPEED_LOW : (st & 0x400) ? SPEED_HIGH : SPEED_FULL;
             h->hub_present |= 1u << (port - 1);
-            enumerate(h->port, speed, h, port);
+            enumerate(h->hc, h->ehc, h->port, speed, h, port);
         } else if (!(st & 1) && present) {
             h->hub_present &= ~(1u << (port - 1));
             for (int i = 0; i < MAX_DEV; i++)
@@ -1026,9 +997,10 @@ int xhci_probe(pci_dev_t *pd) {
 }
 
 int xhci_poll(event_t *out, int max) {
-    if (!x.active) return 0;
+    if (!x.active && !ehci_count()) return 0;
     LOCK();
-    events_locked();
+    if (x.active) events_locked();
+    ehci_poll_locked();
     int n = 0;
     while (n < max && n < x.nkeys) { out[n] = x.keys[n]; n++; }
     x.nkeys = 0;
@@ -1045,6 +1017,7 @@ int xhci_poll(event_t *out, int max) {
     if (now >= next_hub) {
         next_hub = now + 250;
         for (int i = 0; i < MAX_DEV; i++) if (x.dev[i].used && x.dev[i].hub_ports) hub_poll(&x.dev[i]);
+        ehci_ports();
     }
     if (x.rep_on && now >= x.rep_next && n < max) {                    /* key repeat */
         out[n++] = (event_t){ .type = EV_KEY, .scan = x.rep_scan, .ch = x.rep_ch };

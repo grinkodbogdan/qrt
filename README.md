@@ -189,6 +189,20 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.13.1: EHCI (the FZ-G1's internal USB), its Bluetooth
+
+- **EHCI**, the USB 2 host controller, `src/drivers/usb/ehci.c`: on Intel 7-series
+  chipsets (the FZ-G1) only four USB 2 ports can be switched to xHCI; the internal
+  devices on the others hang from the two EHCI controllers (each through Intel's
+  rate-matching hub).  Control, bulk and interrupt transfers, 64-bit data structures,
+  split transactions for full and low speed devices behind high speed hubs; the same
+  device code as on xHCI (`src/drivers/usb/usbint.h`): keyboards, mice, touchscreens,
+  hubs, Bluetooth.  No isochronous transfers (USB audio) on EHCI yet.  Tested in QEMU
+  (usb-ehci with a high speed keyboard: typed into the Terminal).
+- **Bluetooth of the Centrino Advanced-N 6235** (USB 8087:07da, a CSR chip): standard
+  HCI, as Linux's btusb treats it; Intel's bootloader set-up now only runs on the
+  controllers that have one (8260 and later).
+
 ## 0.13.0: ACPI on PCs (battery, AC, lid, buttons, hotkeys)
 
 - **ACPICA**, the ACPI interpreter Linux uses (Intel's, BSD licence, unchanged in

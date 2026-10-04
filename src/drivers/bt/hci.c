@@ -639,7 +639,11 @@ void bt_attach(const bt_transport_t *t, u16 vid, u16 pid) {
     B.ncmd = 1;
     B.state = BT_STARTING;
     strlcpy(B.status, "Starting...", sizeof B.status);
-    if (vid == 0x8087 && !intel_setup()) { B.state = BT_FAILED; klog("bt: %s", B.status); return; }
+    /* Linux's btusb: only Intel's newer controllers (BTUSB_INTEL_NEW: 8260 0a2b, 0aaa, the 9x6x
+     * series 0025..0040) start in a bootloader; 8087:07da (the Centrino Advanced-N 6235's) is
+     * a CSR chip (BTUSB_CSR) and 07dc/0a2a run their ROM firmware: standard HCI */
+    int intel_new = vid == 0x8087 && (pid == 0x0a2b || pid == 0x0aaa || (pid >= 0x0025 && pid <= 0x0040));
+    if (intel_new && !intel_setup()) { B.state = BT_FAILED; klog("bt: %s", B.status); return; }
     u8 r[64];
     if (cmd(0x0c03, NULL, 0, r, sizeof r, 2000) < 1 || r[0]) {             /* Reset */
         strlcpy(B.status, "Bluetooth controller did not reset", sizeof B.status);
@@ -671,7 +675,7 @@ void bt_attach(const bt_transport_t *t, u16 vid, u16 pid) {
     a2dp_init();
     const u8 *a = B.addr;
     fmt(B.status, sizeof B.status, "Ready, address %02X:%02X:%02X:%02X:%02X:%02X%s", a[5], a[4], a[3], a[2], a[1], a[0],
-        vid == 0x8087 ? " (Intel firmware loaded)" : "");
+        intel_new ? " (Intel firmware loaded)" : "");
     klog("bt: %s, ACL %d x %d bytes", B.status, B.acl_total, B.acl_mtu);
     B.state = BT_READY;
 }

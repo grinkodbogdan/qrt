@@ -18,6 +18,7 @@
 #include "iwn/iwn.h"
 #include "i915/gpu.h"
 #include "usb/xhci.h"
+#include "usb/ehci.h"
 #include "audio.h"
 #include "speaker.h"
 #include "hda.h"
@@ -68,6 +69,17 @@ static int xhci_dev_probe(device_t *d) {
     return 0;
 }
 static const driver_t drv_xhci = { "xhci", xhci_pci, NULL, NULL, xhci_dev_probe, xhci_dev_status };
+
+/* ---- USB 2 host controllers (EHCI): internal devices on ports xHCI does not get ------- */
+static void ehci_dev_status(device_t *d) { ehci_status(d->pci, d->status, sizeof d->status); }
+static int ehci_dev_probe(device_t *d) {
+    if (d->pci->prog_if != 0x20) return DEV_NOT_MINE;
+    if (!k.native) { strlcpy(d->status, "the firmware's USB driver runs it", sizeof d->status); return 0; }
+    ehci_probe(d->pci);
+    ehci_dev_status(d);
+    return 0;
+}
+static const driver_t drv_ehci = { "ehci", xhci_pci, NULL, NULL, ehci_dev_probe, ehci_dev_status };
 
 /* ---- sound: the Realtek codec (identified in audio.c) and Intel's SST DSP ---------- */
 static const char *const codec_acpi[] = { "10EC5672", "10EC5670", "10EC5640", NULL };
@@ -241,4 +253,4 @@ static int e1000_dev_probe(device_t *d) {
 }
 static const driver_t drv_e1000 = { "e1000", e1000_pci, NULL, NULL, e1000_dev_probe, e1000_dev_status };
 
-const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_battery, &drv_pmic, &drv_ish, &drv_iwm, &drv_iwn, &drv_e1000, &drv_xhci, &drv_hda, &drv_audio, &drv_chipset, NULL };
+const driver_t *const builtin_drivers[] = { &drv_gpu, &drv_fb, &drv_uart, &drv_dwi2c, &drv_i2chid, &drv_buttons, &drv_backlight, &drv_battery, &drv_pmic, &drv_ish, &drv_iwm, &drv_iwn, &drv_e1000, &drv_xhci, &drv_ehci, &drv_hda, &drv_audio, &drv_chipset, NULL };
