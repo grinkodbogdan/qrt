@@ -13,7 +13,8 @@
 #include "arm.h"
 #include "sched.h"
 
-char fb_what[64] = "none";
+char fb_what[128] = "none";
+u64 fb_other[4][2]; int fb_nother;                 /* other layers' memory: kept out of the heap (main.c) */
 u64 fb_reserve_base, fb_reserve_size;      /* mapped uncached by mmu.c */
 static u8 *fb;
 static int bpp = 4, byte_of[4];            /* byte_of[c]: where channel c (0 R, 1 G, 2 B) goes */
@@ -50,13 +51,14 @@ static int ramfb_init(void) {
     int mem = fdt_node("/memory");
     u64 rb, rs;
     if (mem < 0 || !fdt_reg(mem, 0, &rb, &rs)) return 0;
-    u64 bytes = ((u64)w * h * 4 + 0x1fffff) & ~0x1fffffull;
+    int b3 = args && strstr(args, "qrt.fb24");          /* 3-byte pixels, as the Mi A1's panel: for testing */
+    u64 bytes = ((u64)w * h * (b3 ? 3 : 4) + 0x1fffff) & ~0x1fffffull;
     u64 base = (rb + rs - (16ull << 20) - bytes) & ~0x1fffffull;   /* clear of anything kept at the very top */
     static struct __attribute__((packed)) { u64 addr; u32 fourcc, flags, width, height, stride; } rc;
     rc.addr = __builtin_bswap64(base);
-    rc.fourcc = be32(0x34325258);                       /* XR24: XRGB8888 */
+    rc.fourcc = be32(b3 ? 0x34324752 : 0x34325258);     /* RG24: RGB888, XR24: XRGB8888 */
     rc.flags = 0;
-    rc.width = be32(w); rc.height = be32(h); rc.stride = be32(w * 4);
+    rc.width = be32(w); rc.height = be32(h); rc.stride = be32(w * (b3 ? 3 : 4));
     static volatile struct __attribute__((packed)) { u32 control, length; u64 address; } dma;
     dma.control = be32(sel << 16 | 0x08 | 0x10);        /* select, write */
     dma.length = be32(sizeof rc);
@@ -68,12 +70,56 @@ static int ramfb_init(void) {
     fb = (u8 *)(usize)base;
     fb_reserve_base = base; fb_reserve_size = bytes;
     k.fb_w = w; k.fb_h = h; k.fb_stride = w; k.fb_base = base;
-    bpp = 4; byte_of[0] = 2; byte_of[1] = 1; byte_of[2] = 0;
-    fmt(fb_what, sizeof fb_what, "QEMU ramfb");
+    bpp = b3 ? 3 : 4; byte_of[0] = 2; byte_of[1] = 1; byte_of[2] = 0;
+    fmt(fb_what, sizeof fb_what, b3 ? "QEMU ramfb (RGB888)" : "QEMU ramfb");
     return 1;
 }
 
 /* ---- Qualcomm MDP5: the pipe the boot loader's splash screen scans out ---- */
+/* where each source pipe sits in a CTL's LAYER / LAYER_EXT registers and its FLUSH bit
+ * (MSM8953's MDP 1.16: VIG0, RGB0, RGB1, DMA0, cursor) */
+static const struct { u32 off; int sh, ext, flush; } mdp_pipes[] = {
+    { 0x04000, 0, 0, 0 }, { 0x14000, 9, 8, 3 }, { 0x16000, 12, 10, 4 }, { 0x24000, 18, 16, 11 }, { 0x34000, -1, 20, 22 },
+};
+static int pipe_stage(u32 lay, u32 ext, int j) {
+    if (mdp_pipes[j].sh < 0) return (int)(ext >> 20 & 0xf);                         /* the cursor: 4 bits in EXT */
+    return (int)(lay >> mdp_pipes[j].sh & 7) | (int)(ext >> mdp_pipes[j].ext & 1) << 3;
+}
+/* the boot loader may leave more than one layer on (a logo, a warning over the splash);
+ * Tessera's heap later takes their memory, and the screen shows old frames through
+ * them.  Only Tessera's pipe stays staged in its mixer. */
+static void mdp5_only_ours(u64 mdp, u32 ours) {
+    int me = -1;
+    for (int j = 0; j < 5; j++) if (mdp_pipes[j].off == ours) me = j;
+    for (int c = 0; c < 3; c++) {
+        u64 cb = mdp + 0x1000 + 0x200 * (u64)c;
+        for (int lm = 0; lm < 2; lm++) {
+            u32 lay = R32(cb + 4 * (u64)lm), ext = R32(cb + 0x40 + 4 * (u64)lm);
+            if (!lay && !ext) continue;
+            klog("display: CTL%d mixer %d: layers %08x %08x", c, lm, lay, ext);
+            if (me < 0 || !pipe_stage(lay, ext, me)) continue;
+            u32 flush = 0;
+            for (int j = 0; j < 5; j++) {
+                if (j == me || !pipe_stage(lay, ext, j)) continue;
+                u64 pb = mdp + mdp_pipes[j].off;
+                u32 out = R32(pb + 0x0c), oxy = R32(pb + 0x10);
+                u32 sz = R32(pb), ys = R32(pb + 0x24) & 0xffff, a = R32(pb + 0x14);
+                if (fb_nother < 4 && a && ys && arm_is_ram(a, (u64)ys * (sz >> 16))) {
+                    fb_other[fb_nother][0] = a; fb_other[fb_nother][1] = (u64)ys * (sz >> 16); fb_nother++;
+                }
+                klog("display: the boot loader's layer %x (stage %d, %ux%u at %u,%u, memory %x) switched off",
+                     mdp_pipes[j].off, pipe_stage(lay, ext, j), out & 0xffff, out >> 16, oxy & 0xffff, oxy >> 16, R32(pb + 0x14));
+                if (mdp_pipes[j].sh < 0) ext &= ~(0xfu << 20);
+                else { lay &= ~(7u << mdp_pipes[j].sh); ext &= ~(1u << mdp_pipes[j].ext); }
+                flush |= 1u << mdp_pipes[j].flush;
+            }
+            if (!flush) continue;
+            W32(cb + 4 * (u64)lm, lay);
+            W32(cb + 0x40 + 4 * (u64)lm, ext);
+            W32(cb + 0x18, flush | 1u << (6 + lm) | 1u << 17);           /* the pipes, the mixer, the CTL */
+        }
+    }
+}
 static int mdp5_init(void) {
     if (fdt_find_compatible(-1, "qcom,mdp5") < 0) return 0;
     static const u32 pipes[] = { 0x04000, 0x14000, 0x16000, 0x24000, 0x34000 };
@@ -115,7 +161,18 @@ static int mdp5_init(void) {
                 else if (e - pn >= 4 && !strncmp(e - 4, "_cmd", 4)) video = 0;
             }
             if (!video) kick = bases[bi] + 0x01000 + 0x1c;
-            fmt(fb_what, sizeof fb_what, "boot splash (MDP5 pipe %x, %u-byte pixels, %s mode)", pipes[pi], cpp, video ? "video" : "command");
+            char panel[48] = "";
+            if (pn) {
+                int i = 0;
+                for (const char *q = pn; *q && *q != ' ' && *q != ':' && *q != ',' && i < 47; q++) panel[i++] = *q;
+                panel[i] = 0;
+            }
+            fmt(fb_what, sizeof fb_what, "boot splash (MDP5 pipe %x, %u-byte pixels, %s mode%s%s)", pipes[pi], cpp, video ? "video" : "command",
+                panel[0] ? ", panel " : "", panel);
+            u32 out = R32(p + 0x0c), oxy = R32(p + 0x10);
+            klog("display: pipe %x: %ux%u from %x, out %ux%u at %u,%u, format %x", pipes[pi], w, h, addr, out & 0xffff, out >> 16,
+                 oxy & 0xffff, oxy >> 16, format);
+            mdp5_only_ours(bases[bi], pipes[pi]);
             return 1;
         }
     return 0;

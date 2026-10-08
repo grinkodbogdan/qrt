@@ -189,6 +189,24 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.19.7: one layer on the Mi A1's screen
+
+0.19.6 on the Mi A1: parts of the screen showed old pictures - the dock where it had
+been, dimmed wallpaper, pieces of earlier frames - under the live one.  Tessera's
+drawing is right: the same build at the phone's 1080 x 1920 and 3-byte pixels
+(`qrt.fb=1080x1920 qrt.fb24` on QEMU's ramfb) drags the dock cleanly, and the copy into
+the framebuffer checks out against a reference over thousands of random rectangles.
+
+- **The boot loader's other layers** (`fb.c`): the display engine's mixer can blend
+  several source pipes; the boot loader can leave more than one on (a logo, a notice
+  over its splash), each scanning its own memory.  That memory is ordinary RAM to
+  Tessera, whose heap later holds its wallpaper and frames there - which then showed on
+  the screen.  At boot Tessera now logs every staged layer (`display: CTL... layers`)
+  and switches off all but its own (`display: the boot loader's layer ... switched off`);
+  their memory is also kept out of the heap in case one stays on.
+- The `display:` line names the panel the boot loader reported.
+- `qrt.fb24` on QEMU: a 3-byte-pixel ramfb, the Mi A1's pixel format, for testing.
+
 ## 0.19.6: the boot loader's clocks stay
 
 0.19.5 on the Mi A1: the screen still scrambled and drags still broke the touch screen.

@@ -49,7 +49,7 @@ usize fdt_size(void);
 /* fb.c: QEMU's ramfb, or the display the boot loader left on (Qualcomm MDP5) */
 int   fb_init(void);
 void  fb_present(const u32 *px, int stride, int x, int y, int w, int h);
-extern char fb_what[64];
+extern char fb_what[128];
 
 /* virtio.c: QEMU's virtio-mmio keyboard and tablet */
 void  virtio_input_init(void);

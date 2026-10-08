@@ -212,6 +212,9 @@ void arm_main(const void *dtb, u64 base) {
     if (!fb_init()) klog("display: none found");                    /* before the MMU: device reads */
     extern u64 fb_reserve_base, fb_reserve_size;
     add_hole(fb_reserve_base, fb_reserve_size);
+    extern u64 fb_other[4][2];
+    extern int fb_nother;
+    for (int i = 0; i < fb_nother; i++) add_hole(fb_other[i][0], fb_other[i][1]);   /* in case a layer stays on */
     u64 lo, hi;
     free_span(img_lo, img_hi, &lo, &hi);
     if (hi - lo < (64ull << 20)) panic("less than 64 MB of free RAM");
