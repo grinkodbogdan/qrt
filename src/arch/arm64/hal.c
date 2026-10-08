@@ -55,6 +55,8 @@ static int serial_keys(event_t *out, int max) {
 }
 
 int hal_poll(event_t *out, int max) {
+    static u64 report_at;
+    if (k_now_ms() >= report_at) { thr_report(); report_at = k_now_ms() + 10000; }
     int n = virtio_input_poll(out, max);
     int linux_has_keys(void);
     if (!linux_has_keys()) n += msm_poll(out + n, max - n);  /* until Linux's gpio-keys has the key */

@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.18.7: a faster screen on the Mi A1, and where the CPU goes
+
+On the Mi A1 the keys worked but the screen showed changes long after they happened.
+
+- **Display** (`fb.c`): the phone's framebuffer is 3 bytes a pixel in uncached memory, and
+  every frame was written a byte at a time (about 6 million uncached stores).  Each row
+  is now converted in cached memory and stored 8 bytes at a time.
+- **The shell first** (`sched.c`): when the shell wakes (its next frame is due, or an
+  event it waited for came), it runs next instead of waiting its turn behind every ready
+  Linux thread.
+- **CPU report** every 10 seconds in the log: the shell's, idle's and the other threads'
+  share of the CPU (the busiest three by name), the timer ticks (100 a second when
+  preemption works), thread switches, and how many frames reached the screen and how long
+  each took to copy.
+
 ## 0.18.6: the RPM link, and a summary of what is missing
 
 0.18.5 on the Mi A1: gpio-keys, the power and volume-down keys (PM8953 PON) and the

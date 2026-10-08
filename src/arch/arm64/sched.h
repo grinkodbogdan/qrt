@@ -35,3 +35,4 @@ int   thr_is_main(void);
 void  thr_park(void);
 void  thr_tick(void);                /* the timer interrupt (gic.c) */
 u64   thr_switches(void);
+void  thr_report(void);             /* klog: where the CPU went since the last call */

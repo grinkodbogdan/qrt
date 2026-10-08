@@ -134,6 +134,15 @@ static int splash_init(void) {
 int fb_init(void) { return ramfb_init() || mdp5_init() || splash_init(); }
 
 /* Tessera's pixels are 0x00RRGGBB */
+/* the framebuffer is uncached: a row is converted in cached memory first and stored with
+ * 8-byte writes (byte stores to uncached memory are each a bus write) */
+static void row_store(u8 *d, const u8 *s, usize n) {
+    while (n && ((usize)d & 7)) { *d++ = *s++; n--; }
+    for (; n >= 8; n -= 8, d += 8, s += 8) *(volatile u64 *)d = *(const u64 *)s;   /* s aligned like d */
+    while (n--) *d++ = *s++;
+}
+static u64 fb_us, fb_frames;
+void fb_stats(u64 *frames, u64 *us) { *frames = fb_frames; *us = fb_us; fb_frames = fb_us = 0; }
 void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     if (!fb) return;
     if (x < 0) { w += x; px -= x; x = 0; }
@@ -141,20 +150,27 @@ void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     if (x + w > (int)k.fb_w) w = (int)k.fb_w - x;
     if (y + h > (int)k.fb_h) h = (int)k.fb_h - y;
     if (w <= 0 || h <= 0) return;
+    u64 t0 = k_now_us();
     usize line = (usize)k.fb_stride * (usize)bpp;
     if (bpp == 4 && byte_of[0] == 2 && byte_of[1] == 1 && byte_of[2] == 0) {
         for (int r = 0; r < h; r++) memcpy(fb + (usize)(y + r) * line + (usize)x * 4, px + (usize)r * stride, (usize)w * 4);
     } else {
+        static u8 rowbuf[4096 * 4 + 16] __attribute__((aligned(16)));
         int r0 = byte_of[0], g0 = byte_of[1], b0 = byte_of[2];
         for (int r = 0; r < h; r++) {
             u8 *d = fb + (usize)(y + r) * line + (usize)x * (usize)bpp;
+            u8 *b = rowbuf + ((usize)d & 7), *o = b;              /* the same alignment as d */
             const u32 *s = px + (usize)r * stride;
-            for (int c = 0; c < w; c++, d += bpp) {
+            int n = MIN(w, 4096);
+            for (int c = 0; c < n; c++, o += bpp) {
                 u32 v = s[c];
-                d[r0] = (u8)(v >> 16); d[g0] = (u8)(v >> 8); d[b0] = (u8)v;
+                o[r0] = (u8)(v >> 16); o[g0] = (u8)(v >> 8); o[b0] = (u8)v;
             }
+            row_store(d, b, (usize)n * (usize)bpp);
         }
     }
+    fb_us += k_now_us() - t0;
+    fb_frames++;
     __asm__ volatile("dsb sy" ::: "memory");
     if (kick) W32(kick, 1);
 }

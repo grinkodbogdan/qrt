@@ -25,6 +25,7 @@ struct thr {
     struct thr *next;                /* every thread, in a ring */
     struct thr *wnext;               /* a wait queue */
     struct thr *joiner;
+    u64 run_us;                      /* CPU time since the last thr_report */
 };
 
 void arm_switch(u64 *save_sp, u64 new_sp);
@@ -34,6 +35,9 @@ static thr_t main_thr = { .state = T_READY, .name = "shell", .next = &main_thr }
 static thr_t *cur = &main_thr;
 static int nthreads = 1;
 static u64 switches;
+static u64 last_switch, idle_us;     /* k_now_us() of the last switch; time in wfi */
+static int main_boost;               /* the shell was woken: it runs next (the UI stays responsive) */
+static void account(void) { u64 now = k_now_us(); cur->run_us += now - last_switch; last_switch = now; }
 
 thr_t *thr_self(void) { return cur; }
 int thr_count(void) { return nthreads; }
@@ -57,6 +61,7 @@ static void sw(thr_t *t) {
     thr_t *prev = cur;
     u64 daif;
     __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    account();
     cur = t;
     switches++;
     arm_switch(&prev->sp, t->sp);
@@ -68,6 +73,8 @@ static void sw(thr_t *t) {
 static thr_t *pick(u64 *soonest) {
     u64 now = k_now_us();
     *soonest = ~0ull;
+    if (main_thr.state == T_SLEEP && main_thr.wake_at <= now) { main_thr.state = T_READY; main_boost = 1; }
+    if (main_boost && main_thr.state == T_READY) { main_boost = 0; return &main_thr; }
     thr_t *t = cur->next;
     for (int i = 0; i < nthreads; i++, t = t->next) {
         if (t->state == T_SLEEP) {
@@ -86,7 +93,11 @@ static void schedule(void) {
         u64 soonest;
         thr_t *t = pick(&soonest);
         if (t) { if (t != cur) sw(t); return; }
+        account();
         while (k_now_us() < soonest) __asm__ volatile("wfi");     /* the 10 ms tick wakes it */
+        u64 now = k_now_us();
+        idle_us += now - last_switch;
+        last_switch = now;
     }
 }
 
@@ -113,7 +124,7 @@ void thr_sleep_until(u64 us) {
 }
 void thr_wake(thr_t *t) {
     u64 f = irq_save();
-    if (t && (t->state == T_SLEEP || t->state == T_BLOCKED)) t->state = T_READY;
+    if (t && (t->state == T_SLEEP || t->state == T_BLOCKED)) { t->state = T_READY; if (t == &main_thr) main_boost = 1; }
     irq_restore(f);
 }
 
@@ -159,6 +170,52 @@ int thr_join(thr_t *t) {
 /* a thread that faulted: never runs again; the others go on */
 void thr_park(void) { irq_save(); cur->state = T_BLOCKED; schedule(); for (;;) {} }
 
+/* where the CPU went since the last report: the shell, idle, and the busiest others */
+void thr_report(void) {
+    static u64 since;
+    u64 f = irq_save();
+    account();
+    u64 now = k_now_us(), span = now - since;
+    if (!since || !span) {                                        /* the first call: counting starts */
+        thr_t *t = &main_thr;
+        do { t->run_us = 0; t = t->next; } while (t != &main_thr);
+        idle_us = 0;
+        since = now;
+        irq_restore(f);
+        return;
+    }
+    thr_t *top[3] = { 0 };
+    u64 others = 0;
+    thr_t *t = &main_thr;
+    do {
+        if (t != &main_thr) {
+            others += t->run_us;
+            for (int i = 0; i < 3; i++)
+                if (!top[i] || t->run_us > top[i]->run_us) { for (int j = 2; j > i; j--) top[j] = top[j - 1]; top[i] = t; break; }
+        }
+        t = t->next;
+    } while (t != &main_thr);
+    u64 pct[3], shell = main_thr.run_us * 100 / span, idle = idle_us * 100 / span, rest = others * 100 / span;
+    const char *nm[3];
+    for (int i = 0; i < 3; i++) { pct[i] = top[i] ? top[i]->run_us * 100 / span : 0; nm[i] = top[i] ? top[i]->name : "-"; }
+    t = &main_thr;
+    do { t->run_us = 0; t = t->next; } while (t != &main_thr);
+    idle_us = 0;
+    since = now;
+    u64 sw = switches;
+    irq_restore(f);
+    u64 gic_ticks(void);
+    static u64 last_ticks, last_sw;
+    u64 tk = gic_ticks();
+    klog("cpu: %llu s: shell %llu%%, idle %llu%%, %d others %llu%% (top %s %llu%%, %s %llu%%, %s %llu%%); %llu ticks, %llu switches",
+         span / 1000000, shell, idle, nthreads - 1, rest, nm[0], pct[0], nm[1], pct[1], nm[2], pct[2], tk - last_ticks, sw - last_sw);
+    last_ticks = tk; last_sw = sw;
+    void fb_stats(u64 *frames, u64 *us);
+    u64 fr, fus;
+    fb_stats(&fr, &fus);
+    klog("cpu: display: %llu frames presented, %llu ms each", fr, fr ? fus / fr / 1000 : 0);
+}
+
 /* ---- semaphores and mutexes: a count and a FIFO of waiters ---- */
 struct sem { int count; thr_t *head, *tail; };
 sem_t *sem_new(int count) { sem_t *s = kalloc(sizeof *s); s->count = count; return s; }
@@ -179,7 +236,11 @@ void sem_up(sem_t *s) {
     u64 f = irq_save();
     s->count++;
     thr_t *t = s->head;
-    if (t) { s->head = t->wnext; if (!s->head) s->tail = NULL; if (t->state == T_BLOCKED) t->state = T_READY; }
+    if (t) {
+        s->head = t->wnext;
+        if (!s->head) s->tail = NULL;
+        if (t->state == T_BLOCKED) { t->state = T_READY; if (t == &main_thr) main_boost = 1; }
+    }
     irq_restore(f);
 }
 
