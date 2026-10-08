@@ -189,6 +189,25 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.19.0: the Mi A1 bring-up so far
+
+Where the Mi A1 stands, with Linux's own drivers running inside Tessera (LKL):
+
+- **Working on the phone**: Linux boots in under a second; gpio-keys (volume up), the
+  PMIC's power key and volume down, the WLED backlight; Tessera's log page, the safe
+  boot after a reset, the log closing by itself.
+- **Since 0.18.6**: thread wake-ups are on time (Linux's 30-second regulator cleanup now
+  runs at 33 s, not 173 s).  0.18.7's faster screen copy and the shell-first scheduling
+  are in this release.
+- **Not yet**: the touch screen and the eMMC/SD card.  Both need the RPM co-processor's
+  regulators; 0.18.6's log shows the touch screen waiting with "failed to request
+  regulator".  This release logs each step of the RPM link (SMEM found, SMD channels
+  found and opened, the RPM's requests channel up, a request timing out) and counts the
+  regulators Linux has, in the summary 25 seconds after boot.
+- **Why LKL** rather than writing drivers the way Haiku, Redox or Neptune OS do: those
+  need a driver written for every chip; none of them drives a Qualcomm phone.  LKL runs
+  Linux's own, already working drivers for this phone.
+
 ## 0.18.7: a faster screen on the Mi A1, and where the CPU goes
 
 On the Mi A1 the keys worked but the screen showed changes long after they happened.

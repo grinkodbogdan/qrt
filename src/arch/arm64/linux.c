@@ -82,11 +82,12 @@ static char pline[256];
 static int plen;
 /* Linux's complaints, kept for the summary (linux_summary): on a phone screen the log's
  * tail is all that shows, and the reasons scroll away */
-#define NPROB 14
+#define NPROB 24
 static char probs[NPROB][112];
 static int nprob;
 static void keep_problem(const char *l) {
-    static const char *const words[] = { "error", "fail", "Fail", "unable", "Unable", "invalid", "not found", "No ", "timed out", "timeout", NULL };
+    static const char *const words[] = { "error", "fail", "Fail", "unable", "Unable", "invalid", "not found", "No ", "timed out", "timeout",
+                                         "smd:", "smem:", "rpm:", "probe of remoteproc", NULL };
     if (nprob == NPROB || strstr(l, "initcall") || strstr(l, "calling ") || strstr(l, "initial console")) return;
     int hit = 0;
     for (int i = 0; words[i] && !hit; i++) hit = strstr(l, words[i]) != NULL;
@@ -416,7 +417,15 @@ static void linux_summary(void) {
             l = e + 1;
         }
     }
-    klog("linux: %d device(s) waiting; %d error line(s):", n, nprob);
+    int nreg = 0;
+    fd = l_open("/sys/class/regulator", 0200000);
+    if (fd >= 0) {
+        static char d[2048];
+        long len = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+        for (long o = 0; o < len; o += *(u16 *)(d + o + 16)) if (d[o + 19] != '.') nreg++;
+        l_close((int)fd);
+    }
+    klog("linux: %d regulator(s); %d device(s) waiting; %d line(s) to note:", nreg, n, nprob);
     for (int i = 0; i < nprob; i++) klog("linux: ! %s", probs[i]);
 }
 

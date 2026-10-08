@@ -589,8 +589,65 @@ index 0be6b3026..23c62afcf 100644
  	mutex_lock(&rpmpd_lock);
  	for (i = 0; i < desc->num_pds; i++) {
  		pd = rpmpds[i];
+diff --git a/drivers/rpmsg/qcom_smd.c b/drivers/rpmsg/qcom_smd.c
+index 43f601c84..1cb5a2028 100644
+--- a/drivers/rpmsg/qcom_smd.c
++++ b/drivers/rpmsg/qcom_smd.c
+@@ -1218,8 +1218,10 @@ static void qcom_channel_scan_worker(struct work_struct *work)
+ 	for (tbl = 0; tbl < SMD_ALLOC_TBL_COUNT; tbl++) {
+ 		alloc_tbl = qcom_smem_get(edge->remote_pid,
+ 				    smem_items[tbl].alloc_tbl_id, NULL);
+-		if (IS_ERR(alloc_tbl))
++		if (IS_ERR(alloc_tbl)) {
++			dev_info(&edge->dev, "smd: no channel table %d (%ld)\n", tbl, PTR_ERR(alloc_tbl));	/* QRT */
+ 			continue;
++		}
+ 
+ 		for (i = 0; i < SMD_ALLOC_TBL_SIZE; i++) {
+ 			entry = &alloc_tbl[i];
+@@ -1251,7 +1253,7 @@ static void qcom_channel_scan_worker(struct work_struct *work)
+ 			list_add(&channel->list, &edge->channels);
+ 			spin_unlock_irqrestore(&edge->channels_lock, flags);
+ 
+-			dev_dbg(&edge->dev, "new channel found: '%s'\n", channel->name);
++			dev_info(&edge->dev, "smd: channel '%s' found\n", channel->name);	/* QRT */
+ 			set_bit(i, edge->allocated[tbl]);
+ 
+ 			wake_up_interruptible_all(&edge->new_channel_event);
+@@ -1302,6 +1304,7 @@ static void qcom_channel_state_worker(struct work_struct *work)
+ 			continue;
+ 
+ 		spin_unlock_irqrestore(&edge->channels_lock, flags);
++		dev_info(&edge->dev, "smd: channel '%s' opened (remote state %u)\n", channel->name, remote_state);	/* QRT */
+ 		qcom_smd_create_device(channel);
+ 		spin_lock_irqsave(&edge->channels_lock, flags);
+ 		channel->registered = true;
+diff --git a/drivers/soc/qcom/smd-rpm.c b/drivers/soc/qcom/smd-rpm.c
+index f2b3e02ab..3052d80fa 100644
+--- a/drivers/soc/qcom/smd-rpm.c
++++ b/drivers/soc/qcom/smd-rpm.c
+@@ -132,8 +132,10 @@ int qcom_rpm_smd_write(struct qcom_smd_rpm *rpm,
+ 		goto out;
+ 
+ 	left = wait_for_completion_timeout(&rpm->ack, RPM_REQUEST_TIMEOUT);
+-	if (!left)
++	if (!left) {
+ 		ret = -ETIMEDOUT;
++		pr_warn("rpm: request timed out (no reply interrupt from the RPM)\n");	/* QRT */
++	}
+ 	else
+ 		ret = rpm->ack_status;
+ 
+@@ -207,6 +209,7 @@ static int qcom_smd_rpm_probe(struct rpmsg_device *rpdev)
+ 	rpm->rpm_channel = rpdev->ept;
+ 	dev_set_drvdata(&rpdev->dev, rpm);
+ 
++	dev_info(&rpdev->dev, "rpm: requests channel up\n");	/* QRT */
+ 	return of_platform_populate(rpdev->dev.of_node, NULL, NULL, &rpdev->dev);
+ }
+ 
 diff --git a/drivers/soc/qcom/smem.c b/drivers/soc/qcom/smem.c
-index e4411771f..4f0cae02a 100644
+index e4411771f..2c3e130c1 100644
 --- a/drivers/soc/qcom/smem.c
 +++ b/drivers/soc/qcom/smem.c
 @@ -1141,6 +1141,18 @@ static int qcom_smem_probe(struct platform_device *pdev)
@@ -612,3 +669,11 @@ index e4411771f..4f0cae02a 100644
  	} else {
  		/*
  		 * Fall back to the memory-region reference, if we're not a
+@@ -1232,6 +1244,7 @@ static int qcom_smem_probe(struct platform_device *pdev)
+ 	if (IS_ERR(smem->socinfo))
+ 		dev_dbg(&pdev->dev, "failed to register socinfo device\n");
+ 
++	dev_info(&pdev->dev, "smem: up at %pa (%u bytes)\n", &smem->regions[0].aux_base, (u32)smem->regions[0].size);	/* QRT */
+ 	return 0;
+ }
+ 
