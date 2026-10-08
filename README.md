@@ -189,6 +189,22 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.18.6: the RPM link, and a summary of what is missing
+
+0.18.5 on the Mi A1: gpio-keys, the power and volume-down keys (PM8953 PON) and the
+WLED backlight came up; the touch screen kept deferring and both MMC controllers (eMMC, SD card) failed
+with -ENODEV.  All of those need the RPM co-processor (the touch screen's l10 supply,
+the eMMC's supplies, clock and power domain) - and the RPM link was never made.
+
+- **SMEM** (`drivers/soc/qcom/smem.c` in `ports/lkl/qrt.patch`): the shared memory the
+  RPM link lives in is a reserved-memory node; its driver looked it up in Linux's
+  reserved-memory table, which LKL never fills, and gave up.  It now falls back to the
+  node's own address.  Everything above SMEM (the RPM's SMD channel, its regulators,
+  clocks and power domains) depended on it.
+- **A summary in the log** 25 seconds after boot, just before the log page opens: each
+  device still waiting and what it waits for (Linux's `devices_deferred`, debugfs) and
+  Linux's error lines, so one photo of the log's tail says what is missing.
+
 ## 0.18.5: the last boot's log closes by itself
 
 - The log page that opens by itself (the last boot's log after a reset, or the current

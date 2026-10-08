@@ -589,3 +589,26 @@ index 0be6b3026..23c62afcf 100644
  	mutex_lock(&rpmpd_lock);
  	for (i = 0; i < desc->num_pds; i++) {
  		pd = rpmpds[i];
+diff --git a/drivers/soc/qcom/smem.c b/drivers/soc/qcom/smem.c
+index e4411771f..4f0cae02a 100644
+--- a/drivers/soc/qcom/smem.c
++++ b/drivers/soc/qcom/smem.c
+@@ -1141,6 +1141,18 @@ static int qcom_smem_probe(struct platform_device *pdev)
+ 	if (rmem) {
+ 		smem->regions[0].aux_base = rmem->base;
+ 		smem->regions[0].size = rmem->size;
++	} else if (!of_property_present(pdev->dev.of_node, "memory-region")) {
++		/*
++		 * A reserved-memory node the kernel did not record (QRT: LKL
++		 * never fills the reserved-memory table): its own reg.
++		 */
++		struct resource r;
++
++		ret = of_address_to_resource(pdev->dev.of_node, 0, &r);
++		if (ret)
++			return ret;
++		smem->regions[0].aux_base = r.start;
++		smem->regions[0].size = resource_size(&r);
+ 	} else {
+ 		/*
+ 		 * Fall back to the memory-region reference, if we're not a

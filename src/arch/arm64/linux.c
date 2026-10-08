@@ -80,9 +80,27 @@ void linux_failed(const char *why) { dead = 1; klog("linux: stopped (%s); the sh
 /* ---- the host operations ---- */
 static char pline[256];
 static int plen;
+/* Linux's complaints, kept for the summary (linux_summary): on a phone screen the log's
+ * tail is all that shows, and the reasons scroll away */
+#define NPROB 14
+static char probs[NPROB][112];
+static int nprob;
+static void keep_problem(const char *l) {
+    static const char *const words[] = { "error", "fail", "Fail", "unable", "Unable", "invalid", "not found", "No ", "timed out", "timeout", NULL };
+    if (nprob == NPROB || strstr(l, "initcall") || strstr(l, "calling ") || strstr(l, "initial console")) return;
+    int hit = 0;
+    for (int i = 0; words[i] && !hit; i++) hit = strstr(l, words[i]) != NULL;
+    if (!hit) return;
+    const char *m = l[0] == '[' && strchr(l, ']') ? strchr(l, ']') + 2 : l;  /* without the timestamp */
+    strlcpy(probs[nprob++], m, sizeof probs[0]);
+}
 static void h_print(const char *s, int len) {
     for (int i = 0; i < len; i++) {
-        if (s[i] == '\n' || plen == (int)sizeof pline - 1) { pline[plen] = 0; if (plen) klog("linux: %s", pline); plen = 0; }
+        if (s[i] == '\n' || plen == (int)sizeof pline - 1) {
+            pline[plen] = 0;
+            if (plen) { klog("linux: %s", pline); keep_problem(pline); }
+            plen = 0;
+        }
         if (s[i] != '\n') pline[plen++] = s[i];
     }
 }
@@ -378,6 +396,30 @@ int linux_backlight_present(void) { return bl_present; }
 
 /* ---- start ---- */
 static const void *dtb;
+/* what did not come up and why: the devices still waiting for something (debugfs's
+ * devices_deferred, with the reason each driver gave) and Linux's error lines */
+static void linux_summary(void) {
+    sys(NR_MOUNT, (long)"debugfs", (long)"/sys/kernel/debug", (long)"debugfs", 0, 0);
+    long fd = l_open("/sys/kernel/debug/devices_deferred", 0);
+    int n = 0;
+    if (fd >= 0) {
+        static char buf[4096];
+        long len = l_read((int)fd, buf, sizeof buf - 1);
+        l_close((int)fd);
+        buf[len > 0 ? len : 0] = 0;
+        for (char *l = buf; *l; ) {
+            char *e = strchr(l, '\n');
+            if (e) *e = 0;
+            for (char *t = l; *t; t++) if (*t == '\t') *t = ' ';
+            if (*l) { klog("linux: waiting: %s", l); n++; }
+            if (!e) break;
+            l = e + 1;
+        }
+    }
+    klog("linux: %d device(s) waiting; %d error line(s):", n, nprob);
+    for (int i = 0; i < nprob; i++) klog("linux: ! %s", probs[i]);
+}
+
 static void linux_main(void *a) {
     (void)a;
     lkl_qrt_fdt = (void *)dtb;
@@ -396,7 +438,9 @@ static void linux_main(void *a) {
     sys(NR_MOUNT, (long)"devtmpfs", (long)"/dev", (long)"devtmpfs", 0, 0);
     thr_create("evdev scan", input_scan, NULL, 32 << 10);
     thr_create("backlight", bl_loop, NULL, 32 << 10);
-    thr_sleep_us(30ull * 1000000);
+    thr_sleep_us(25ull * 1000000);
+    if (!dead) linux_summary();
+    thr_sleep_us(5ull * 1000000);
     if (!have_touch && !dead) {                                     /* no touch screen: the log says why */
         klog("linux: no touch screen 30 s after boot - showing the log (volume up x3 closes it)");
         void logview_show_current(void);

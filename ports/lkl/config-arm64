@@ -12,6 +12,8 @@ CONFIG_FW_LOADER=y
 CONFIG_FW_LOADER_USER_HELPER=y
 CONFIG_FW_LOADER_USER_HELPER_FALLBACK=y
 CONFIG_PRINTK_TIME=y
+# devices_deferred (linux.c's summary: what each waiting device waits for)
+CONFIG_DEBUG_FS=y
 # the SoC: clocks, pins, interrupts, the RPM co-processor and its regulators
 CONFIG_COMMON_CLK=y
 CONFIG_COMMON_CLK_QCOM=y
