@@ -234,6 +234,7 @@ static void refresher(void *a) {
     u64 last_kick = 0, confirm_at = 0;
     for (;;) {
         u64 now = k_now_us();
+        if (!kick) { thr_sleep_us(100000); continue; }               /* Linux's driver has the display now */
         if (fb_dirty && now - last_kick >= 40000) {
             fb_dirty = 0;
             W32(kick, 1);
@@ -247,6 +248,43 @@ static void refresher(void *a) {
         thr_sleep_us(5000);
     }
 }
+/* ---- Argon: Linux's own display driver owns the panel; Tessera draws into a shadow
+ * of Linux's framebuffer, and linux.c writes the changed part to /dev/fb0 ---- */
+static volatile int dx0 = 1 << 30, dy0 = 1 << 30, dx1, dy1, redirected;
+int fb_redirect(u8 *shadow, u32 w, u32 h, u32 stride_px, int r, int g, int b) {
+    if (w != k.fb_w || h != k.fb_h) return -1;                       /* the shell is laid out for this size */
+    u64 f = irq_save();
+    kick = 0;
+    mdp_top = 0;                                                      /* Linux's display driver has the MDP */
+    fb = shadow;
+    bpp = 4;
+    byte_of[0] = r; byte_of[1] = g; byte_of[2] = b;
+    k.fb_stride = stride_px;
+    k.fb_base = (u64)(usize)shadow;
+    redirected = 1;
+    irq_restore(f);
+    fmt(fb_what, sizeof fb_what, "Linux's display driver (/dev/fb0), %u x %u", w, h);
+    return 0;
+}
+/* the rectangle changed since the last call (0 if none) */
+int fb_take_dirty(int *x, int *y, int *w, int *h) {
+    u64 f = irq_save();
+    int any = dx1 > dx0 && dy1 > dy0;
+    if (any) { *x = dx0; *y = dy0; *w = dx1 - dx0; *h = dy1 - dy0; }
+    dx0 = dy0 = 1 << 30; dx1 = dy1 = 0;
+    irq_restore(f);
+    return any;
+}
+static void note_dirty(int x, int y, int w, int h) {
+    if (!redirected) return;
+    u64 f = irq_save();
+    if (x < dx0) dx0 = x;
+    if (y < dy0) dy0 = y;
+    if (x + w > dx1) dx1 = x + w;
+    if (y + h > dy1) dy1 = y + h;
+    irq_restore(f);
+}
+
 /* now, without the thread (the panic screen: no other thread runs again) */
 void fb_flush(void) { if (kick) W32(kick, 1); }
 void fb_stats(u64 *frames, u64 *us) { *frames = fb_frames; *us = fb_us; fb_frames = fb_us = 0; }
@@ -288,6 +326,7 @@ void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
             clean(d, (usize)n * (usize)bpp);
         }
     }
+    note_dirty(x, y, w, h);
     fb_us += k_now_us() - t0;
     fb_frames++;
     __asm__ volatile("dsb sy" ::: "memory");

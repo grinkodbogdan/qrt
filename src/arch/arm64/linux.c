@@ -429,6 +429,53 @@ static void bl_loop(void *a) {
 int linux_backlight_set(int pct) { bl_want = pct; return 0; }      /* 0..100, applied by bl_loop */
 int linux_backlight_present(void) { return bl_present; }
 
+/* ---- Argon display: Linux's display driver (fbdev emulation on its DRM driver) shows
+ * Tessera's frames.  Tessera draws into a shadow (fb.c) and this thread writes what
+ * changed to /dev/fb0 - a write() marks the framebuffer damaged, so every DRM driver
+ * (virtio-gpu, MSM) flushes it to the panel.  The shell never waits on Linux. ---- */
+#define NR_PWRITE64 68
+int fb_redirect(u8 *shadow, u32 w, u32 h, u32 stride_px, int r, int g, int b);
+int fb_take_dirty(int *x, int *y, int *w, int *h);
+void shell_redraw(void);
+static void display_loop(void *a) {
+    (void)a;
+    long fd = -1;
+    for (int tries = 0; fd < 0; tries++) {                           /* Linux's display driver probes */
+        thr_sleep_us(500000);
+        if (dead) return;
+        fd = l_open("/dev/fb0", 2);                                   /* O_RDWR */
+        if (tries == 120 && fd < 0) { klog("argon: no Linux display (/dev/fb0) after 60 s; the boot loader's stays"); return; }
+    }
+    u8 var[160] = { 0 }, fix[80] = { 0 };
+    l_ioctl((int)fd, 0x4600, var);                                    /* FBIOGET_VSCREENINFO */
+    l_ioctl((int)fd, 0x4602, fix);                                    /* FBIOGET_FSCREENINFO */
+    u32 xres = *(u32 *)(var + 0), yres = *(u32 *)(var + 4), bits = *(u32 *)(var + 24);
+    u32 roff = *(u32 *)(var + 32), goff = *(u32 *)(var + 44), boff = *(u32 *)(var + 56);
+    u32 line = *(u32 *)(fix + 48);
+    klog("argon: Linux's display: %ux%u, %u bits (R at %u, G at %u, B at %u), %u bytes a line", xres, yres, bits, roff, goff, boff, line);
+    if (bits != 32 || line < xres * 4) { klog("argon: that pixel format is not one Tessera draws; the boot loader's display stays"); return; }
+    u8 *shadow = kalloc((usize)line * yres);
+    if (fb_redirect(shadow, xres, yres, line / 4, (int)(roff / 8), (int)(goff / 8), (int)(boff / 8)) < 0) {
+        klog("argon: Linux's display is %ux%u, the shell %ux%u: the boot loader's display stays", xres, yres, k.fb_w, k.fb_h);
+        return;
+    }
+    l_ioctl((int)fd, 0x4601, var);                                    /* FBIOPUT_VSCREENINFO: the mode, set */
+    l_ioctl((int)fd, 0x4611, 0);                                      /* FBIOBLANK: unblank */
+    klog("argon: the screen is Linux's display driver's now");
+    shell_redraw();
+    for (;;) {
+        int x, y, w, h;
+        if (fb_take_dirty(&x, &y, &w, &h)) {
+            if (x == 0 && w == (int)xres)                             /* whole rows: one write */
+                sys(NR_PWRITE64, fd, (long)(shadow + (usize)y * line), (long)h * line, (long)y * line, 0);
+            else
+                for (int r = y; r < y + h; r++)
+                    sys(NR_PWRITE64, fd, (long)(shadow + (usize)r * line + (usize)x * 4), (long)w * 4, (long)r * line + x * 4, 0);
+        }
+        thr_sleep_us(10000);
+    }
+}
+
 /* ---- start ---- */
 static const void *dtb;
 /* what did not come up and why: the devices still waiting for something (debugfs's
@@ -520,6 +567,7 @@ static void linux_main(void *a) {
     sys(NR_MOUNT, (long)"devtmpfs", (long)"/dev", (long)"devtmpfs", 0, 0);
     thr_create("evdev scan", input_scan, NULL, 32 << 10);
     thr_create("backlight", bl_loop, NULL, 32 << 10);
+    thr_create("linux display", display_loop, NULL, 32 << 10);
     thr_sleep_us(25ull * 1000000);
     if (!dead) linux_summary();
     thr_sleep_us(5ull * 1000000);

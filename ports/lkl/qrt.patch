@@ -933,21 +933,19 @@ index e4411771f..2c3e130c1 100644
  	return 0;
  }
  
-diff --git a/drivers/virtio/virtio_ring.c b/drivers/virtio/virtio_ring.c
-index 98374ed7c..9e32c3b39 100644
---- a/drivers/virtio/virtio_ring.c
-+++ b/drivers/virtio/virtio_ring.c
-@@ -294,6 +294,13 @@ static bool vring_use_dma_api(const struct virtio_device *vdev)
- 	if (xen_domain())
- 		return true;
- 
-+	/*
-+	 * QRT (Argon): Linux's physical addresses are its window in the host,
-+	 * not bus addresses; the DMA API translates them.
-+	 */
-+	if (IS_ENABLED(CONFIG_LKL_QRT_SOC) && IS_ENABLED(CONFIG_MMU))
-+		return true;
-+
- 	return false;
+diff --git a/include/linux/virtio_config.h b/include/linux/virtio_config.h
+index 169c7d367..d6f2d2012 100644
+--- a/include/linux/virtio_config.h
++++ b/include/linux/virtio_config.h
+@@ -214,6 +214,11 @@ static inline bool virtio_has_dma_quirk(const struct virtio_device *vdev)
+ 	 * Note the reverse polarity of the quirk feature (compared to most
+ 	 * other features), this is for compatibility with legacy systems.
+ 	 */
++#if defined(CONFIG_LKL_QRT_SOC) && defined(CONFIG_MMU)
++	/* QRT (Argon): Linux's physical addresses are its window in the host,
++	 * not bus addresses - every virtio driver goes through the DMA API */
++	return false;
++#endif
+ 	return !virtio_has_feature(vdev, VIRTIO_F_ACCESS_PLATFORM);
  }
  
