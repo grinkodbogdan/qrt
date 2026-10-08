@@ -189,6 +189,15 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.18.5: the last boot's log closes by itself
+
+- The log page that opens by itself (the last boot's log after a reset, or the current
+  log when there is no touch screen) now **goes away after 30 seconds**, with a
+  countdown in its title; on the Mi A1 volume up could not close it.  Opened by hand
+  (volume up x3) it stays until closed the same way.
+- A safe boot marks itself finished, so the boot after it tries Linux again even if
+  the phone is reset during the safe boot.
+
 ## 0.18.4: GPIO interrupts, and the shell never waits for Linux
 
 0.18.3 on the Mi A1: nothing responded, not even volume up - the shell itself had stopped.

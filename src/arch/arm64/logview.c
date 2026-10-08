@@ -2,16 +2,32 @@
  * logview.c - the kernel log, full screen, with no touch needed: volume up pressed
  * three times within two seconds shows it (newest lines at the bottom, Linux's boot
  * messages included) and keeps it up to date; three more presses go back to the shell.
+ * Shown by itself (the last boot's log after a reset, or no touch screen), it goes away
+ * after 30 seconds.
  * On a phone whose touch screen is not working yet this is how its log gets read.
  */
 #include "arm.h"
 #include "../../ui/gfx.h"
 
 static int on, previous;                 /* previous: the last boot's log (plog.c) */
-void logview_show_previous(void) { on = 1; previous = 1; }
-void logview_show_current(void) { on = 1; previous = 0; }
-static u64 presses[3];
+static u64 until;                        /* shown by itself: goes away at this k_now_ms() (0: stays) */
+#define AUTO_MS 30000
+void logview_show_previous(void) { on = 1; previous = 1; until = k_now_ms() + AUTO_MS; }
+void logview_show_current(void) { on = 1; previous = 0; until = k_now_ms() + AUTO_MS; }
 static canvas_t cv;
+static void close_view(void) {
+    on = 0;
+    previous = 0;
+    until = 0;
+    if (cv.px) { canvas_free(&cv); memset(&cv, 0, sizeof cv); }
+}
+/* hal_poll: 1 if a view shown by itself just timed out (the shell redraws) */
+int logview_expire(void) {
+    if (!on || !until || k_now_ms() < until) return 0;
+    close_view();
+    return 1;
+}
+static u64 presses[3];
 
 int logview_active(void) { return on; }
 
@@ -20,10 +36,9 @@ int logview_key(void) {
     u64 now = k_now_ms();
     presses[0] = presses[1]; presses[1] = presses[2]; presses[2] = now;
     if (presses[0] && now - presses[0] < 2000) {
-        on = !on;
-        previous = 0;
         presses[0] = presses[1] = presses[2] = 0;
-        if (!on && cv.px) { canvas_free(&cv); memset(&cv, 0, sizeof cv); }
+        if (on) close_view();
+        else { on = 1; previous = 0; until = 0; }               /* opened by hand: stays */
         return 1;
     }
     return 0;
@@ -39,8 +54,12 @@ void logview_draw(void) {
     const font_t *f = font_pick(F_MONO, k.fb_w >= 1000 ? 26 : 15);
     int lh = k.fb_w >= 1000 ? 32 : 19, rows = ((int)k.fb_h - lh * 2) / lh;
     gfx_fill(&cv, (rect_t){ 0, 0, (int)k.fb_w, (int)k.fb_h }, RGB(12, 12, 16));
-    gfx_text(&cv, f, 8, 4, previous ? "The LAST boot's log - it reset here (volume up x3 to close)" : "QRT kernel log (volume up x3 to close)",
-             previous ? RGB(255, 200, 120) : RGB(120, 200, 255));
+    char title[128];
+    int left = until > now ? (int)((until - now + 999) / 1000) : 0;
+    fmt(title, sizeof title, "%s - %s", previous ? "The LAST boot's log, it reset here" : "QRT kernel log",
+        until ? "closes by itself" : "volume up x3 to close");
+    if (until) { usize l = strlen(title); fmt(title + l, sizeof title - l, " in %d s", left); }
+    gfx_text(&cv, f, 8, 4, title, previous ? RGB(255, 200, 120) : RGB(120, 200, 255));
     int n = 0;
     if (previous) n = plog_prev_lines(); else while (klog_line(n)) n++;
     int first = n > rows ? n - rows : 0;

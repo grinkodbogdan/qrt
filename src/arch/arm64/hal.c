@@ -31,6 +31,7 @@ void hal_arm_init(void) {
 /* ---- display ---- */
 int  logview_active(void);
 int  logview_key(void);
+int  logview_expire(void);
 void logview_draw(void);
 void hal_present(const u32 *px, int stride, int x, int y, int w, int h) {
     if (logview_active()) { logview_draw(); return; }
@@ -65,6 +66,7 @@ int hal_poll(event_t *out, int max) {
         if (!logview_active()) out[m++] = out[i];
     }
     n = m;
+    if (logview_expire()) shell_redraw();
     if (logview_active()) logview_draw();
     n += serial_keys(out + n, max - n);
     for (int i = 0; i < n; i++) if (out[i].type == EV_DOWN || out[i].type == EV_MOVE) { cur_x = out[i].x; cur_y = out[i].y; }

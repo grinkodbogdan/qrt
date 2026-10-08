@@ -253,6 +253,7 @@ void arm_main(const void *dtb, u64 base) {
         klog("safe boot: the last boot reset while Linux's drivers were starting (%d lines kept); Linux stays off",
              plog_prev_lines());
         logview_show_previous();
+        plog_state(PLOG_LINUX_OK);           /* the next boot tries Linux again */
     } else linux_start(dtb);
     shell_main();
     panic("the shell returned");
