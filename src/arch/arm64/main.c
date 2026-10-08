@@ -56,9 +56,9 @@ void native_panic(const char *what, void *frame) {
         for (int i = 0; i < 30; i += 3) klog("x%-2d %016llx  x%-2d %016llx  x%-2d %016llx", i, r[i], i + 1, r[i + 1], i + 2, r[i + 2]);
     }
     if (k.fb_base) {                                              /* a red band across the top */
-        static u32 red[64 * 64];
-        for (int i = 0; i < 64 * 64; i++) red[i] = 0xc01c28;
-        for (u32 x = 0; x < k.fb_w; x += 64) fb_present(red, 64, (int)x, 0, 64, 64);
+        static u32 red[2048 * 32];
+        for (int i = 0; i < 2048 * 32; i++) red[i] = 0xc01c28;
+        for (int y = 0; y < 64; y += 32) fb_present(red - (usize)y * 2048, 2048, 0, y, (int)MIN(k.fb_w, 2048u), 32);
     }
     for (;;) __asm__ volatile("wfe");
 }

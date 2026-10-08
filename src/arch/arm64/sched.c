@@ -95,7 +95,13 @@ static void schedule(void) {
         if (t) { if (t != cur) sw(t); return; }
         account();
         u64 gic_ticks(void);
-        if (gic_ticks()) while (k_now_us() < soonest) __asm__ volatile("wfi");     /* the 10 ms tick wakes it */
+        void gic_wake_in(u64 us);
+        if (gic_ticks())
+            while (k_now_us() < soonest) {                        /* the timer wakes it: the tick or sooner */
+                u64 now = k_now_us();
+                if (soonest > now) gic_wake_in(soonest - now);
+                __asm__ volatile("wfi");
+            }
         else while (k_now_us() < soonest) __asm__ volatile("yield");    /* no tick (yet): watch the clock */
         u64 now = k_now_us();
         idle_us += now - last_switch;

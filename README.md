@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.19.3: a clean screen and quicker touch on the Mi A1
+
+0.19.2 on the Mi A1: the screen kept up, the RPM's 22 regulators came up and with them
+the touch screen (FT5x06 on I2C) - but the screen was scrambled and touch was slow.
+
+- **Scrambled screen** (`fb.c`): the shell presents a rectangle of its frame and passes
+  the whole frame; the rectangle's pixels are at the same place in it (as GOP's Blt and
+  the x86-64 kernel do).  The ARM kernel copied from the frame's corner instead, so
+  every partial update put the wrong pixels on the screen - only full-screen frames
+  were right.
+- **Quicker touch** (`gic.c`, `sched.c`): an idle CPU woke only at the 10 ms tick, so the
+  interrupt thread that hands Linux its interrupts ran every 10 ms instead of every
+  1 ms, and each I2C transfer to the touch controller waited for it.  The idle loop now
+  sets the timer for the soonest sleeping thread.
+
 ## 0.19.2: the scheduler's tick on the Mi A1
 
 The Mi A1 was slow at everything - the screen, the keys, Linux - with the CPU 99% idle.

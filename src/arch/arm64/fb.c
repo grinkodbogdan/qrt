@@ -158,13 +158,16 @@ static void refresher(void *a) {
     }
 }
 void fb_stats(u64 *frames, u64 *us) { *frames = fb_frames; *us = fb_us; fb_frames = fb_us = 0; }
+/* px is the whole frame (stride pixels a row); the rectangle (x, y, w, h) of it goes to
+ * the same place on the screen - as GOP's Blt and the x86-64 kernel's native_present */
 void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     if (!fb) return;
-    if (x < 0) { w += x; px -= x; x = 0; }
-    if (y < 0) { h += y; px -= (isize)y * stride; y = 0; }
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
     if (x + w > (int)k.fb_w) w = (int)k.fb_w - x;
     if (y + h > (int)k.fb_h) h = (int)k.fb_h - y;
     if (w <= 0 || h <= 0) return;
+    px += (usize)y * (usize)stride + (usize)x;
     u64 t0 = k_now_us();
     usize line = (usize)k.fb_stride * (usize)bpp;
     if (bpp == 4 && byte_of[0] == 2 && byte_of[1] == 1 && byte_of[2] == 0) {

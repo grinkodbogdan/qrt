@@ -20,6 +20,18 @@ static u32 vtimer = 27;              /* the virtual timer's interrupt ID */
 u64 gic_dist(void) { return dist; }
 u64 gic_ticks(void) { return ticks; }
 
+static u64 cnt_freq;
+/* the idle loop (sched.c): an interrupt at k_now_us() + us if that is before the next
+ * tick, so a thread sleeping 1 ms wakes after 1 ms, not at the tick */
+void gic_wake_in(u64 us) {
+    if (!cnt_freq || !tick_cnt || us >= 10000) return;              /* the tick comes first anyway */
+    u64 c = us * cnt_freq / 1000000;
+    if (c < 1) c = 1;
+    i64 left;
+    __asm__ volatile("mrs %0, cntv_tval_el0" : "=r"(left));
+    left = (i32)left;
+    if ((i64)c < left) __asm__ volatile("msr cntv_tval_el0, %0; isb" : : "r"(c));
+}
 static void timer_arm(void) {
     __asm__ volatile("msr cntv_tval_el0, %0; msr cntv_ctl_el0, %1; isb" : : "r"((u64)tick_cnt), "r"(1ull));
 }
@@ -55,6 +67,7 @@ int gic_init(void) {
     u64 freq;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
     tick_cnt = (u32)(freq / 100);
+    cnt_freq = freq;
     timer_arm();
     klog("gic: distributor %llx, CPU interface %llx, %u lines; 10 ms scheduler tick on interrupt %u", dist, cpu, lines, vtimer);
     return 1;
