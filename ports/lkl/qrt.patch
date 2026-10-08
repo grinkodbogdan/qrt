@@ -568,6 +568,20 @@ index 57b075200..dbb80f472 100644
  }
  
  static void __init lkl_run_kernel(void *arg)
+diff --git a/drivers/base/dd.c b/drivers/base/dd.c
+index f0e4b4aba..5cbb275e3 100644
+--- a/drivers/base/dd.c
++++ b/drivers/base/dd.c
+@@ -867,6 +867,9 @@ __setup("driver_async_probe=", save_async_options);
+ 
+ static bool driver_allows_async_probing(const struct device_driver *drv)
+ {
++#ifdef CONFIG_LKL_QRT_SOC
++	return false;		/* QRT: every probe in order, in the probing thread */
++#endif
+ 	switch (drv->probe_type) {
+ 	case PROBE_PREFER_ASYNCHRONOUS:
+ 		return true;
 diff --git a/drivers/pmdomain/qcom/rpmpd.c b/drivers/pmdomain/qcom/rpmpd.c
 index 0be6b3026..23c62afcf 100644
 --- a/drivers/pmdomain/qcom/rpmpd.c

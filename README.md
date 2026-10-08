@@ -189,6 +189,25 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.19.2: the scheduler's tick on the Mi A1
+
+The Mi A1 was slow at everything - the screen, the keys, Linux - with the CPU 99% idle.
+
+- **The tick** (`gic.c`): Tessera took the virtual timer as interrupt 27, its usual number
+  (and QEMU's).  Qualcomm's MSM8953 numbers its timer PPIs differently: the device
+  tree's timer node says the virtual timer is PPI 4, interrupt 20.  Tessera enabled the
+  wrong interrupt, so on the phone there was no 10 ms tick at all: no preemption, and an
+  idle CPU slept in `wfi` until some unrelated interrupt woke it - the shell's frames,
+  Linux's timers and its interrupt thread all ran late.  The interrupt now comes from
+  the device tree; the log's `gic:` line names it, and the `cpu:` lines count the ticks
+  (about 100 a second).  Until a first tick arrives the idle loop watches the clock
+  instead of sleeping.
+- **Probing in order** (`drivers/base/dd.c` in `qrt.patch`): drivers that prefer to probe
+  in the background (the RPM's regulators among them) now probe in order like the rest;
+  0.19.1's log showed the RPM answering requests but its regulator driver with no device.
+  The summary lists the RPM, I2C and SD drivers one per line and keeps their probe
+  results.
+
 ## 0.19.1: the screen keeps up; tracing the RPM's regulators
 
 - **Stale screen on the Mi A1** (`fb.c`): its panel is in command mode - it shows memory

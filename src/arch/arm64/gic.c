@@ -1,7 +1,8 @@
 /*
  * gic.c - interrupts on 64-bit ARM: the GICv2 and the generic timer.
  *
- * Tessera takes one interrupt: the virtual timer (PPI 27), every 10 ms - the scheduler's
+ * Tessera takes one interrupt: the virtual timer (its PPI from the device tree: 27 on
+ * QEMU, 20 on Qualcomm's MSM8953), every 10 ms - the scheduler's
  * tick (sched.c), so a thread that spins cannot keep the others from running.  The
  * device interrupts (SPIs) belong to Linux's drivers: Linux's qrt-gic irqchip enables,
  * masks and configures them in the distributor at a priority under the CPU interface's
@@ -14,6 +15,7 @@
 static u64 dist, cpu;
 static u32 lines, tick_cnt;
 static u64 ticks;
+static u32 vtimer = 27;              /* the virtual timer's interrupt ID */
 
 u64 gic_dist(void) { return dist; }
 u64 gic_ticks(void) { return ticks; }
@@ -34,8 +36,19 @@ int gic_init(void) {
      * under the CPU interface's mask: none can interrupt the CPU */
     for (u32 i = 0; i < lines; i += 32) W32(dist + 0x180 + i / 8, ~0u);
     for (u32 i = 32; i < lines; i += 4) W32(dist + 0x400 + i, 0xa0a0a0a0);
-    *(volatile u8 *)(usize)(dist + 0x400 + 27) = 0x80;        /* ... but the virtual timer, above the mask */
-    W32(dist + 0x100, 1u << 27);
+    /* the timer node lists secure, non-secure, virtual and hypervisor timer PPIs; the
+     * third is ours (Qualcomm numbers them 2, 3, 4, 1 - not the usual 13, 14, 11, 10) */
+    int tn = fdt_find_compatible(-1, "arm,armv8-timer");
+    if (tn < 0) tn = fdt_find_compatible(-1, "arm,armv7-timer");
+    int tl;
+    const u8 *ti = tn >= 0 ? fdt_prop(tn, "interrupts", &tl) : NULL;
+    if (ti && tl >= 36) {
+        u32 type = (u32)ti[24] << 24 | (u32)ti[25] << 16 | (u32)ti[26] << 8 | ti[27];
+        u32 num = (u32)ti[28] << 24 | (u32)ti[29] << 16 | (u32)ti[30] << 8 | ti[31];
+        if (type == 1 && num < 16) vtimer = 16 + num;
+    }
+    *(volatile u8 *)(usize)(dist + 0x400 + vtimer) = 0x80;    /* ... but the virtual timer, above the mask */
+    W32(dist + 0x100, 1u << vtimer);
     W32(dist, 1);
     W32(cpu + 0x04, 0x90);                                    /* GICC_PMR: SPIs (0xa0) stay below it */
     W32(cpu, 1);
@@ -43,7 +56,7 @@ int gic_init(void) {
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
     tick_cnt = (u32)(freq / 100);
     timer_arm();
-    klog("gic: distributor %llx, CPU interface %llx, %u lines; 10 ms scheduler tick", dist, cpu, lines);
+    klog("gic: distributor %llx, CPU interface %llx, %u lines; 10 ms scheduler tick on interrupt %u", dist, cpu, lines, vtimer);
     return 1;
 }
 
@@ -52,7 +65,7 @@ void gic_irq(void) {
     for (int n = 0; n < 16; n++) {
         u32 iar = R32(cpu + 0x0c), id = iar & 0x3ff;
         if (id >= 1020) return;
-        if (id != 27) {                                       /* not ours: masked, so it cannot storm */
+        if (id != vtimer) {                                       /* not ours: masked, so it cannot storm */
             W32(dist + 0x180 + 4 * (id / 32), 1u << (id % 32));
             W32(cpu + 0x10, iar);
             static int said;

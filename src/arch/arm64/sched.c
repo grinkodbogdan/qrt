@@ -94,7 +94,9 @@ static void schedule(void) {
         thr_t *t = pick(&soonest);
         if (t) { if (t != cur) sw(t); return; }
         account();
-        while (k_now_us() < soonest) __asm__ volatile("wfi");     /* the 10 ms tick wakes it */
+        u64 gic_ticks(void);
+        if (gic_ticks()) while (k_now_us() < soonest) __asm__ volatile("wfi");     /* the 10 ms tick wakes it */
+        else while (k_now_us() < soonest) __asm__ volatile("yield");    /* no tick (yet): watch the clock */
         u64 now = k_now_us();
         idle_us += now - last_switch;
         last_switch = now;

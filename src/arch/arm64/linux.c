@@ -82,7 +82,7 @@ static char pline[256];
 static int plen;
 /* Linux's complaints, kept for the summary (linux_summary): on a phone screen the log's
  * tail is all that shows, and the reasons scroll away */
-#define NPROB 24
+#define NPROB 32
 static char probs[NPROB][112];
 static int nprob;
 static void keep_problem(const char *l) {
@@ -90,6 +90,9 @@ static void keep_problem(const char *l) {
                                          "smd:", "smem:", "rpm:", "probe of remoteproc", NULL };
     if (nprob == NPROB || strstr(l, "initcall") || strstr(l, "calling ") || strstr(l, "initial console")) return;
     int hit = 0;
+    if (strstr(l, "probe of ") && (strstr(l, "rpm") || strstr(l, "regulator") || strstr(l, "controller") || strstr(l, "i2c") ||
+                                   strstr(l, "mmc") || strstr(l, "1-00")))
+        hit = 1;                                                  /* what the touch screen and storage hang on */
     for (int i = 0; words[i] && !hit; i++) hit = strstr(l, words[i]) != NULL;
     if (!hit) return;
     const char *m = l[0] == '[' && strchr(l, ']') ? strchr(l, ']') + 2 : l;  /* without the timestamp */
@@ -439,10 +442,9 @@ static void linux_summary(void) {
             for (long o = 0; o < len; o += *(u16 *)(d + o + 16)) if (d[o + 19] != '.' && (strchr(d + o + 19, '.') || strchr(d + o + 19, ':'))) bound++;
             l_close((int)dfd);
         }
-        usize l = strlen(line);
-        fmt(line + l, sizeof line - l, "%s%s %d", i ? ", " : "", drv[i], bound);
+        klog("linux: driver %s: %d device(s)%s", drv[i], bound < 0 ? 0 : bound, bound < 0 ? " (no such driver)" : "");
     }
-    klog("linux: drivers (devices bound, -1 = no driver): %s", line);
+    (void)line;
     klog("linux: %d regulator(s); %d device(s) waiting; %d line(s) to note:", nreg, n, nprob);
     for (int i = 0; i < nprob; i++) klog("linux: ! %s", probs[i]);
 }
