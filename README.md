@@ -189,6 +189,24 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.19.6: the boot loader's clocks stay
+
+0.19.5 on the Mi A1: the screen still scrambled and drags still broke the touch screen.
+postmarketOS's boot loader project (lk2nd) lists the Mi A1's three panels (ILI7807,
+OTM1911, FT8716): all are **video mode** - the display engine reads the framebuffer
+continuously, so a screen that stays scrambled means it could not read memory in time.
+Both troubles began when Linux's RPM drivers came up (0.19.2).
+
+- **RPM clock scaling off** (`drivers/clk/qcom/clk-smd-rpm.c` in `qrt.patch`): Linux's
+  RPM clock driver switched on clock scaling, from which point the RPM sets the bus and
+  memory clocks from the processor's votes - and Tessera's Linux has no display or
+  interconnect driver to vote for the display engine's bandwidth, nor for the buses the
+  I2C controller sits on.  Under QRT scaling stays off: the RPM keeps the boot loader's
+  clocks.  The RPM's regulators (the touch screen's supply) are separate and unchanged.
+- **Panel mode from the boot loader** (`fb.c`): the boot loader names the panel on the
+  command line (`..._fhd_video`); that now decides video or command mode, and all four
+  display interfaces are checked.
+
 ## 0.19.5: whole frames on the panel; I2C that does not wait on a lost interrupt
 
 0.19.4 on the Mi A1: touch worked, but a drag now and then ended in

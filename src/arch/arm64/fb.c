@@ -101,8 +101,19 @@ static int mdp5_init(void) {
             /* no interface timing engine running: a command-mode panel, which shows a frame
              * only when told (CTL 0 START) */
             int video = 0;
-            static const u32 intfs[] = { 0x6a000, 0x6a800, 0x6b000 };
-            for (int i = 0; i < 3; i++) if (R32(bases[bi] + intfs[i]) & 1) video = 1;
+            static const u32 intfs[] = { 0x6a000, 0x6a800, 0x6b000, 0x6b800 };
+            for (int i = 0; i < 4; i++) if (R32(bases[bi] + intfs[i]) & 1) video = 1;
+            /* the boot loader names the panel on the command line ("..._fhd_video",
+             * "..._cmd"): that wins over the registers (the Mi A1's panels are all video) */
+            int ch = fdt_node("/chosen"), al;
+            const char *args = ch >= 0 ? fdt_prop(ch, "bootargs", &al) : NULL;
+            const char *pn = args ? strstr(args, "mdss_dsi_") : NULL;
+            if (pn) {
+                const char *e = pn;
+                while (*e && *e != ' ' && *e != ':' && *e != ',') e++;
+                if (e - pn >= 6 && !strncmp(e - 6, "_video", 6)) video = 1;
+                else if (e - pn >= 4 && !strncmp(e - 4, "_cmd", 4)) video = 0;
+            }
             if (!video) kick = bases[bi] + 0x01000 + 0x1c;
             fmt(fb_what, sizeof fb_what, "boot splash (MDP5 pipe %x, %u-byte pixels, %s mode)", pipes[pi], cpp, video ? "video" : "command");
             return 1;

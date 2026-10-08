@@ -582,6 +582,28 @@ index f0e4b4aba..5cbb275e3 100644
  	switch (drv->probe_type) {
  	case PROBE_PREFER_ASYNCHRONOUS:
  		return true;
+diff --git a/drivers/clk/qcom/clk-smd-rpm.c b/drivers/clk/qcom/clk-smd-rpm.c
+index 45c5255bc..943fc1718 100644
+--- a/drivers/clk/qcom/clk-smd-rpm.c
++++ b/drivers/clk/qcom/clk-smd-rpm.c
+@@ -402,6 +402,17 @@ static unsigned long clk_smd_rpm_recalc_rate(struct clk_hw *hw,
+ static int clk_smd_rpm_enable_scaling(void)
+ {
+ 	int ret;
++
++	/*
++	 * QRT: Linux drives no display, bus or CPU clocks here; with scaling
++	 * off the RPM keeps the boot loader's clocks and ignores the
++	 * processor's votes (enabling it let the buses the display engine and
++	 * the I2C controllers depend on be voted down).
++	 */
++	if (IS_ENABLED(CONFIG_LKL_QRT_SOC)) {
++		pr_info("rpm: clock scaling left off (the boot loader's clocks stay)\n");
++		return 0;
++	}
+ 	struct clk_smd_rpm_req req = {
+ 		.key = cpu_to_le32(QCOM_RPM_SMD_KEY_ENABLE),
+ 		.nbytes = cpu_to_le32(sizeof(u32)),
 diff --git a/drivers/i2c/busses/i2c-qup.c b/drivers/i2c/busses/i2c-qup.c
 index d480162a4..22437e4e4 100644
 --- a/drivers/i2c/busses/i2c-qup.c
