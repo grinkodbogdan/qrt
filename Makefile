@@ -114,7 +114,7 @@ FONT_DIRS := /usr/share/fonts/truetype/liberation /usr/share/fonts/truetype/deja
 LINUXDRV := $(if $(wildcard build/linuxdrv/lkl.o),build/rootfs/bin/linuxdrv build/rootfs/etc/linuxdrv.conf)
 LINUXDRV_SRC := src/linuxdrv/linuxdrv.c src/linuxdrv/lkl/iomem.c src/linuxdrv/lkl/utils.c
 build/linuxdrv/linuxdrv: $(LINUXDRV_SRC) src/linuxdrv/lkl/iomem.h build/linuxdrv/lkl.o
-	musl-gcc -O2 -Wall -include sys/types.h -Ibuild/linuxdrv/include -static -Wl,-z,noexecstack \
+	musl-gcc -O2 -Wall -Wno-format-truncation -include sys/types.h -Ibuild/linuxdrv/include -static -Wl,-z,noexecstack \
 	    -o $@ $(LINUXDRV_SRC) build/linuxdrv/lkl.o -lpthread
 	strip $@
 build/rootfs/etc/linuxdrv.conf: src/linuxdrv/linuxdrv.conf

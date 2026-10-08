@@ -76,7 +76,14 @@ static device_t *add(bus_kind_t bus, const char *name, const char *what) {
     return d;
 }
 
+#if defined(__x86_64__)
+int linuxdrv_preferred(const pci_dev_t *d);   /* lkldev.c: /etc/linuxdrv.conf says "always" */
+#endif
+
 static void bind(device_t *d) {
+#if defined(__x86_64__)
+    if (d->bus == BUS_PCI && linuxdrv_preferred(d->pci)) { strlcpy(d->status, "left to Linux's drivers (linuxdrv.conf)", sizeof d->status); return; }
+#endif
     for (const driver_t *const *dp = builtin_drivers; *dp; dp++) {
         const driver_t *drv = *dp;
         int match = d->bus == BUS_PCI ? pci_matches(drv->pci, d->pci)

@@ -101,6 +101,7 @@ static void fill_stat(lstat_t *st, vnode_t *n, int tty) {
     st->st_nlink = 1;
     if (tty) { st->st_mode = 0020620; st->st_rdev = 0x8800; }
     else if (!n) st->st_mode = 0020666;
+    else if (n->mnt && n->mode) st->st_mode = (n->dir ? 0040000u : 0100000u) | (n->mode & 07777);   /* a Linux-mounted disk */
     else st->st_mode = n->dir ? 0040755 : (0100644 | (n->size > 4 && !memcmp(n->data ? (char *)n->data : "", "\x7f" "ELF", 4) ? 0111 : 0));
     st->st_size = n && !n->dir ? (i64)vfs_size(n) : 0;
     st->st_blksize = 4096;
@@ -883,7 +884,7 @@ static void syscall_dispatch_locked(frame_t *f) {
     me->sys_nr = (u32)nr; me->sys_a0 = a0;
     /* native QRT programs: QRT's own numbers (sdk/syscalls.txt); the QRT-only calls,
      * and the rest mapped onto the kernel service with the same semantics */
-    if (nr >= 1040 && nr <= 1047) {                         /* the Linux driver host (lkldev.c) */
+    if (nr >= 1040 && nr <= 1056) {                         /* the Linux driver host (lkldev.c) */
         i64 lkl_call(proc_t *p, u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4);
         r = lkl_call(p, nr, a0, a1, a2, a3, a4);
         nr = ~0ull;

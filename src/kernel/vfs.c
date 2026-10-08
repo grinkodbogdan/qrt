@@ -38,6 +38,69 @@ static vnode_t *find_child(vnode_t *d, const char *name, usize len) {
     return NULL;
 }
 
+/* ---- remote mounts ---- */
+i64 (*vfs_remote_call)(void *mnt, int op, const char *path, const char *path2, u64 off, void *buf, u64 len);
+
+static void rpath(vnode_t *n, char *out, usize cap) {      /* path inside its mount */
+    char tmp[512] = "";
+    for (; n && !n->mroot; n = n->parent) {
+        char seg[600];
+        fmt(seg, sizeof seg, "/%s%s", n->name, tmp);
+        strlcpy(tmp, seg, sizeof tmp);
+    }
+    strlcpy(out, tmp[0] ? tmp : "/", cap);
+}
+static i64 rcall(vnode_t *n, int op, const char *path2, u64 off, void *buf, u64 len) {
+    char p[512];
+    if (!vfs_remote_call) return -5;
+    rpath(n, p, sizeof p);
+    return vfs_remote_call(n->mnt, op, p, path2, off, buf, len);
+}
+static void detach(vnode_t *n);
+static vnode_t *walk(const char *path, int create, int dir);
+#define LIST_MAX (256u << 10)
+static void remote_refresh(vnode_t *d) {
+    u8 *b = kalloc(LIST_MAX);
+    i64 got = rcall(d, VR_LIST, NULL, 0, b, LIST_MAX);
+    d->stamp = k_now_ms();
+    if (got < 0) { kfree(b); return; }
+    for (vnode_t *c = d->child; c; c = c->sibling) c->seen = 0;
+    for (i64 o = 0; o + 12 <= got; ) {
+        u8 dir = b[o], len = b[o + 11];
+        u16 mode = (u16)(b[o + 1] | b[o + 2] << 8);
+        u64 size = 0;
+        memcpy(&size, b + o + 3, 8);
+        if (o + 12 + len > got) break;
+        char name[64];
+        usize l = MIN((usize)len, sizeof name - 1);
+        memcpy(name, b + o + 12, l); name[l] = 0;
+        o += 12 + len;
+        vnode_t *c = find_child(d, name, l);
+        if (c && c->dir != dir) { detach(c); c = NULL; }
+        if (!c) { c = new_node(d, name, dir); c->mnt = d->mnt; }
+        if (!dir) c->size = size;
+        c->mode = mode;
+        c->seen = 1;
+    }
+    for (vnode_t *c = d->child, *nx; c; c = nx) { nx = c->sibling; if (!c->seen) detach(c); }
+    kfree(b);
+}
+static void remote_fresh(vnode_t *d) { if (d && d->mnt && d->dir && k_now_ms() - d->stamp > 1000) remote_refresh(d); }
+
+vnode_t *vfs_mount_remote(const char *path, void *mnt) {
+    vnode_t *n = walk(path, 1, 1);
+    if (!n || n->child || n->mnt) return NULL;
+    n->mnt = mnt;
+    n->mroot = 1;
+    n->stamp = 0;
+    return n;
+}
+void vfs_unmount_remote(vnode_t *m) {
+    if (!m || !m->mroot) return;
+    m->child = NULL;
+    detach(m);
+}
+
 /* Walk path from root; with create, make missing components (last one as 'dir'). */
 static vnode_t *walk(const char *path, int create, int dir) {
     if (!root) root = new_node(NULL, "", 1);
@@ -53,6 +116,7 @@ static vnode_t *walk(const char *path, int create, int dir) {
         if (len == 2 && s[0] == '.' && s[1] == '.') { cur = cur->parent; continue; }
         if (!cur->dir) return NULL;
         vnode_t *c = find_child(cur, s, len);
+        if (!c && cur->mnt) { remote_refresh(cur); c = find_child(cur, s, len); }
         if (!c) {
             if (!create) return NULL;
             char name[64];
@@ -60,7 +124,15 @@ static vnode_t *walk(const char *path, int create, int dir) {
             memcpy(name, s, l);
             name[l] = 0;
             while (*p == '/') p++;
-            c = new_node(cur, name, *p ? 1 : dir);
+            int d = *p ? 1 : dir;
+            if (cur->mnt) {                                 /* make it on the remote side first */
+                char rp[512], full[600];
+                rpath(cur, rp, sizeof rp);
+                fmt(full, sizeof full, "%s/%s", strcmp(rp, "/") ? rp : "", name);
+                if (!vfs_remote_call || vfs_remote_call(cur->mnt, d ? VR_MKDIR : VR_CREATE, full, NULL, 0, NULL, 0) < 0) return NULL;
+            }
+            c = new_node(cur, name, d);
+            c->mnt = cur->mnt;
         }
         cur = c;
     }
@@ -82,7 +154,12 @@ int vfs_unlink(const char *path, int dir) {
     if (!n || n == root) return -2;                   /* ENOENT */
     if (dir && !n->dir) return -20;                   /* ENOTDIR */
     if (!dir && n->dir) return -21;                   /* EISDIR */
-    if (dir && n->child) return -39;                  /* ENOTEMPTY */
+    if (n->mroot) return -16;                         /* EBUSY */
+    if (n->mnt) {
+        remote_fresh(n);
+        i64 r = rcall(n, dir ? VR_RMDIR : VR_UNLINK, NULL, 0, NULL, 0);
+        if (r < 0) return (int)r;
+    } else if (dir && n->child) return -39;           /* ENOTEMPTY */
     detach(n);
     return 0;
 }
@@ -111,6 +188,15 @@ int vfs_rename(const char *from, const char *to) {
     vnode_t *d = walk(dpath[0] ? dpath : "/", 0, 0);
     if (!d || !d->dir) return -2;
     for (vnode_t *a = d; a && a != root; a = a->parent) if (a == n) return -22;   /* into itself */
+    if (n->mroot || (old && old->mroot)) return -16;
+    if (n->mnt || d->mnt) {
+        if (n->mnt != d->mnt) return -18;                     /* EXDEV: copy instead */
+        char rp[512], full[600];
+        rpath(d, rp, sizeof rp);
+        fmt(full, sizeof full, "%s/%s", strcmp(rp, "/") ? rp : "", name);
+        i64 r = rcall(n, VR_RENAME, full, 0, NULL, 0);
+        if (r < 0) return (int)r;
+    }
     if (old) detach(old);
     detach(n);
     strlcpy(n->name, name, sizeof n->name);
@@ -122,8 +208,9 @@ int vfs_rename(const char *from, const char *to) {
 }
 vnode_t *vfs_create(const char *path, int dir) { return walk(path, 1, dir); }
 
-int vfs_children(vnode_t *d) { int n = 0; for (vnode_t *c = d ? d->child : NULL; c; c = c->sibling) n++; return n; }
+int vfs_children(vnode_t *d) { remote_fresh(d); int n = 0; for (vnode_t *c = d ? d->child : NULL; c; c = c->sibling) n++; return n; }
 vnode_t *vfs_child_at(vnode_t *d, int i) {
+    if (i == 0) remote_fresh(d);
     for (vnode_t *c = d ? d->child : NULL; c; c = c->sibling) if (i-- == 0) return c;
     return NULL;
 }
@@ -136,8 +223,24 @@ static void gen_refresh(vnode_t *n) {
 
 u64 vfs_size(vnode_t *n) { gen_refresh(n); return n->size; }
 
+#define RCHUNK (256u << 10)
 i64 vfs_read(vnode_t *n, u64 off, void *buf, u64 len) {
     if (n->dir) return -21;                          /* EISDIR */
+    if (n->mnt) {                                    /* through a kernel buffer: the server is another process */
+        u64 done = 0;
+        u8 *b = kalloc(MIN(len, RCHUNK) ? MIN(len, RCHUNK) : 1);
+        while (done < len) {
+            u64 c = MIN(len - done, RCHUNK);
+            i64 r = rcall(n, VR_READ, NULL, off + done, b, c);
+            if (r < 0) { kfree(b); return done ? (i64)done : r; }
+            memcpy((u8 *)buf + done, b, (usize)r);
+            done += (u64)r;
+            if ((u64)r < c) break;
+        }
+        kfree(b);
+        if (off + done > n->size) n->size = off + done;
+        return (i64)done;
+    }
     if (off == 0) gen_refresh(n);
     if (off >= n->size) return 0;
     u64 m = MIN(len, n->size - off);
@@ -147,6 +250,20 @@ i64 vfs_read(vnode_t *n, u64 off, void *buf, u64 len) {
 
 i64 vfs_write(vnode_t *n, u64 off, const void *buf, u64 len) {
     if (n->dir || n->gen) return -1;
+    if (n->mnt) {
+        u64 done = 0;
+        u8 *b = kalloc(MIN(len, RCHUNK) ? MIN(len, RCHUNK) : 1);
+        while (done < len) {
+            u64 c = MIN(len - done, RCHUNK);
+            memcpy(b, (const u8 *)buf + done, (usize)c);
+            i64 r = rcall(n, VR_WRITE, NULL, off + done, b, c);
+            if (r <= 0) { kfree(b); return done ? (i64)done : (r ? r : -5); }
+            done += (u64)r;
+        }
+        kfree(b);
+        if (off + done > n->size) n->size = off + done;
+        return (i64)done;
+    }
     if (off + len > n->cap) {
         u64 cap = MAX(off + len, n->cap * 2);
         if (cap > MAX_FILE) return -27;              /* EFBIG */
@@ -160,7 +277,10 @@ i64 vfs_write(vnode_t *n, u64 off, const void *buf, u64 len) {
     return (i64)len;
 }
 
-void vfs_truncate(vnode_t *n) { n->size = 0; }
+void vfs_truncate(vnode_t *n) {
+    if (n->mnt && !n->dir) rcall(n, VR_TRUNC, NULL, 0, NULL, 0);
+    n->size = 0;
+}
 
 void vfs_path(vnode_t *n, char *out, usize cap) {
     char tmp[256] = "";

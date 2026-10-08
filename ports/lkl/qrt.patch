@@ -1,0 +1,161 @@
+diff --git a/arch/lkl/drivers/pci.c b/arch/lkl/drivers/pci.c
+index f4e969fb8..45be9bfdc 100644
+--- a/arch/lkl/drivers/pci.c
++++ b/arch/lkl/drivers/pci.c
+@@ -7,6 +7,7 @@
+ #include <linux/types.h>
+ #include <linux/io.h>
+ #include <linux/platform_device.h>
++#include <linux/moduleparam.h>
+ #include <linux/dma-map-ops.h>
+ #include <linux/scatterlist.h>
+ #include <linux/mm.h>
+@@ -180,19 +181,72 @@ static int lkl_dma_supported(struct device *dev, u64 mask)
+ 	return 1;
+ }
+ 
+-static char *pcidev_name;
++/*
++ * QRT: lkl_pci= takes a comma-separated list of devices, each on its own root bus, and
++ * devices can also be added after boot by writing such a list to
++ * /sys/module/lkl_pci/parameters/devices - a driver host does that once its firmware
++ * helper runs, so drivers that load firmware while probing find it.
++ */
++#define LKL_PCI_MAX 32
++static char *pcidev_names[LKL_PCI_MAX];
++static int pcidev_count, pcidev_buses;
++static int lkl_pci_ready;
+ 
+ static int __init setup_pci_device(char *str)
+ {
+-	if (pcidev_name) {
+-		pr_info("The PCI driver supports only one PCI device.");
+-		pr_info("'%s' will be discarded.", str);
+-		return -1;
++	char *s;
++
++	while ((s = strsep(&str, ",")) != NULL)
++		if (*s && pcidev_count < LKL_PCI_MAX)
++			pcidev_names[pcidev_count++] = s;
++	return 0;
++}
++
++static int lkl_pci_add_one(const char *name)
++{
++	struct lkl_pci_dev *dev;
++	struct pci_bus *bus;
++
++	if (pcidev_buses >= 255)
++		return -ENOSPC;
++	dev = lkl_ops->pci_ops->add(name, (void *)memory_start,
++				    memory_end - memory_start);
++	if (!dev)
++		return -ENODEV;
++	bus = pci_scan_bus(pcidev_buses++, &lkl_pci_root_ops, (void *)dev);
++	if (!bus) {
++		lkl_ops->pci_ops->remove(dev);
++		return -ENODEV;
+ 	}
+-	pcidev_name = str;
++	pci_walk_bus(bus, lkl_pci_override_resource, NULL);
++	pci_bus_add_devices(bus);
+ 	return 0;
+ }
+ 
++static int lkl_pci_set_devices(const char *val, const struct kernel_param *kp)
++{
++	char *copy, *str, *s;
++	int n = 0;
++
++	if (!lkl_pci_ready || !lkl_ops->pci_ops)
++		return -EAGAIN;
++	copy = str = kstrdup(val, GFP_KERNEL);
++	if (!copy)
++		return -ENOMEM;
++	while ((s = strsep(&str, ",\n")) != NULL)
++		if (*s && !lkl_pci_add_one(s))
++			n++;
++	kfree(copy);
++	return n ? 0 : -ENODEV;
++}
++
++static const struct kernel_param_ops lkl_pci_devices_ops = {
++	.set = lkl_pci_set_devices,
++};
++#undef MODULE_PARAM_PREFIX
++#define MODULE_PARAM_PREFIX "lkl_pci."
++module_param_cb(devices, &lkl_pci_devices_ops, NULL, 0200);
++
+ early_param("lkl_pci", setup_pci_device);
+ 
+ const struct dma_map_ops lkl_dma_ops = {
+@@ -207,34 +261,21 @@ const struct dma_map_ops lkl_dma_ops = {
+ 
+ static int lkl_pci_probe(struct platform_device *pdev)
+ {
+-	struct lkl_pci_dev *dev;
+-	struct pci_bus *bus;
+-
+-	if (!lkl_ops->pci_ops || !pcidev_name)
+-		return -1;
+-
+-	dev = lkl_ops->pci_ops->add(pcidev_name, (void *)memory_start,
+-				    memory_end - memory_start);
+-	if (!dev)
+-		return -1;
++	int i;
+ 
+-	bus = pci_scan_bus(0, &lkl_pci_root_ops, (void *)dev);
+-	if (!bus) {
+-		lkl_ops->pci_ops->remove(dev);
++	lkl_pci_ready = 1;
++	if (!lkl_ops->pci_ops)
+ 		return -1;
+-	}
+-	pci_walk_bus(bus, lkl_pci_override_resource, NULL);
+-	pci_bus_add_devices(bus);
+-	dev_set_drvdata(&pdev->dev, bus);
+-
++	for (i = 0; i < pcidev_count; i++)
++		lkl_pci_add_one(pcidev_names[i]);
+ 	return 0;
+ }
+ 
+ static void lkl_pci_shutdown(struct platform_device *pdev)
+ {
+-	struct pci_bus *bus = (struct pci_bus *)dev_get_drvdata(&pdev->dev);
++	struct pci_bus *bus = NULL;
+ 
+-	if (bus)
++	while ((bus = pci_find_next_bus(bus)) != NULL)
+ 		pci_walk_bus(bus, lkl_pci_remove_devices, NULL);
+ }
+ 
+diff --git a/arch/lkl/include/asm/barrier.h b/arch/lkl/include/asm/barrier.h
+new file mode 100644
+index 000000000..c25ddb2a8
+--- /dev/null
++++ b/arch/lkl/include/asm/barrier.h
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_LKL_BARRIER_H
++#define _ASM_LKL_BARRIER_H
++
++/*
++ * QRT: Linux runs on one LKL CPU, but drivers order their memory accesses against
++ * devices (DMA, shadow doorbells) with mb()/rmb()/wmb(); on an x86-64 host those need
++ * the real fences, not just a compiler barrier.
++ */
++#if defined(__x86_64__)
++#define mb()	asm volatile("mfence" ::: "memory")
++#define rmb()	asm volatile("lfence" ::: "memory")
++#define wmb()	asm volatile("sfence" ::: "memory")
++#elif defined(__aarch64__)
++#define mb()	asm volatile("dmb sy" ::: "memory")
++#define rmb()	asm volatile("dmb ld" ::: "memory")
++#define wmb()	asm volatile("dmb st" ::: "memory")
++#endif
++
++#include <asm-generic/barrier.h>
++
++#endif

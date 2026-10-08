@@ -47,7 +47,15 @@ static volatile int wake_pending;
 static thread_t *boost;
 void thread_set_prio(thread_t *t) { if (t) t->prio = 1; }
 
-thread_t *thread_current(void) { percpu_t *c = this_cpu(); return c ? c->cur : NULL; }
+/* with interrupts off: a thread moved to another CPU between reading its CPU and that
+ * CPU's current thread would get someone else (the idle thread: no process) */
+thread_t *thread_current(void) {
+    u64 f = irq_save();
+    percpu_t *c = this_cpu();
+    thread_t *t = c ? c->cur : NULL;
+    irq_restore(f);
+    return t;
+}
 u64 sched_idle_ticks(void) { return cpus[0] ? cpus[0]->idle_ticks : 0; }
 
 static void fxsave(void *p)  { __asm__ volatile("fxsave64 (%0)" : : "r"(p) : "memory"); }

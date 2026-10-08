@@ -168,6 +168,7 @@ static void draw(canvas_t *c, rect_t a) {
         kv(&f, "Firmware", k.bios_version[0] ? k.bios_version : k.fw_vendor);
 #if defined(__x86_64__)
         kv(&f, "ACPI", acpi_status());
+        { int linuxdrv_mounts(char *out, int cap); char m[256]; if (linuxdrv_mounts(m, sizeof m)) kv(&f, "Disks (Linux)", m); }
 #endif
         for (int i = 0; i < k.n_vol; i++) {
             fmt_bytes(b2, sizeof b2, k.vol[i].size);

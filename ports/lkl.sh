@@ -3,7 +3,7 @@
 # Linux driver host, /bin/linuxdrv (src/linuxdrv).  Fetches LKL at a fixed commit,
 # configures it (arch/lkl defconfig + ports/lkl/config), builds lkl.o with musl and puts
 # it, stripped, with LKL's headers in build/linuxdrv/; then `make` links linuxdrv.
-# Needs: git, gcc, musl-gcc, flex, bison, bc.  About 4 minutes on 16 cores, 2 GB of disk.
+# Needs: git, gcc, musl-gcc, flex, bison, bc.  About 10 minutes on 16 cores, 4 GB of disk.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
@@ -20,6 +20,9 @@ if [ "$(git -C "$SRC" rev-parse HEAD 2>/dev/null)" != "$COMMIT" ]; then
     git -C "$SRC" checkout -q FETCH_HEAD
 fi
 cd "$SRC"
+for p in "$here"/lkl/*.patch; do                      # QRT's changes to LKL
+    git apply --reverse --check "$p" 2>/dev/null || git apply "$p"
+done
 make ARCH=lkl defconfig >/dev/null
 cat "$here/lkl/config" >> .config
 make ARCH=lkl olddefconfig >/dev/null

@@ -189,6 +189,79 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.16.0: any hardware Linux has a driver for
+
+0.15.0 ran one Linux driver (e1000e) for one device.  0.16.0 makes Linux's driver
+collection Tessera's fallback for **everything**: at boot, every PCI device no Tessera
+driver runs goes to one driver host, the unmodified Linux 6.12 drivers take what they
+know, and what they make - network interfaces, disks, input devices, sound cards -
+is bridged into Tessera.  Tessera's own drivers still come first (they know the Venue and
+the FZ-G1 best); Linux fills every gap.
+
+- **One driver host for all devices**: `linuxdrv 00:19.0 00:1f.2 ...` (started by the
+  kernel with every PCI device that has no Tessera driver - graphics, bridges and SMBus
+  aside).  LKL is patched (`ports/lkl/qrt.patch`) to take a list of PCI devices and to
+  add them after boot, once the host's firmware helper runs.  Each device's line in the
+  System app says which Linux driver took it; devices no Linux driver takes are given
+  back with their command register restored.
+- **The drivers** (`ports/lkl/config`): wired network (Intel e1000e, igb, igc, ixgbe,
+  i40e, ice; Realtek r8169; Broadcom tg3, bnx2, bnxt; Atheros alx, atl1c/e; Marvell
+  sky2; Aquantia; Mellanox; nVidia forcedeth; VIA; virtio), storage (AHCI SATA, NVMe,
+  SD/MMC host controllers incl. Realtek and Ricoh card readers, LSI/Broadcom SAS RAID,
+  virtio), USB (xHCI, EHCI, OHCI host controllers; mass storage and UAS; USB Ethernet:
+  ASIX, Realtek r8152, CDC ECM/NCM, RNDIS, iPhone tethering, SMSC, LAN78xx; serial:
+  FTDI, PL2303, CP210x, CH341; HID: keyboards, mice, multi-touch, Wacom, Logitech,
+  Apple, Microsoft), sound (HD Audio with every codec family - Realtek, Analog, IDT,
+  VIA, Conexant, Cirrus, Creative, C-Media, HDMI; USB audio; RME Hammerfall; virtio)
+  and file systems (ext4, FAT, exFAT, NTFS, XFS, Btrfs, F2FS, ISO 9660, UDF).
+- **Bridges into Tessera** (`src/arch/x64/lkldev.c`, system calls 1040-1056):
+  - *network*: every Ethernet interface becomes an interface in Tessera's stack
+    ("Ethernet (Linux r8169)"); Tessera still does ARP, DHCP and TCP.
+  - *disks*: each partition Linux can mount appears as **`/mnt/<name>`** in Tessera's
+    file tree (`/mnt/sda1`, `/mnt/nvme0n1p2`) - the VFS gained remote mounts whose
+    listings, reads and writes the driver host answers with Linux's file systems.
+    Programs and the Terminal use them like any directory; writes reach the disk a
+    second after the last change and on shutdown (SIGTERM: sync, unmount).
+    NTFS is mounted read-only (Windows' fast startup leaves it hibernated).
+  - *input*: keyboards, mice, touch screens and tablets found by Linux's input drivers
+    (evdev) feed the shell's event stream.
+  - *sound*: the first ALSA playback device becomes a sound output; Tessera's mixer
+    plays through it (mixer controls unmuted at 80 %).
+  - *firmware*: a driver's `request_firmware()` is answered from Tessera's
+    `/lib/firmware`, so drivers that need firmware blobs work when the blob is on the
+    stick.
+- **Interrupts**: MSI and MSI-X now work - each vector's message is aimed at a word of a
+  page the driver host watches (a memory write is all an MSI is), alongside the polled
+  legacy INTx.  DMA from a buffer outside Linux's RAM (a thread's stack) is translated
+  by Tessera (`qrt_dma_addr`).  LKL's memory barriers are real fences on x86-64, which
+  NVMe's shadow doorbells need.
+- **`/etc/linuxdrv.conf`**: `never <vendor>:<device>` keeps a device from Linux;
+  `always <vendor>:<device>` gives Linux a device Tessera has a driver for - e.g.
+  `always 8086:1e31` hands the FZ-G1's USB 3 controller to Linux, so *every* USB device
+  works as it does on Linux (keyboards, mice and touch come back through the input
+  bridge; Tessera's own USB audio and Bluetooth then do not run); `linux <arguments>`
+  adds Linux kernel arguments.
+- **Tested in QEMU** (q35, all at once): Linux's e1000e, nvme, ahci and snd_hda_intel
+  take an Intel 82574, an NVMe disk, the ICH9 SATA controller and ICH9 HD Audio; the
+  disk's ext4 and FAT partitions and the NVMe FAT disk appear under `/mnt` and the
+  Terminal reads and writes them (written files checked on the host afterwards); `wget`
+  fetches a page through the e1000e; `/dev/dsp` output is recorded from the HD Audio
+  codec.  And with QEMU's USB controller given to Linux (`always 1b36:000d`): Linux's
+  xhci_hcd, usbhid and usb-storage run the tablet, the keyboard and a USB stick - the
+  Terminal is opened by a tap and typed into through the input bridge, and the stick is
+  read at `/mnt/sdb`.
+- **Not yet**: Wi-Fi cards Tessera has no driver for (Linux's iwlwifi, ath9k/10k, rtw88
+  need a WPA supplicant bridge); Bluetooth through Linux; GPUs (DRM); devices that need
+  x86 I/O ports or ACPI platform buses (PS/2, I2C touch pads, SMBus); USB devices on a
+  controller Tessera runs are not passed to Linux one by one (give Linux the controller).
+- **Kernel fix**: `thread_current()` read its CPU and that CPU's current thread in two
+  steps; a thread moved to another CPU in between got the other CPU's thread (a kernel
+  panic in the system call path, seen once the driver host's many threads made system
+  calls all the time).  It now reads both with interrupts off.
+- Building: `ports/lkl.sh` (about 10 minutes on 16 cores) then `make`; `/bin/linuxdrv`
+  is 22 MB.  The suite passes except its scroll-redraw pixel comparison, which fails on
+  this 4-core build machine for 0.14.2 and 0.15.0 as well.
+
 ## 0.15.0: Linux's drivers on Tessera (the Linux kernel as a library)
 
 Writing every driver twice - once for the Venue, once for the FZ-G1, once for the next

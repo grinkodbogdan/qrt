@@ -479,7 +479,7 @@ const char *usb_name(udev_t *d) { return d->what; }
 void usb_set_name(udev_t *d, const char *name) { strlcpy(d->what, name, sizeof d->what); }
 
 /* ---- keyboards (HID boot protocol) ------------------------------------------------------------- */
-static void key_of(u8 u, int shift, int ctrl, u16 *scan, c16 *ch) {
+void usb_key_of(u8 u, int shift, int ctrl, u16 *scan, c16 *ch) {
     static const char lo[] = "abcdefghijklmnopqrstuvwxyz1234567890";
     static const char hi[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()";
     static const char p_lo[] = "-=[]\\#;'`,./", p_hi[] = "_+{}|~:\"~<>?";
@@ -518,7 +518,7 @@ static void kbd_report(void *arg, const u8 *r, int len) {
         for (int j = 2; j < 8; j++) if (d->prev[j] == u) was = 1;
         if (was) continue;
         u16 sc; c16 ch;
-        key_of(u, shift, ctrl, &sc, &ch);
+        usb_key_of(u, shift, ctrl, &sc, &ch);
         if ((sc || ch) && x.nkeys < (int)ARRAY_LEN(x.keys)) {
             x.keys[x.nkeys++] = (event_t){ .type = EV_KEY, .scan = sc, .ch = ch };
             x.rep_scan = sc; x.rep_ch = ch; x.rep_on = 1; x.rep_next = k_now_ms() + 500;

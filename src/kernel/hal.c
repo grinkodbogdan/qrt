@@ -195,6 +195,7 @@ void hal_reprobe_input(void) {
     probe_input();
 }
 
+int lkl_input_poll(event_t *out, int max);
 int hal_poll(event_t *out, int max) {
     int n = 0;
     if (cur_x < 0) { cur_x = (int)k.fb_w / 2; cur_y = (int)k.fb_h / 2; }
@@ -264,6 +265,7 @@ int hal_poll(event_t *out, int max) {
     if (k.native) {
         n += buttons_poll(out + n, max - n);
         n += xhci_poll(out + n, max - n);
+        n += lkl_input_poll(out + n, max - n);       /* Linux's input drivers (lkldev.c) */
         n += acpi_poll(out + n, max - n);
         return n + serial_keys(out + n, max - n);
     }
