@@ -278,7 +278,13 @@ static void input_loop(void *arg) {
     int shift = 0, ctrl = 0, x = 0, y = 0, touch = 0, was = 0, moved = 0, fingers = 0;
     for (;;) {
         long n = l_read(d->fd, ev, sizeof ev);
-        if (n <= 0) { if (n == -19) break; thr_sleep_us(10000); continue; }      /* -ENODEV: unplugged */
+        if (n <= 0) {
+            if (n == -19) break;                                     /* -ENODEV: unplugged */
+            static int said;
+            if (n < 0 && said++ < 3) klog("linux: reading %s: error %ld", d->name, n);
+            thr_sleep_us(10000);
+            continue;
+        }
         for (long i = 0; i < n / (long)sizeof ev[0]; i++) {
             struct ievent *e = &ev[i];
             if (e->type == 1) {                                          /* EV_KEY */

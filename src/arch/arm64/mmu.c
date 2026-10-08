@@ -20,7 +20,7 @@
 #define D_UXN    (1ull << 54)
 #define D_ATTR(i) ((u64)(i) << 2)
 
-#define ARGON_L1 256       /* L1 entries from here: Argon's window (mmu.c, below) */
+#define ARGON_L1 255       /* L1 entries from here: Argon's window (mmu.c, below): 255 GB up */
 #define NL2 16
 #define NL3 96
 static u64 l1[512] __attribute__((aligned(4096)));
@@ -123,7 +123,8 @@ void mmu_init(const u64 (*ram)[2], int nram, const u64 (*nc)[2], int nnc, const 
 
 /* ---- Argon: Linux's virtual memory (LKL in MMU mode) ------------------------------
  * Linux's RAM and its vmalloc/ioremap-by-page mappings live in a window above all
- * physical memory (L1 entries 256..511, from 256 GB); Linux asks for 4 KB pages there
+ * physical memory (L1 entries 255..511: Linux's RAM from 256 GB, the stack of its init
+ * process just below); Linux asks for 4 KB pages there
  * (linux.c's shmem_mmap / munmap host operations) and Tessera builds the tables. */
 u64 pmm_alloc(int high);
 static u64 *argon_table(u64 *entry) {
