@@ -37,8 +37,8 @@ static u32 rd(u32 r) { return *(volatile u32 *)(e.regs + r); }
 static void wr(u32 r, u32 v) { *(volatile u32 *)(e.regs + r) = v; }
 
 int e1000_probe(pci_dev_t *d) {
-    if (d->vendor != 0x8086) return 0;
-    static const u16 ids[] = { 0x100e, 0x100f, 0x10d3, 0x153a };
+    if (d->vendor != 0x8086 || (e.pci && e.pci != d)) return 0;   /* one NIC: the first; others stay free (Linux drivers) */
+    static const u16 ids[] = { 0x100e, 0x100f };
     for (usize i = 0; i < ARRAY_LEN(ids); i++) if (d->device == ids[i]) { e.pci = d; return 1; }
     return 0;
 }

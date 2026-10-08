@@ -32,6 +32,9 @@ void netstack_poll(void) {
     net_lock();
     e1000_poll();
     wlan_poll();
+#if defined(__x86_64__)
+    { void lkl_net_poll(void); lkl_net_poll(); }               /* Linux drivers' interfaces (lkldev.c) */
+#endif
     net_poll();
     net_unlock();
     net_time_http_poll();

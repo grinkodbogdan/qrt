@@ -41,7 +41,8 @@ void  as_destroy(u64 cr3);
 #define AS_W      1                  /* writable */
 #define AS_X      2                  /* executable (without it: no-execute, where the CPU has NX) */
 #define AS_SHARED 4                  /* the frame belongs to a shared object: never freed with the mapping */
-#define AS_NONE   8                  /* as_protect: no access, the page and its contents are kept */
+#define AS_NONE   8                   /* as_protect: no access, the page and its contents are kept */
+#define AS_UC     16                 /* uncached: device registers mapped into a process */
 int   user_va(u64 va);                                   /* in one of the user regions */
 int   user_high_range(u64 start, u64 end);               /* [start, end) inside one high user region */
 int   as_map(u64 cr3, u64 va, u64 frame, int prot);      /* 4 KiB, user-accessible */

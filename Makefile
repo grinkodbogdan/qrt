@@ -33,7 +33,7 @@ LDFLAGS := -subsystem:efi_application -entry:efi_main -nodefaultlib
 
 # the native kernel (ExitBootServices, own MM/interrupts/SMP) is 64-bit only
 X64_SRC := src/arch/x64/mm.c src/arch/x64/cpu.c src/arch/x64/apic.c src/arch/x64/native.c \
-           src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c src/arch/x64/lsock.c src/arch/x64/signal.c src/arch/x64/lfile.c src/arch/x64/unix.c src/arch/x64/qrtcall.c
+           src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c src/arch/x64/lsock.c src/arch/x64/signal.c src/arch/x64/lfile.c src/arch/x64/unix.c src/arch/x64/qrtcall.c src/arch/x64/lkldev.c
 X64_ASM := src/arch/x64/isr.S src/arch/x64/entry.S src/arch/x64/trampoline.S src/drivers/iwn/fw.S
 
 IA32_OBJ := $(SRC:src/%.c=build/ia32/%.o)
@@ -109,7 +109,22 @@ LADYBIRD += $(if $(wildcard build/ladybird/bin/Ladybird),build/rootfs/bin/ladybi
             build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/fps.html build/rootfs/share/tests/functions.html build/rootfs/share/tests/video.html build/rootfs/share/tests/video.webm build/rootfs/share/tests/render.sh \
             build/rootfs/etc/ssl/certs/ca-certificates.crt)
 FONT_DIRS := /usr/share/fonts/truetype/liberation /usr/share/fonts/truetype/dejavu
-ROOTFS := build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
+# the Linux driver host: ports/lkl.sh builds Linux as a library (build/linuxdrv/lkl.o),
+# then src/linuxdrv is linked with it into /bin/linuxdrv
+LINUXDRV := $(if $(wildcard build/linuxdrv/lkl.o),build/rootfs/bin/linuxdrv build/rootfs/etc/linuxdrv.conf)
+LINUXDRV_SRC := src/linuxdrv/linuxdrv.c src/linuxdrv/lkl/iomem.c src/linuxdrv/lkl/utils.c
+build/linuxdrv/linuxdrv: $(LINUXDRV_SRC) src/linuxdrv/lkl/iomem.h build/linuxdrv/lkl.o
+	musl-gcc -O2 -Wall -include sys/types.h -Ibuild/linuxdrv/include -static -Wl,-z,noexecstack \
+	    -o $@ $(LINUXDRV_SRC) build/linuxdrv/lkl.o -lpthread
+	strip $@
+build/rootfs/etc/linuxdrv.conf: src/linuxdrv/linuxdrv.conf
+	@mkdir -p $(dir $@)
+	cp $< $@
+build/rootfs/bin/linuxdrv: build/linuxdrv/linuxdrv
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+ROOTFS := $(LINUXDRV) build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
           build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/play build/rootfs/bin/hello-window build/rootfs/bin/cxx-test $(RUST_HELLO) $(LADYBIRD) build/rootfs/lib64/ld-linux-x86-64.so.2
 
 # Dynamically linked programs and the host's glibc / libstdc++ they run with

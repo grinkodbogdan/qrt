@@ -189,6 +189,46 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.15.0: Linux's drivers on Tessera (the Linux kernel as a library)
+
+Writing every driver twice - once for the Venue, once for the FZ-G1, once for the next
+machine - does not scale.  From 0.15.0 QRT can run **Linux's own, unmodified device
+drivers**, while Tessera stays what it is (QRT's shell, its native and Linux system
+calls, its scheduler and memory manager):
+
+- **`/bin/linuxdrv`, the driver host**: the Linux kernel built as a library (LKL,
+  github.com/lkl/linux: the anykernel / LibOS approach) linked into an ordinary program,
+  one per PCI device.  Linux's scheduler, memory manager, PCI core, network stack and the
+  driver run as threads of that program.  `src/linuxdrv/linuxdrv.c` is LKL's *host* on
+  Tessera: pthreads, condition-variable timers, and a PCI backend.
+- **Tessera gives it just what Linux's PCI core asks of a platform**
+  (`src/arch/x64/lkldev.c`, system calls 1040-1047): claiming a device no Tessera driver
+  has, its configuration space, its memory BARs mapped uncached, and Linux's RAM as one
+  physically contiguous block - so a driver's DMA address is simply its RAM offset plus
+  the physical base, no IOMMU needed.  Interrupts: the PCI status register's Interrupt
+  Status bit, polled every millisecond (as LKL's VFIO host does).
+- **Network cards are bridged into Tessera's stack**: Linux drives the card and nothing
+  more (no address, IPv6 off, GRO off); a packet socket passes every Ethernet frame to a
+  network interface in Tessera ("Ethernet (Linux)"), which does ARP, DHCP, DNS and TCP for
+  QRT's programs exactly as for the cards it drives itself.
+- **Automatic**: at boot Tessera starts a driver host for each PCI device that no Tessera
+  driver took and that `/etc/linuxdrv.conf` lists (vendor:device).  This build carries
+  Linux's **e1000e** (Intel 82574 ... I219 Ethernet), so Tessera's own e1000 driver now
+  keeps only the classic e1000; more Linux drivers are a config line in
+  `ports/lkl/config` and a line in `src/linuxdrv/linuxdrv.conf` away.
+- **Building**: `ports/lkl.sh` fetches LKL at a fixed commit, configures it
+  (`arch/lkl` defconfig + `ports/lkl/config`) and builds the kernel object with musl
+  (`build/linuxdrv/lkl.o`); `make` then links `/bin/linuxdrv` (12 MB) into the image.
+- **Tested in QEMU** with an e1000e as the only network card: Tessera starts the driver
+  host, Linux 6.12's e1000e driver brings the card up (legacy interrupts), the card is
+  bridged, Tessera gets an address over DHCP and a `wget` from the Terminal fetches a page
+  through it.  `linuxdrv <bus:dev.fn> --test host:port` instead lets Linux's own TCP/IP
+  fetch a page (DHCP in Linux, `HTTP/1.0 200 OK`).
+- Next: Linux's Wi-Fi (iwlwifi with mac80211), sound (snd-hda) and graphics drivers in
+  the driver host, MSI interrupts, and more than one device per host.
+- The suite: on this 4-core build machine its timing checks (Ladybird's first frame, the
+  touchpad's scroll, USB audio dropouts) fail now and then for 0.14.2 as well.
+
 ## 0.14.2: HDMI for TVs, control mode on Ivy Bridge
 
 - **TVs**: when the EDID says the monitor is an HDMI sink (a CEA extension with the HDMI

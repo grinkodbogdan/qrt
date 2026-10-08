@@ -236,5 +236,6 @@ static void native_main(void *arg) {
     irq_init();                            /* I/O APICs from the MADT, every line masked */
     dev_init();                            /* enumerate PCI/ACPI/platform devices, bind drivers */
     acpi_start();                          /* PCs: ACPICA - battery, AC, lid, buttons, hotkeys */
+    { void linuxdrv_autostart(void); linuxdrv_autostart(); }   /* Linux's drivers for what Tessera has none (lkldev.c) */
     shell_main();
 }

@@ -1,0 +1,9 @@
+# QRT's additions to LKL's arch/lkl/configs/defconfig (ports/lkl.sh): PCI and the
+# Linux drivers the driver host (/bin/linuxdrv) carries.
+CONFIG_PCI=y
+CONFIG_ETHERNET=y
+CONFIG_NET_VENDOR_INTEL=y
+CONFIG_E1000E=y
+CONFIG_PACKET=y
+CONFIG_IP_PNP=y
+CONFIG_IP_PNP_DHCP=y

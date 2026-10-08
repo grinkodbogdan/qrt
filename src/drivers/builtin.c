@@ -242,9 +242,9 @@ static int hda_dev_probe(device_t *d) {
 }
 static const driver_t drv_hda = { "hda", hda_pci, NULL, NULL, hda_dev_probe, hda_dev_status };
 
-/* ---- Intel e1000/e1000e (QEMU's NIC; used to test the network stack) ------------- */
-static const pci_match_t e1000_pci[] = { { 0x8086, 0x100e, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x100f, PCI_ANY_CLS, PCI_ANY_CLS },
-                                         { 0x8086, 0x10d3, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x153a, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
+/* ---- Intel e1000 (QEMU's NIC; used to test the network stack) ------------------- */
+/* (the e1000e family - 82574, I217... - is Linux's: /etc/linuxdrv.conf, src/linuxdrv) */
+static const pci_match_t e1000_pci[] = { { 0x8086, 0x100e, PCI_ANY_CLS, PCI_ANY_CLS }, { 0x8086, 0x100f, PCI_ANY_CLS, PCI_ANY_CLS }, { 0 } };
 static void e1000_dev_status(device_t *d) { strlcpy(d->status, e1000_status(), sizeof d->status); }
 static int e1000_dev_probe(device_t *d) {
     if (!e1000_probe(d->pci)) return DEV_NOT_MINE;

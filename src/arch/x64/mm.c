@@ -348,7 +348,7 @@ static u64 *pte_of(u64 cr3, u64 va, int create) {
 }
 
 static u64 pte_bits(int prot) {
-    return PTE_P | PTE_U | ((prot & AS_W) ? PTE_W : 0) | ((prot & AS_X) ? 0 : nx_bit) | ((prot & AS_SHARED) ? PTE_SOFT_SHARED : 0);
+    return PTE_P | PTE_U | ((prot & AS_W) ? PTE_W : 0) | ((prot & AS_X) ? 0 : nx_bit) | ((prot & AS_SHARED) ? PTE_SOFT_SHARED : 0) | ((prot & AS_UC) ? PTE_PCD | PTE_PWT : 0);
 }
 
 void tlb_shootdown(u64 cr3);                          /* sched.c: the other cores */
