@@ -11,7 +11,7 @@ COMMIT=d0f76a77e8c2ca68bd7d96190b8da09040eab072
 SRC="${LKL_SRC:-$root/build/lkl-src}"
 OUT="$root/build/linuxdrv"
 mkdir -p "$OUT"
-if [ ! -d "$SRC/.git" ]; then
+if [ ! -e "$SRC/.git" ]; then                       # a clone or a worktree
     git init -q "$SRC"
     git -C "$SRC" remote add origin https://github.com/lkl/linux.git
 fi
@@ -24,8 +24,12 @@ for p in "$here"/lkl/*.patch; do                      # QRT's changes to LKL
     git apply --reverse --check "$p" 2>/dev/null || git apply "$p"
 done
 make ARCH=lkl defconfig >/dev/null
+# tools/lkl rewrites .config the first time it runs (its kernel.config step): let it,
+# then put QRT's drivers on top, so its step does not drop them
+make -C tools/lkl CC=musl-gcc "$SRC/.config" >/dev/null
 cat "$here/lkl/config" >> .config
 make ARCH=lkl olddefconfig >/dev/null
+grep -q '^CONFIG_E1000E=y' .config || { echo "ports/lkl.sh: QRT's drivers are not in .config" >&2; exit 1; }
 make -C tools/lkl CC=musl-gcc -j"$(nproc)" "$SRC/tools/lkl/lib/lkl.o"
 objcopy --strip-debug tools/lkl/lib/lkl.o "$OUT/lkl.o"
 rm -rf "$OUT/include"

@@ -73,7 +73,9 @@
 static int ports_granted;
 static int port_io(unsigned long port, void *v, int size, int write) {
     if (!ports_granted) {
-        if (syscall(SYS_IOPORTS) < 0) return -1;
+        long e = syscall(SYS_IOPORTS);
+        printf("linuxdrv: x86 I/O ports for Linux's drivers: %s\n", e < 0 ? "refused" : "granted");
+        if (e < 0) return -1;
         ports_granted = 1;
     }
     unsigned short pt = (unsigned short)port;
