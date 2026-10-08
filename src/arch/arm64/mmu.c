@@ -20,6 +20,7 @@
 #define D_UXN    (1ull << 54)
 #define D_ATTR(i) ((u64)(i) << 2)
 
+#define ARGON_L1 256       /* L1 entries from here: Argon's window (mmu.c, below) */
 #define NL2 16
 #define NL3 96
 static u64 l1[512] __attribute__((aligned(4096)));
@@ -88,6 +89,7 @@ void mmu_init(const u64 (*ram)[2], int nram, const u64 (*nc)[2], int nnc, const 
     int nl2 = 0, nl3 = 0;
     for (u64 g = 0; g < 512; g++) {
         u64 lo = g << 30, hi = lo + (1ull << 30);
+        if (g >= ARGON_L1) { l1[g] = 0; continue; }                   /* Argon's window: filled on demand */
         if (!mixed(lo, hi) && attr_of(lo, hi) == MAIR_DEVICE && !overlaps(lo, hi, ram, nram)) { l1[g] = block(lo, MAIR_DEVICE); continue; }
         if (nl2 == NL2) { l1[g] = block(lo, MAIR_DEVICE); continue; }
         u64 *t = l2[nl2++];
@@ -117,6 +119,52 @@ void mmu_init(const u64 (*ram)[2], int nram, const u64 (*nc)[2], int nnc, const 
     sctlr &= ~(u64)((1 << 1) | (1 << 3) | (1 << 4) | (1 << 19));   /* no alignment check, no SP alignment check, no WXN */
     SYSREG_W(sctlr_el1, sctlr);
     __asm__ volatile("isb" ::: "memory");
+}
+
+/* ---- Argon: Linux's virtual memory (LKL in MMU mode) ------------------------------
+ * Linux's RAM and its vmalloc/ioremap-by-page mappings live in a window above all
+ * physical memory (L1 entries 256..511, from 256 GB); Linux asks for 4 KB pages there
+ * (linux.c's shmem_mmap / munmap host operations) and Tessera builds the tables. */
+u64 pmm_alloc(int high);
+static u64 *argon_table(u64 *entry) {
+    if ((*entry & 3) != D_TABLE) {
+        u64 t = pmm_alloc(0);                                         /* zeroed, identity mapped */
+        if (!t) panic("argon: out of memory for page tables");
+        __asm__ volatile("dsb ishst" ::: "memory");
+        *entry = t | D_TABLE;
+    }
+    return (u64 *)(usize)(*entry & 0xfffffffff000ull);
+}
+static u64 *argon_pte(u64 va) {
+    u64 *l2 = argon_table(&l1[(va >> 30) & 511]);
+    u64 *l3 = argon_table(&l2[(va >> 21) & 511]);
+    return &l3[(va >> 12) & 511];
+}
+int argon_window(u64 va) { return ((va >> 30) & 511) >= ARGON_L1 && (va >> 39) == 0; }
+/* [va, va + size) -> [pa, ...), write-back cacheable */
+int argon_map(u64 va, u64 pa, u64 size) {
+    if (!argon_window(va) || !argon_window(va + size - 1) || (va | pa | size) & 4095) return -1;
+    u64 f = irq_save();
+    for (u64 o = 0; o < size; o += 4096) *argon_pte(va + o) = desc(pa + o, MAIR_NORMAL, 3);
+    __asm__ volatile("dsb ishst; isb" ::: "memory");
+    irq_restore(f);
+    return 0;
+}
+int argon_unmap(u64 va, u64 size) {
+    if (!argon_window(va) || (va | size) & 4095) return -1;
+    u64 f = irq_save();
+    for (u64 o = 0; o < size; o += 4096) {
+        u64 a = va + o;
+        u64 *e1 = &l1[(a >> 30) & 511];
+        if ((*e1 & 3) != D_TABLE) continue;
+        u64 *e2 = &((u64 *)(usize)(*e1 & 0xfffffffff000ull))[(a >> 21) & 511];
+        if ((*e2 & 3) != D_TABLE) continue;
+        ((u64 *)(usize)(*e2 & 0xfffffffff000ull))[(a >> 12) & 511] = 0;
+        __asm__ volatile("dsb ishst; tlbi vaae1is, %0" : : "r"(a >> 12) : "memory");
+    }
+    __asm__ volatile("dsb ish; isb" ::: "memory");
+    irq_restore(f);
+    return 0;
 }
 
 /* ---- pages: a bump allocator over the free RAM span, with a free list ----------- */

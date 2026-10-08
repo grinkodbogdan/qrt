@@ -87,3 +87,7 @@ CONFIG_VIRTIO_INPUT=y
 # QEMU virt's GPIO controller (its power key, through gpio-keys): tests the GPIO interrupt path
 CONFIG_GPIO_PL061=y
 CONFIG_ARCH_QCOM=y
+# Argon: Linux with virtual memory (LKL's MMU mode) - Tessera maps Linux's RAM and its
+# vmalloc pages into a window from 256 GB (mmu.c); drivers that need an MMU (Linux's
+# display drivers) can then run
+CONFIG_MMU=y

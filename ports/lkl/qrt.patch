@@ -1,8 +1,16 @@
 diff --git a/arch/lkl/Kconfig b/arch/lkl/Kconfig
-index ffb706aa7..b7b08048c 100644
+index ffb706aa7..1be93208a 100644
 --- a/arch/lkl/Kconfig
 +++ b/arch/lkl/Kconfig
-@@ -104,6 +104,15 @@ config GENERIC_HWEIGHT
+@@ -63,6 +63,7 @@ config PGTABLE_LEVELS
+ 
+ config LKL_MEMORY_START
+ 	hex
++	default 0x4000000000 if LKL_QRT_SOC
+ 	default 0x50000000
+ 	help
+ 	  Base address of kernel virtual address space for LKL. No particular
+@@ -104,6 +105,15 @@ config GENERIC_HWEIGHT
  config NO_IOPORT_MAP
  	def_bool y
  
@@ -18,7 +26,7 @@ index ffb706aa7..b7b08048c 100644
  config HZ
  	int
  	default 100
-@@ -196,3 +205,31 @@ config LKL_HOST_MEMMOVE
+@@ -196,3 +206,32 @@ config LKL_HOST_MEMMOVE
  	help
  	  Set to "y" if LKL should call the host memmove hook instead of
  	  performing memory moves manually.
@@ -35,6 +43,7 @@ index ffb706aa7..b7b08048c 100644
 +	select ARCH_HAS_SYNC_DMA_FOR_CPU
 +	select HAVE_ARM_SMCCC
 +	select ARM_AMBA
++	select ARCH_HAS_PHYS_TO_DMA if MMU
 +	default n
 +	help
 +	  QRT links LKL into its own kernel on ARM phones: the host passes the
@@ -51,7 +60,7 @@ index ffb706aa7..b7b08048c 100644
 +	depends on LKL_QRT_SOC
 +	default n
 diff --git a/arch/lkl/Makefile b/arch/lkl/Makefile
-index 003ca5a75..5d0e8b6e4 100644
+index 003ca5a75..9d29dce1f 100644
 --- a/arch/lkl/Makefile
 +++ b/arch/lkl/Makefile
 @@ -50,7 +50,7 @@ endif
@@ -59,7 +68,7 @@ index 003ca5a75..5d0e8b6e4 100644
  
  LDFLAGS_vmlinux += -r
 -LKL_ENTRY_POINTS := lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
-+LKL_ENTRY_POINTS := lkl_qrt_idle lkl_qrt_fdt lkl_qrt_dma_base lkl_qrt_dma_size qrt_gic_cpu_base qrt_gic_lines lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
++LKL_ENTRY_POINTS := lkl_qrt_idle lkl_qrt_ram_phys lkl_qrt_fdt lkl_qrt_dma_base lkl_qrt_dma_size qrt_gic_cpu_base qrt_gic_lines lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
  	lkl_get_free_irq lkl_put_irq lkl_is_running lkl_bug lkl_printf \
  	lkl_init lkl_cleanup
  
@@ -387,6 +396,25 @@ index 000000000..c25ddb2a8
 +#include <asm-generic/barrier.h>
 +
 +#endif
+diff --git a/arch/lkl/include/asm/dma-direct.h b/arch/lkl/include/asm/dma-direct.h
+new file mode 100644
+index 000000000..d01770376
+--- /dev/null
++++ b/arch/lkl/include/asm/dma-direct.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_LKL_DMA_DIRECT_H
++#define _ASM_LKL_DMA_DIRECT_H
++
++/*
++ * QRT (LKL_QRT_SOC with MMU, "Argon"): Linux's RAM is a window the host maps
++ * onto one physically contiguous block; devices see the block's real
++ * addresses (qrt_soc.c).
++ */
++dma_addr_t phys_to_dma(struct device *dev, phys_addr_t paddr);
++phys_addr_t dma_to_phys(struct device *dev, dma_addr_t daddr);
++
++#endif
 diff --git a/arch/lkl/include/asm/io.h b/arch/lkl/include/asm/io.h
 index 9652daf7d..0b85696de 100644
 --- a/arch/lkl/include/asm/io.h
@@ -503,10 +531,10 @@ index fdbabc3e6..f415f1736 100644
  }
 diff --git a/arch/lkl/kernel/qrt_soc.c b/arch/lkl/kernel/qrt_soc.c
 new file mode 100644
-index 000000000..321635308
+index 000000000..39bcb2f04
 --- /dev/null
 +++ b/arch/lkl/kernel/qrt_soc.c
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,144 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * QRT: Linux's SoC drivers run inside QRT's kernel (Tessera) on ARM phones.
@@ -524,6 +552,33 @@ index 000000000..321635308
 +
 +void *lkl_qrt_fdt;
 +unsigned long lkl_qrt_dma_base, lkl_qrt_dma_size;
++
++#ifdef CONFIG_MMU
++/*
++ * Argon: Linux's "physical" addresses are its addresses in the host's window
++ * (memory_start..memory_end); the host keeps that RAM in one block at
++ * lkl_qrt_ram_phys (set in its shmem_init).  Devices get real addresses;
++ * anything outside Linux's RAM (the coherent pool, MMIO) is already real.
++ */
++#include <linux/dma-direct.h>
++unsigned long lkl_qrt_ram_phys;
++extern unsigned long memory_start, memory_end;
++
++dma_addr_t phys_to_dma(struct device *dev, phys_addr_t paddr)
++{
++	if (paddr >= memory_start && paddr < memory_end)
++		return paddr - memory_start + lkl_qrt_ram_phys;
++	return paddr;
++}
++
++phys_addr_t dma_to_phys(struct device *dev, dma_addr_t daddr)
++{
++	if (daddr >= lkl_qrt_ram_phys &&
++	    daddr < lkl_qrt_ram_phys + (memory_end - memory_start))
++		return daddr - lkl_qrt_ram_phys + memory_start;
++	return daddr;
++}
++#endif
 +
 +void __init lkl_qrt_soc_setup(void)
 +{

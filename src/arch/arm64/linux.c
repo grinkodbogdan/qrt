@@ -134,6 +134,28 @@ static void h_page_free(void *p, unsigned long n) { (void)p; (void)n; }
 u64 k_now_ns(void);
 static unsigned long long h_time(void) { return k_now_ns(); }
 static void *h_ioremap(long addr, int size) { (void)size; return (void *)(usize)addr; }
+
+/* ---- Argon: Linux's virtual memory (LKL in MMU mode) ----
+ * Linux's RAM is one physically contiguous block; Linux maps pages of it (and nothing
+ * else) into Argon's window (mmu.c) through these.  Its DMA addresses are translated
+ * back to the block's real addresses with lkl_qrt_ram_phys (qrt_soc.c). */
+int argon_map(u64 va, u64 pa, u64 size);
+int argon_unmap(u64 va, u64 size);
+extern unsigned long lkl_qrt_ram_phys __attribute__((weak));
+static u64 shm_phys, shm_size;
+static void h_shmem_init(unsigned long size) {
+    shm_size = (size + 4095) & ~4095ul;
+    shm_phys = pmm_alloc_contig(shm_size / 4096);
+    if (!shm_phys) panic("argon: no contiguous block for Linux's memory");
+    if (&lkl_qrt_ram_phys) lkl_qrt_ram_phys = shm_phys;
+    klog("argon: Linux's memory: %llu MB at %llx", (u64)shm_size >> 20, shm_phys);
+}
+static void *h_shmem_mmap(void *addr, unsigned long off, unsigned long size, enum lkl_prot prot) {
+    (void)prot;
+    if (!shm_phys || off + size > shm_size || argon_map((u64)(usize)addr, shm_phys + off, size) < 0) return (void *)-1;
+    return addr;
+}
+static int h_munmap(void *addr, unsigned long size) { return argon_unmap((u64)(usize)addr, size); }
 static int h_iomem(const volatile void *a, void *v, int size, int write) {
     switch (size) {
     case 1: if (write) *(volatile u8 *)a = *(u8 *)v; else *(u8 *)v = *(volatile u8 *)a; break;
@@ -205,6 +227,7 @@ static struct lkl_host_operations ops = {
     .mem_alloc = h_mem_alloc, .mem_free = h_mem_free, .page_alloc = h_page_alloc, .page_free = h_page_free,
     .time = h_time, .timer_alloc = h_timer_alloc, .timer_set_oneshot = h_timer_set, .timer_free = h_timer_free,
     .ioremap = h_ioremap, .iomem_access = h_iomem,
+    .shmem_init = h_shmem_init, .shmem_mmap = h_shmem_mmap, .munmap = h_munmap,
     .jmp_buf_set = h_jmp_set, .jmp_buf_longjmp = h_jmp_long,
     .memcpy = h_memcpy, .memset = h_memset, .memmove = h_memmove,
 };
