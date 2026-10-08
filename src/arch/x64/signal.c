@@ -208,6 +208,9 @@ static void on_user_return(frame_t *f) {
 int sig_fault(proc_t *p, frame_t *f) {
     int s, code;
     u64 addr = f->rip;
+    /* the Linux driver host was granted the I/O ports (lkldev.c, 1057), but this thread's
+     * flags predate the grant: give it IOPL 3 and run the in/out again */
+    if (f->vector == 13 && p->ioports && (f->rflags & 0x3000) != 0x3000) { f->rflags |= 0x3000; return 1; }
     switch (f->vector) {
     case 14: { s = 11; addr = read_cr2(); u64 fl = proc_vma_lock(); code = proc_vma(p, addr) ? 2 : 1; proc_vma_unlock(fl); break; }   /* SEGV_ACCERR / SEGV_MAPERR */
     case 13: s = 11; addr = 0; code = 0x80; break;
@@ -288,7 +291,8 @@ i64 sig_return(proc_t *p, frame_t *f) {
     f->r8 = m->r8; f->r9 = m->r9; f->r10 = m->r10; f->r11 = m->r11; f->r12 = m->r12; f->r13 = m->r13;
     f->r14 = m->r14; f->r15 = m->r15; f->rdi = m->rdi; f->rsi = m->rsi; f->rbp = m->rbp; f->rbx = m->rbx;
     f->rdx = m->rdx; f->rax = m->rax; f->rcx = m->rcx; f->rsp = m->rsp; f->rip = m->rip;
-    f->rflags = (m->eflags & 0x3f7fd5ull) | 0x202ull;                   /* user-settable flags, interrupts on */
+    f->rflags = (m->eflags & 0x3f4fd5ull) | 0x202ull;                   /* user-settable flags, interrupts on */
+    if (p->ioports) f->rflags |= 0x3000;                                /* IOPL: only what lkldev.c granted */
     f->cs = 0x2b; f->ss = 0x23;
     if (m->fpstate && UOK(m->fpstate, 512)) {
         u8 *fx = fx_area(f);

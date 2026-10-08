@@ -1,8 +1,24 @@
 diff --git a/arch/lkl/Kconfig b/arch/lkl/Kconfig
-index ffb706aa7..0e47f5604 100644
+index ffb706aa7..b7b08048c 100644
 --- a/arch/lkl/Kconfig
 +++ b/arch/lkl/Kconfig
-@@ -196,3 +196,31 @@ config LKL_HOST_MEMMOVE
+@@ -104,6 +104,15 @@ config GENERIC_HWEIGHT
+ config NO_IOPORT_MAP
+ 	def_bool y
+ 
++config LKL_HOST_IOPORT
++	bool "Port I/O through the host (x86 driver hosts)"
++	select HAS_IOPORT
++	default n
++	help
++	  inb()/outb() and port BARs become accesses in a reserved address
++	  window (LKL_PCI_IOBASE) that the host's iomem_access turns into
++	  real port I/O.  For a host process that may execute in/out.
++
+ config HZ
+ 	int
+ 	default 100
+@@ -196,3 +205,31 @@ config LKL_HOST_MEMMOVE
  	help
  	  Set to "y" if LKL should call the host memmove hook instead of
  	  performing memory moves manually.
@@ -57,7 +73,7 @@ index 584603104..dd5835677 100644
  obj-$(CONFIG_LKL_PCI_MSI_KUNIT_TEST) += pci-msi-test.o
 +obj-$(CONFIG_LKL_QRT_SOC) += qrt-gic.o
 diff --git a/arch/lkl/drivers/pci.c b/arch/lkl/drivers/pci.c
-index f4e969fb8..45be9bfdc 100644
+index f4e969fb8..231fc086b 100644
 --- a/arch/lkl/drivers/pci.c
 +++ b/arch/lkl/drivers/pci.c
 @@ -7,6 +7,7 @@
@@ -68,7 +84,33 @@ index f4e969fb8..45be9bfdc 100644
  #include <linux/dma-map-ops.h>
  #include <linux/scatterlist.h>
  #include <linux/mm.h>
-@@ -180,19 +181,72 @@ static int lkl_dma_supported(struct device *dev, u64 mask)
+@@ -35,8 +36,14 @@ static int lkl_pci_generic_write(struct pci_bus *bus, unsigned int devfn,
+ void __iomem *__pci_ioport_map(struct pci_dev *dev, unsigned long port,
+ 			       unsigned int nr)
+ {
++#ifdef CONFIG_LKL_HOST_IOPORT
++	if (port + nr <= LKL_PCI_IOSIZE)
++		return PCI_IOBASE + port;
++	return NULL;
++#else
+ 	panic("%s is not supported\n", __func__);
+ 	return NULL;
++#endif
+ }
+ 
+ static int lkl_pci_override_resource(struct pci_dev *dev, void *data)
+@@ -71,6 +78,10 @@ static int lkl_pci_override_resource(struct pci_dev *dev, void *data)
+ 				remapped_start = NULL;
+ 			}
+ 
++#ifdef CONFIG_LKL_HOST_IOPORT
++			if (pci_resource_flags(dev, i) & IORESOURCE_IO)
++				continue;	/* the port numbers stay: inb() reaches them */
++#endif
+ 			if (remapped_start) {
+ 				/* override values */
+ 				start = (resource_size_t)remapped_start;
+@@ -180,19 +191,72 @@ static int lkl_dma_supported(struct device *dev, u64 mask)
  	return 1;
  }
  
@@ -147,7 +189,7 @@ index f4e969fb8..45be9bfdc 100644
  early_param("lkl_pci", setup_pci_device);
  
  const struct dma_map_ops lkl_dma_ops = {
-@@ -207,34 +261,21 @@ const struct dma_map_ops lkl_dma_ops = {
+@@ -207,34 +271,21 @@ const struct dma_map_ops lkl_dma_ops = {
  
  static int lkl_pci_probe(struct platform_device *pdev)
  {
@@ -345,6 +387,38 @@ index 000000000..c25ddb2a8
 +#include <asm-generic/barrier.h>
 +
 +#endif
+diff --git a/arch/lkl/include/asm/io.h b/arch/lkl/include/asm/io.h
+index 9652daf7d..0b85696de 100644
+--- a/arch/lkl/include/asm/io.h
++++ b/arch/lkl/include/asm/io.h
+@@ -111,6 +111,11 @@ static inline void __iounmap(void __iomem *addr)
+ #pragma clang diagnostic ignored "-Wnull-pointer-arithmetic"
+ #endif
+ 
++#ifdef CONFIG_LKL_HOST_IOPORT
++#define PCI_IOBASE ((void __iomem *)LKL_PCI_IOBASE)
++#define IO_SPACE_LIMIT (LKL_PCI_IOSIZE - 1)
++#endif
++
+ #include <asm-generic/io.h>
+ 
+ #ifdef __clang__
+diff --git a/arch/lkl/include/uapi/asm/host_ops.h b/arch/lkl/include/uapi/asm/host_ops.h
+index 673a05951..481f76ac2 100644
+--- a/arch/lkl/include/uapi/asm/host_ops.h
++++ b/arch/lkl/include/uapi/asm/host_ops.h
+@@ -142,6 +142,11 @@ enum lkl_prot {
+  *
+  * @pci_ops - pointer to PCI host operations
+  */
++/* LKL_HOST_IOPORT: port p is the address LKL_PCI_IOBASE + p in iomem_access (never
++ * dereferenced: a non-canonical address) */
++#define LKL_PCI_IOBASE 0xfffe000000000000UL
++#define LKL_PCI_IOSIZE 0x10000UL
++
+ struct lkl_host_operations {
+ 	const char *virtio_devices;
+ 
 diff --git a/arch/lkl/kernel/Makefile b/arch/lkl/kernel/Makefile
 index 80a557a92..8e6cf0208 100644
 --- a/arch/lkl/kernel/Makefile

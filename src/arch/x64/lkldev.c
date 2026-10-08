@@ -1,5 +1,5 @@
 /*
- * lkldev.c - what a Linux driver host needs from Tessera (system calls 1040..1056).
+ * lkldev.c - what a Linux driver host needs from Tessera (system calls 1040..1057).
  *
  * QRT runs Linux's own device drivers in a user program, /bin/linuxdrv: the Linux kernel
  * built as a library (LKL, the anykernel / LibOS approach) with QRT as its host.  Each
@@ -168,9 +168,9 @@ int linuxdrv_preferred(const pci_dev_t *d) { return k.native && vfs_lookup("/bin
 static int linux_candidate(const pci_dev_t *d) {
     if (d->driver) return 0;                                      /* Tessera runs it */
     if (d->class_code == 0x06 || d->class_code == 0x03) return 0; /* bridges; the display (GOP framebuffer) */
-    if (d->class_code == 0x0c && d->subclass == 0x05) return 0;   /* SMBus: I/O ports */
-    if (d->class_code == 0x08 && d->subclass != 0x05) return 0;   /* system peripherals, but SD hosts */
-    if (d->class_code == 0x05 || d->class_code == 0x11) return 0; /* memory controllers, signal processing */
+    if (d->class_code == 0x05) return 0;                          /* memory controllers: nothing to drive */
+    /* the rest - SMBus and other port-I/O devices included (0.20.0), system peripherals,
+     * signal processing - goes to Linux's drivers when Tessera has none */
     return !conf_has("never", d);
 }
 
@@ -318,6 +318,16 @@ int linuxdrv_mounts(char *out, int cap) {
 
 i64 lkl_call(proc_t *p, u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4) {
     switch (nr) {
+    case 1057: {                                               /* ioports: in/out for Linux's drivers */
+        /* only a driver host that holds a device: Linux's drivers for port-I/O devices
+         * (legacy BARs, SMBus, old NICs and sound) reach the ports from user mode */
+        int holds = 0;
+        for (int i = 0; i < NCLAIM && !holds; i++) holds = claims[i].d && claims[i].pid == p->pid;
+        if (!holds) return -1;                                 /* EPERM */
+        p->ioports = 1;
+        klog("linuxdrv: x86 I/O ports granted to %s (pid %d)", p->name, p->pid);
+        return 0;
+    }
     case 1040: {                                               /* claim */
         pci_dev_t *d = dev_of(a0);
         if (!d) return -ENOENT;

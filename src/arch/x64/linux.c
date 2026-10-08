@@ -884,9 +884,10 @@ static void syscall_dispatch_locked(frame_t *f) {
     me->sys_nr = (u32)nr; me->sys_a0 = a0;
     /* native QRT programs: QRT's own numbers (sdk/syscalls.txt); the QRT-only calls,
      * and the rest mapped onto the kernel service with the same semantics */
-    if (nr >= 1040 && nr <= 1056) {                         /* the Linux driver host (lkldev.c) */
+    if (nr >= 1040 && nr <= 1057) {                         /* the Linux driver host (lkldev.c) */
         i64 lkl_call(proc_t *p, u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4);
         r = lkl_call(p, nr, a0, a1, a2, a3, a4);
+        if (nr == 1057 && r == 0) f->rflags |= 0x3000;          /* IOPL 3: in/out from user mode */
         nr = ~0ull;
     } else if (p->native) {
         if (nr >= 1024) {

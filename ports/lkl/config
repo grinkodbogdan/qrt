@@ -1,6 +1,8 @@
 # QRT's additions to LKL's arch/lkl/configs/defconfig (ports/lkl.sh): PCI and the
 # Linux drivers the driver host (/bin/linuxdrv) carries.  Everything a library kernel
-# can run: memory-mapped PCI devices (no x86 I/O ports, no ACPI platform devices).
+# can run: PCI devices, memory-mapped and (since 0.20.0) x86 I/O ports - Linux's port
+# accesses reach the real ports through the driver host (LKL_HOST_IOPORT).  Not ACPI
+# platform devices: those are Tessera's own drivers.
 CONFIG_PCI=y
 CONFIG_PCI_MSI=y
 CONFIG_DEVTMPFS=y
@@ -181,3 +183,27 @@ CONFIG_SND_USB=y
 CONFIG_SND_USB_AUDIO=y
 CONFIG_SND_HDSP=y
 CONFIG_SND_VIRTIO=y
+
+# x86 I/O ports (0.20.0): the drivers that need them
+CONFIG_LKL_HOST_IOPORT=y
+CONFIG_I2C_I801=y
+CONFIG_I2C_PIIX4=y
+CONFIG_NET_VENDOR_8390=y
+CONFIG_NE2K_PCI=y
+CONFIG_PCNET32=y
+CONFIG_8139TOO=y
+CONFIG_8139TOO_PIO=y
+CONFIG_VIA_RHINE=y
+CONFIG_SND_INTEL8X0=y
+CONFIG_SND_ENS1370=y
+CONFIG_SND_ENS1371=y
+CONFIG_SND_VIA82XX=y
+CONFIG_SND_CMIPCI=y
+CONFIG_SND_FM801=y
+CONFIG_ATA_SFF=y
+CONFIG_ATA_BMDMA=y
+CONFIG_ATA_PIIX=y
+CONFIG_ATA_GENERIC=y
+CONFIG_PATA_OLDPIIX=y
+CONFIG_PATA_SCH=y
+CONFIG_PATA_MPIIX=y

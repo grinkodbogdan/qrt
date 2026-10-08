@@ -66,6 +66,35 @@
 #define SYS_PCI_MAPBAR 1042
 #define SYS_DMA_ALLOC  1043
 #define SYS_DMA_ADDR   1056
+#define SYS_IOPORTS    1057
+
+/* ---- x86 I/O ports: Linux's inb()/outb() and port BARs (LKL_HOST_IOPORT) arrive here
+ * as addresses LKL_PCI_IOBASE + port; Tessera grants the ports once a device is claimed */
+static int ports_granted;
+static int port_io(unsigned long port, void *v, int size, int write) {
+    if (!ports_granted) {
+        if (syscall(SYS_IOPORTS) < 0) return -1;
+        ports_granted = 1;
+    }
+    unsigned short pt = (unsigned short)port;
+    if (write) {
+        if (size == 1) __asm__ volatile("outb %0, %1" : : "a"(*(unsigned char *)v), "Nd"(pt));
+        else if (size == 2) __asm__ volatile("outw %0, %1" : : "a"(*(unsigned short *)v), "Nd"(pt));
+        else if (size == 4) __asm__ volatile("outl %0, %1" : : "a"(*(unsigned *)v), "Nd"(pt));
+        else return -1;
+    } else {
+        if (size == 1) { unsigned char x; __asm__ volatile("inb %1, %0" : "=a"(x) : "Nd"(pt)); *(unsigned char *)v = x; }
+        else if (size == 2) { unsigned short x; __asm__ volatile("inw %1, %0" : "=a"(x) : "Nd"(pt)); *(unsigned short *)v = x; }
+        else if (size == 4) { unsigned x; __asm__ volatile("inl %1, %0" : "=a"(x) : "Nd"(pt)); *(unsigned *)v = x; }
+        else return -1;
+    }
+    return 0;
+}
+static int qrt_iomem_access(const volatile void *addr, void *val, int size, int write) {
+    unsigned long a = (unsigned long)addr;
+    if (a >= LKL_PCI_IOBASE && a < LKL_PCI_IOBASE + LKL_PCI_IOSIZE) return port_io(a - LKL_PCI_IOBASE, val, size, write);
+    return lkl_iomem_access(addr, val, size, write);
+}
 
 static unsigned long ram_virt, ram_size;
 static unsigned long long ram_phys;
@@ -388,7 +417,7 @@ struct lkl_host_operations lkl_host_ops = {
     .tls_alloc = tls_alloc, .tls_free = tls_free, .tls_set = tls_set, .tls_get = tls_get,
     .mem_alloc = mem_alloc, .mem_free = free, .page_alloc = page_alloc, .page_free = page_free,
     .time = time_ns, .timer_alloc = timer_alloc, .timer_set_oneshot = timer_set_oneshot, .timer_free = timer_free,
-    .ioremap = lkl_ioremap, .iomem_access = lkl_iomem_access,
+    .ioremap = lkl_ioremap, .iomem_access = qrt_iomem_access,
     .jmp_buf_set = jmp_buf_set, .jmp_buf_longjmp = jmp_buf_longjmp,
     .memcpy = h_memcpy, .memset = h_memset, .memmove = h_memmove,
     .pci_ops = &qrt_pci_ops,
