@@ -143,20 +143,31 @@ static void row_store(u8 *d, const u8 *s, usize n) {
     while (n--) *d++ = *s++;
 }
 static u64 fb_us, fb_frames;
-/* a command-mode panel shows memory only when told (CTL START), and a START that arrives
- * while the last transfer is still running is lost: the newest frame would stay unseen
- * until the next change.  So START again every 16 ms for half a second after a change,
- * and once a second otherwise */
-static volatile u64 last_present;
+/* a command-mode panel shows memory only when told (CTL START).  A frame takes ~15 ms to
+ * go out, and a START during it cuts it short (the lower part of the screen kept an older
+ * frame), while a START that is lost leaves the newest frame unseen.  So: START at most
+ * every 40 ms while frames come, and once more 80 ms after the last one */
+static volatile int fb_dirty;
 static void refresher(void *a) {
     (void)a;
-    u64 last_kick = 0;
+    u64 last_kick = 0, confirm_at = 0;
     for (;;) {
         u64 now = k_now_us();
-        if (now - last_present < 500000 || now - last_kick > 1000000) { W32(kick, 1); last_kick = now; }
-        thr_sleep_us(16000);
+        if (fb_dirty && now - last_kick >= 40000) {
+            fb_dirty = 0;
+            W32(kick, 1);
+            last_kick = now;
+            confirm_at = now + 80000;
+        } else if (confirm_at && now >= confirm_at && !fb_dirty) {
+            W32(kick, 1);
+            last_kick = now;
+            confirm_at = 0;
+        }
+        thr_sleep_us(5000);
     }
 }
+/* now, without the thread (the panic screen: no other thread runs again) */
+void fb_flush(void) { if (kick) W32(kick, 1); }
 void fb_stats(u64 *frames, u64 *us) { *frames = fb_frames; *us = fb_us; fb_frames = fb_us = 0; }
 /* px is the whole frame (stride pixels a row); the rectangle (x, y, w, h) of it goes to
  * the same place on the screen - as GOP's Blt and the x86-64 kernel's native_present */
@@ -191,9 +202,8 @@ void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     fb_frames++;
     __asm__ volatile("dsb sy" ::: "memory");
     if (kick) {
-        W32(kick, 1);
-        last_present = k_now_us();
         static int started;
-        if (!started) { started = 1; thr_create("display", refresher, NULL, 16 << 10); }
+        if (!started) { started = 1; W32(kick, 1); thr_create("display", refresher, NULL, 16 << 10); }
+        else fb_dirty = 1;
     }
 }

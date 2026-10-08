@@ -61,6 +61,8 @@ void native_panic(const char *what, void *frame) {
         static u32 red[2048 * 32];
         for (int i = 0; i < 2048 * 32; i++) red[i] = 0xc01c28;
         for (int y = 0; y < 64; y += 32) fb_present(red - (usize)y * 2048, 2048, 0, y, (int)MIN(k.fb_w, 2048u), 32);
+        void fb_flush(void);
+        fb_flush();
     }
     for (;;) __asm__ volatile("wfe");
 }

@@ -189,6 +189,20 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.19.5: whole frames on the panel; I2C that does not wait on a lost interrupt
+
+0.19.4 on the Mi A1: touch worked, but a drag now and then ended in
+`qup: timeout: no interrupt` (the controller with bytes still to send, nobody serving it
+for 2 s); and after some changes the lower part of the screen kept an older picture.
+
+- **Whole frames** (`fb.c`): a 1080x1920 frame takes about 15 ms to go to the panel, and
+  0.19.1's display thread sent START every 16 ms - a new START cut the frame going out,
+  so the lower part of the screen was never refreshed.  START now goes at most every
+  40 ms while frames come, and once more 80 ms after the last.
+- **I2C** (`i2c-qup.c` in `qrt.patch`): besides its interrupt, a transfer now looks at the
+  controller itself every 10 ms and serves it, so a late or missed interrupt costs 10 ms,
+  not a 2-second timeout and a lost touch report.
+
 ## 0.19.4: reliable I2C for the touch screen
 
 0.19.3 on the Mi A1: the touch controller's probe failed with -ETIMEDOUT after 15 s

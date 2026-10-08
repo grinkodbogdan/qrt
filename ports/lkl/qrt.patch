@@ -583,7 +583,7 @@ index f0e4b4aba..5cbb275e3 100644
  	case PROBE_PREFER_ASYNCHRONOUS:
  		return true;
 diff --git a/drivers/i2c/busses/i2c-qup.c b/drivers/i2c/busses/i2c-qup.c
-index d480162a4..86c184b00 100644
+index d480162a4..22437e4e4 100644
 --- a/drivers/i2c/busses/i2c-qup.c
 +++ b/drivers/i2c/busses/i2c-qup.c
 @@ -393,6 +393,7 @@ static int qup_i2c_poll_state_mask(struct qup_i2c_dev *qup,
@@ -606,16 +606,43 @@ index d480162a4..86c184b00 100644
  
  	if (ret || qup->bus_err || qup->qup_err) {
  		reinit_completion(&qup->xfer);
-@@ -902,6 +905,8 @@ static int qup_i2c_wait_for_complete(struct qup_i2c_dev *qup,
+@@ -900,8 +903,35 @@ static int qup_i2c_wait_for_complete(struct qup_i2c_dev *qup,
+ 	unsigned long left;
+ 	int ret = 0;
  
++#ifdef CONFIG_LKL_QRT_SOC
++	/*
++	 * QRT: the interrupt reaches Linux through the host's poller and has
++	 * been seen to go missing: look at the controller every 10 ms too.
++	 */
++	{
++		unsigned long end = jiffies + qup->xfer_timeout;
++
++		for (;;) {
++			left = wait_for_completion_timeout(&qup->xfer, msecs_to_jiffies(10));
++			if (left)
++				break;
++			disable_irq(qup->irq);
++			qup_i2c_interrupt(qup->irq, qup);
++			enable_irq(qup->irq);
++			if (try_wait_for_completion(&qup->xfer)) {
++				left = 1;
++				break;
++			}
++			if (time_after(jiffies, end))
++				break;
++		}
++	}
++#else
  	left = wait_for_completion_timeout(&qup->xfer, qup->xfer_timeout);
++#endif
  	if (!left) {
 +		pr_warn("qup: timeout: no interrupt (operational %x, status %x)\n",	/* QRT */
 +			readl(qup->base + QUP_OPERATIONAL), readl(qup->base + QUP_I2C_STATUS));
  		writel(1, qup->base + QUP_SW_RESET);
  		ret = -ETIMEDOUT;
  	}
-@@ -1691,7 +1696,8 @@ static int qup_i2c_probe(struct platform_device *pdev)
+@@ -1691,7 +1721,8 @@ static int qup_i2c_probe(struct platform_device *pdev)
  		qup->adap.algo = &qup_i2c_algo_v2;
  		qup->adap.quirks = &qup_i2c_quirks_v2;
  		is_qup_v1 = false;
