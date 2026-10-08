@@ -189,6 +189,36 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.18.4: GPIO interrupts, and the shell never waits for Linux
+
+0.18.3 on the Mi A1: nothing responded, not even volume up - the shell itself had stopped.
+Its log (the safe-boot page) showed `gpio-keys: error -ENXIO: Unable to get irq` and the
+touch screen (1-0038) deferring.
+
+- **GPIO interrupts** (`ports/lkl/qrt.patch`, `arch/lkl/kernel/irq.c`): LKL gave every
+  one of its 4096 Linux interrupt numbers a placeholder handler at boot, which marks them
+  all allocated - so an interrupt controller that allocates numbers as it goes (the
+  phone's TLMM pin controller, the PMIC's SPMI controller) got none.  Now LKL keeps only
+  the 64 it uses itself.  The volume key, the touch screen's interrupt and the PMIC's
+  interrupts all come through these controllers.  Reproduced and fixed in QEMU with
+  Linux's PL061 GPIO driver: the power key now goes GPIO interrupt -> gpio-keys ->
+  evdev -> the shell (it locks the screen).
+- **Input devices are opened once**: the first file Linux opens is fd 0, which the
+  evdev scan took for "not open", so it opened that device again and every key from it
+  arrived twice.
+
+- **Backlight** (`stubs.c`, `linux.c`): the shell used to set the brightness through
+  Linux's sysfs on its own thread; while Linux was busy probing, that call waited for
+  Linux, and the whole UI with it.  The shell now only records the level; a separate
+  thread applies it.
+- **Interrupts** (`gic.c`): every interrupt the boot loader left enabled is disabled, and
+  every device interrupt is put under the CPU interface's priority mask, before Tessera
+  enables interrupts.  One that still reaches the CPU is masked and logged instead of
+  firing again and again.
+- **Volume up** stays native until Linux has actually delivered a key, not just until
+  Linux's gpio-keys device exists.
+- Tested in QEMU: a tap goes through Linux's virtio-input driver into the shell.
+
 ## 0.18.3: preemption, sturdier interrupts, the log when touch is missing
 
 0.18.2 reached the home screen on the Mi A1 but nothing responded.

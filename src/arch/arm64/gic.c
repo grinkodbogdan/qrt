@@ -30,7 +30,10 @@ int gic_init(void) {
     if (n < 0 || !fdt_reg(n, 0, &dist, &s) || !fdt_reg(n, 1, &cpu, &s)) { klog("gic: none in the device tree: no preemption"); return 0; }
     lines = 32 * ((R32(dist + 0x004) & 0x1f) + 1);
     if (lines > 1020) lines = 1020;
-    W32(dist + 0x180, ~0u);                                   /* SGIs and PPIs off ... */
+    /* whatever the boot loader left on stays off until Linux enables it, and every SPI sits
+     * under the CPU interface's mask: none can interrupt the CPU */
+    for (u32 i = 0; i < lines; i += 32) W32(dist + 0x180 + i / 8, ~0u);
+    for (u32 i = 32; i < lines; i += 4) W32(dist + 0x400 + i, 0xa0a0a0a0);
     *(volatile u8 *)(usize)(dist + 0x400 + 27) = 0x80;        /* ... but the virtual timer, above the mask */
     W32(dist + 0x100, 1u << 27);
     W32(dist, 1);
@@ -46,11 +49,21 @@ int gic_init(void) {
 
 /* the IRQ exception (main.c), interrupts masked */
 void gic_irq(void) {
-    for (;;) {
+    for (int n = 0; n < 16; n++) {
         u32 iar = R32(cpu + 0x0c), id = iar & 0x3ff;
         if (id >= 1020) return;
+        if (id != 27) {                                       /* not ours: masked, so it cannot storm */
+            W32(dist + 0x180 + 4 * (id / 32), 1u << (id % 32));
+            W32(cpu + 0x10, iar);
+            static int said;
+            if (said++ < 8) klog("gic: interrupt %u reached the CPU; masked", id);
+            continue;
+        }
         W32(cpu + 0x10, iar);                                 /* EOI before switching away */
-        if (id == 27) { timer_arm(); ticks++; thr_tick(); }
+        timer_arm();
+        ticks++;
+        thr_tick();
+        return;
     }
 }
 

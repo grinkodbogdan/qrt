@@ -218,8 +218,9 @@ int linux_input_poll(event_t *out, int max) {
 }
 
 void arm_key_of(int code, int shift, int ctrl, u16 *scan, c16 *ch);   /* virtio.c */
+static volatile int keys_live;          /* Linux has delivered a key: the native volume-up poll stops */
 struct ievent { long sec, usec; u16 type, code; i32 value; };
-struct indev { int fd, abs, min[2], max[2]; char name[16]; };
+struct indev { int open, fd, abs, min[2], max[2]; char name[16]; };
 #define EVIOCGBIT(ev, len) ((2u << 30) | ((u32)(len) << 16) | ('E' << 8) | (0x20 + (ev)))
 #define EVIOCGABS(abs)     ((2u << 30) | (24u << 16) | ('E' << 8) | (0x40 + (abs)))
 #define EVIOCGNAME(len)    ((2u << 30) | ((u32)(len) << 16) | ('E' << 8) | 0x06)
@@ -240,7 +241,7 @@ static void input_loop(void *arg) {
                 else if (e->value) {
                     event_t k = { .type = EV_KEY };
                     arm_key_of(e->code, shift, ctrl, &k.scan, &k.ch);
-                    if (k.scan || k.ch) inq_put(k);
+                    if (k.scan || k.ch) { keys_live = 1; inq_put(k); }
                 }
             } else if (e->type == 3 && d->abs) {                        /* EV_ABS */
                 int axis = e->code == 0 ? 0 : e->code == 1 ? 1 : -1;
@@ -262,17 +263,17 @@ static void input_loop(void *arg) {
     }
     klog("linux: %s went away", d->name);
     l_close(d->fd);
-    d->fd = -1;
+    d->open = 0;
 }
 
 static struct indev indevs[8];
 static int have_keys, have_touch;
-int linux_has_keys(void) { return have_keys; }
+int linux_has_keys(void) { return keys_live; }
 static int bit(const u8 *b, int n) { return b[n / 8] >> (n % 8) & 1; }
 static void input_open(const char *name) {
-    for (int i = 0; i < 8; i++) if (indevs[i].fd > 0 && !strcmp(indevs[i].name, name)) return;
+    for (int i = 0; i < 8; i++) if (indevs[i].open && !strcmp(indevs[i].name, name)) return;   /* fd 0 is valid in Linux */
     struct indev *d = NULL;
-    for (int i = 0; i < 8 && !d; i++) if (indevs[i].fd <= 0) d = &indevs[i];
+    for (int i = 0; i < 8 && !d; i++) if (!indevs[i].open) d = &indevs[i];
     if (!d) return;
     char p[48];
     fmt(p, sizeof p, "/dev/input/%s", name);
@@ -282,6 +283,7 @@ static void input_open(const char *name) {
     l_ioctl((int)fd, EVIOCGBIT(0, sizeof evb), evb);
     l_ioctl((int)fd, EVIOCGBIT(3, sizeof absb), absb);
     memset(d, 0, sizeof *d);
+    d->open = 1;
     d->fd = (int)fd;
     d->abs = bit(evb, 3) && bit(absb, 0) && bit(absb, 1);
     strlcpy(d->name, name, sizeof d->name);
@@ -347,19 +349,32 @@ static void bl_find(void) {
     }
     l_close((int)fd);
 }
-int linux_backlight_set(int pct) {                                 /* 0..100; -1 if there is none */
-    bl_find();
-    if (!bl_dir[0] || !linux_running()) return -1;
+static void bl_write(int pct) {
     char p[128], v[16];
     fmt(p, sizeof p, "%s/brightness", bl_dir);
     int n = fmt(v, sizeof v, "%d", pct <= 0 ? 0 : MAX(1, bl_max * pct / 100));
     long fd = sys(NR_OPENAT, AT_FDCWD, (long)p, 1, 0, 0);             /* O_WRONLY */
-    if (fd < 0) return -1;
+    if (fd < 0) return;
     sys(64, fd, (long)v, n, 0, 0);                                     /* write */
     l_close((int)fd);
-    return 0;
 }
-int linux_backlight_present(void) { bl_find(); return bl_dir[0] != 0; }
+/* the shell never calls into Linux (it would wait while Linux is busy): it leaves the
+ * level here and this thread applies it */
+static volatile int bl_want = -1, bl_present;
+static void bl_loop(void *a) {
+    (void)a;
+    for (;;) {
+        if (linux_running()) {
+            bl_find();
+            bl_present = bl_dir[0] != 0;
+            int w = bl_want;
+            if (w >= 0 && bl_present) { bl_want = -1; bl_write(w); }
+        }
+        thr_sleep_us(100000);
+    }
+}
+int linux_backlight_set(int pct) { bl_want = pct; return 0; }      /* 0..100, applied by bl_loop */
+int linux_backlight_present(void) { return bl_present; }
 
 /* ---- start ---- */
 static const void *dtb;
@@ -380,6 +395,7 @@ static void linux_main(void *a) {
     sys(NR_MOUNT, (long)"sysfs", (long)"/sys", (long)"sysfs", 0, 0);
     sys(NR_MOUNT, (long)"devtmpfs", (long)"/dev", (long)"devtmpfs", 0, 0);
     thr_create("evdev scan", input_scan, NULL, 32 << 10);
+    thr_create("backlight", bl_loop, NULL, 32 << 10);
     thr_sleep_us(30ull * 1000000);
     if (!have_touch && !dead) {                                     /* no touch screen: the log says why */
         klog("linux: no touch screen 30 s after boot - showing the log (volume up x3 closes it)");

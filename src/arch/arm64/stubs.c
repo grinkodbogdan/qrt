@@ -52,7 +52,7 @@ int  backlight_level(void) { return bl_level; }
 const char *backlight_method(void) { return linux_backlight_present() ? "Linux's backlight driver" : "the boot loader's setting"; }
 void backlight_power(int on) { bl_on = on; bl_want = on ? bl_level : 0; }
 void backlight_set_level(int pct) { bl_level = CLAMP(pct, 5, 100); if (bl_on) bl_want = bl_level; }
-void backlight_tick(void) { if (bl_want >= 0 && linux_backlight_set(bl_want) == 0) bl_want = -1; }
+void backlight_tick(void) { if (bl_want >= 0) { linux_backlight_set(bl_want); bl_want = -1; } }   /* never waits */
 static battery_t no_battery = { .minutes = -1 };
 const battery_t *battery_get(void) { return &no_battery; }
 void battery_poll(void) {}

@@ -82,4 +82,6 @@ CONFIG_VIRTIO=y
 CONFIG_VIRTIO_MMIO=y
 CONFIG_VIRTIO_BLK=y
 CONFIG_VIRTIO_INPUT=y
+# QEMU virt's GPIO controller (its power key, through gpio-keys): tests the GPIO interrupt path
+CONFIG_GPIO_PL061=y
 CONFIG_ARCH_QCOM=y
