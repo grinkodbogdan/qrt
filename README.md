@@ -189,6 +189,36 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.0: Argon - Linux's drivers for the whole Mi A1
+
+Tessera stays the kernel; **Argon** is a layer inside it that runs the Linux kernel (as a
+library, at the same privilege, like an Android phone's vendor kernel under a different
+system) with **every driver postmarketOS builds for the MSM8953** - 1121 options from its
+`msm8953` kernel config, and postmarketOS's own device tree for the Mi A1 (`tissot`).
+Tessera's own Qualcomm code no longer drives the hardware; Linux's does, and Tessera
+talks to it the way a Linux program would.
+
+- **Linux gets real memory management** (`CONFIG_MMU=y`): Tessera maps Linux's memory into
+  a window of its own address space (`mmu.c`: `argon_map`/`argon_unmap`), and Linux's DMA
+  addresses are translated back to physical ones, so the IOMMU, the display engine and
+  virtio all see real memory.
+- **The screen**: Linux's MSM display driver (MDP5 + DSI + the panel, chosen from the
+  boot loader's `mdss_dsi_*` argument: otm1911, ili7807 or ft8716) owns the panel.
+  Tessera draws into a shadow copy and a thread writes the changed rows to `/dev/fb0`.
+  No more Tessera code poking the display engine - the scrambling came from that.
+- **Touch, buttons, sensors**: Linux's input drivers, read through evdev.
+- **Storage**: every partition Linux can read (ext4, f2fs, vfat, exfat) appears read-only as
+  `/mnt/<partition>`.
+- **Firmware**: taken from the modem partition's `image/` folder; the modem, Wi-Fi and
+  other remote processors are started once it is there.
+- **Battery**: from Linux's power-supply class (top bar and Settings).
+- **Not yet**: Wi-Fi networking (Linux's side has no supplicant yet), sound through Tessera's
+  mixer, the GPU (no firmware on the phone), auto-rotation.
+
+Fixed on the way: a Linux boot that hung on its RAID6 speed test (the test busy-waits on a
+timer tick that cannot arrive while it runs; the test is off).  Tested in QEMU with Linux's
+own virtio-gpu driver showing the shell and taps reaching it.
+
 ## 0.19.8: lighter framebuffer writes; underruns counted; a scrollable log
 
 The Mi A1's screen still showed flat-coloured bands in its lower part.  On a video-mode
