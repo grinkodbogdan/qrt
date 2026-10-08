@@ -5,6 +5,8 @@
  * (PSCI SYSTEM_OFF / SYSTEM_RESET through the method the device tree names).
  */
 #include "arm.h"
+#include "sched.h"
+#include "../../ui/shell.h"
 
 static int cur_x, cur_y, cur_visible;
 static int psci_hvc = -1;                    /* -1: no PSCI; 0 smc; 1 hvc */
@@ -19,13 +21,21 @@ void hal_arm_init(void) {
     n = fdt_find_compatible(-1, "arm,pl031");
     u64 a, s;
     if (n >= 0 && fdt_reg(n, 0, &a, &s)) pl031 = a;
-    virtio_input_init();
+#ifndef QRT_LKL
+    virtio_input_init();                       /* with Linux built in, Linux's virtio drivers have them */
+#endif
     msm_init();
     cur_x = (int)k.fb_w / 2; cur_y = (int)k.fb_h / 2;
 }
 
 /* ---- display ---- */
-void hal_present(const u32 *px, int stride, int x, int y, int w, int h) { fb_present(px, stride, x, y, w, h); }
+int  logview_active(void);
+int  logview_key(void);
+void logview_draw(void);
+void hal_present(const u32 *px, int stride, int x, int y, int w, int h) {
+    if (logview_active()) { logview_draw(); return; }
+    fb_present(px, stride, x, y, w, h);
+}
 void hal_cursor(int *x, int *y, int *visible) { *x = cur_x; *y = cur_y; *visible = cur_visible; }
 void hal_set_touch_map(u32 map) { k.touch_map = map; }
 void hal_reprobe_input(void) {}
@@ -45,20 +55,30 @@ static int serial_keys(event_t *out, int max) {
 
 int hal_poll(event_t *out, int max) {
     int n = virtio_input_poll(out, max);
-    n += msm_poll(out + n, max - n);
+    if (!linux_running()) n += msm_poll(out + n, max - n);   /* until Linux's gpio-keys has the key */
+    n += linux_input_poll(out + n, max - n);
+    /* volume up x3: the full-screen log (logview.c); while it is up, input goes nowhere */
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        if (out[i].type == EV_KEY && out[i].scan == SCAN_VOLUP && logview_key()) { if (!logview_active()) shell_redraw(); continue; }
+        if (!logview_active()) out[m++] = out[i];
+    }
+    n = m;
+    if (logview_active()) logview_draw();
     n += serial_keys(out + n, max - n);
     for (int i = 0; i < n; i++) if (out[i].type == EV_DOWN || out[i].type == EV_MOVE) { cur_x = out[i].x; cur_y = out[i].y; }
     return n;
 }
 
 /* ---- time ---- */
+/* waiting lets the other threads (Linux) run */
 void hal_delay_us(u32 us) { u64 end = k_now_us() + us; while (k_now_us() < end) __asm__ volatile("yield"); }
-void hal_wait_frame_ms(u32 ms) { hal_delay_us(ms * 1000); }
+void hal_wait_frame_ms(u32 ms) { thr_sleep_us((u64)ms * 1000); }
 void hal_wait_frame(void) {
     static u64 next;
-    u64 now = k_now_ms();
-    if (next > now && next - now <= 10) hal_delay_us((u32)(next - now) * 1000);
-    next = MAX(now, next) + 10;
+    u64 now = k_now_us();
+    if (next > now && next - now <= 10000) thr_sleep_until(next); else thr_yield();
+    next = MAX(now, next) + 10000;
 }
 
 /* PL031: seconds since 1970 (QEMU keeps it at the host's local time with -rtc base=localtime) */

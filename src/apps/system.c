@@ -166,6 +166,9 @@ static void draw(canvas_t *c, rect_t a) {
         fmt(b, sizeof b, "%u \xc3\x97 %u", k.fb_w, k.fb_h);
         kv(&f, "Display", b);
         kv(&f, "Firmware", k.bios_version[0] ? k.bios_version : k.fw_vendor);
+#if defined(__aarch64__)
+        { const char *linux_status(char *buf, int cap); char m[96]; kv(&f, "Linux drivers", linux_status(m, sizeof m)); }
+#endif
 #if defined(__x86_64__)
         kv(&f, "ACPI", acpi_status());
         { int linuxdrv_mounts(char *out, int cap); char m[256]; if (linuxdrv_mounts(m, sizeof m)) kv(&f, "Disks (Linux)", m); }

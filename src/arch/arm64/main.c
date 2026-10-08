@@ -11,9 +11,11 @@
 #include "arm.h"
 #include "../../kernel/vfs.h"
 #include "../../ui/shell.h"
+#include "sched.h"
 
 kernel_t k;
 u64 arm_ram_base, arm_ram_size;
+u64 arm_dma_pool_base, arm_dma_pool_size;
 const char *arm_model = "ARM64 board";
 
 /* ---- clock: the generic timer's virtual counter ---- */
@@ -39,6 +41,8 @@ void uart_write(const char *s) { for (; *s; s++) { if (*s == '\n') uart_putc('\r
 int  uart_getc(void) { if (!pl011 || (R32(pl011 + 0x18) & (1 << 4))) return -1; return (int)(R32(pl011) & 0xff); }
 u64  uart_rx_count(void) { return 0; }
 
+extern char _start[], _image_size[];
+
 /* ---- crashes: the registers on the console and the screen ---- */
 static const char *const kinds[] = { "EL1t sync", "EL1t IRQ", "EL1t FIQ", "EL1t SError", "synchronous exception", "IRQ", "FIQ",
                                      "SError (asynchronous abort)", "EL0 sync", "EL0 IRQ", "EL0 FIQ", "EL0 SError" };
@@ -58,10 +62,17 @@ void native_panic(const char *what, void *frame) {
     }
     for (;;) __asm__ volatile("wfe");
 }
+void linux_failed(const char *why);
 void arm_exception(u64 kind, u64 *frame) {
     char m[96];
     fmt(m, sizeof m, "%s at %llx (ESR %llx, address %llx)", kind < 12 ? kinds[kind] : "exception", frame[31],
         SYSREG_R(esr_el1), SYSREG_R(far_el1));
+    if (!thr_is_main()) {                                         /* a Linux thread: Linux stops, the shell goes on */
+        klog("*** fault in a driver thread: %s", m);
+        klog("pc %llx  lr %llx  (kernel loaded at %llx)", frame[31], frame[30], (u64)(usize)_start);
+        linux_failed(m);
+        thr_park();
+    }
     native_panic(m, frame);
 }
 
@@ -84,10 +95,20 @@ static int mem_one(int c, void *arg) {
         if (s) { ram[nram][0] = a; ram[nram][1] = s; nram++; }
     return 0;
 }
+/* reserved regions Linux's drivers read like memory (shared memory with the RPM and the
+ * modem, the remote file system buffer) are mapped uncached-normal, not device memory */
+static u64 shared[8][2];
+static int nshared;
 static int rsv_one(int c, void *arg) {
     (void)arg;
     u64 a, s;
-    for (int i = 0; i < 4 && fdt_reg(c, i, &a, &s); i++) add_hole(a, s);
+    int len;
+    const char *compat = fdt_prop(c, "compatible", &len);
+    int mem = compat && (!strcmp(compat, "qcom,smem") || !strcmp(compat, "qcom,rmtfs-mem"));
+    for (int i = 0; i < 4 && fdt_reg(c, i, &a, &s); i++) {
+        add_hole(a, s);
+        if (mem && nshared < 8) { shared[nshared][0] = a; shared[nshared][1] = s; nshared++; }
+    }
     return 0;
 }
 
@@ -126,6 +147,7 @@ static void free_span(u64 img_lo, u64 img_hi, u64 *lo, u64 *hi) {
                 b = ha > a ? ha : a;
                 skip = he;
             }
+            if (b > (4ull << 30)) b = 4ull << 30;                   /* below 4 GB: 32-bit DMA */
             u64 al = (a + 0x1fffff) & ~0x1fffffull, bl = b & ~0x1fffffull;
             if (bl > al && bl - al > *hi - *lo) { *lo = al; *hi = bl; }
             a = skip > a ? skip : end;
@@ -155,7 +177,6 @@ static int load_cpio(const u8 *p, const u8 *end) {
     return files;
 }
 
-extern char _start[], _image_size[];
 void hal_arm_init(void);
 
 void arm_main(const void *dtb, u64 base) {
@@ -184,7 +205,14 @@ void arm_main(const void *dtb, u64 base) {
     u64 lo, hi;
     free_span(img_lo, img_hi, &lo, &hi);
     if (hi - lo < (64ull << 20)) panic("less than 64 MB of free RAM");
-    mmu_init((const u64 (*)[2])ram, nram, fb_reserve_base, fb_reserve_size, (const u64 (*)[2])hole, nhole);
+    /* the top 16 MB of it: uncached, Linux's coherent DMA buffers */
+    arm_dma_pool_size = 16ull << 20;
+    hi -= arm_dma_pool_size;
+    arm_dma_pool_base = hi;
+    u64 nc[10][2] = { { fb_reserve_base, fb_reserve_size }, { arm_dma_pool_base, arm_dma_pool_size } };
+    int nnc = 2;
+    for (int i = 0; i < nshared; i++) { nc[nnc][0] = shared[i][0]; nc[nnc][1] = shared[i][1]; nnc++; }
+    mmu_init((const u64 (*)[2])ram, nram, (const u64 (*)[2])nc, nnc, (const u64 (*)[2])hole, nhole);
     pmm_init(lo, hi);
     arm_ram_base = lo; arm_ram_size = hi - lo;
     klog("memory: %llu MB in all, heap and pages %llx-%llx (%llu MB)", k.ram_bytes >> 20, lo, hi, (hi - lo) >> 20);
@@ -196,6 +224,7 @@ void arm_main(const void *dtb, u64 base) {
     }
     hal_arm_init();
     time_init();
+    linux_start(dtb);                                               /* Linux's drivers, on threads */
     shell_main();
     panic("the shell returned");
 }

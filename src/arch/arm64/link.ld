@@ -14,6 +14,7 @@ SECTIONS {
     .rela.dyn : { __rela_start = .; *(.rela .rela.*) __rela_end = .; }
     . = ALIGN(16);
     .data : { *(.data .data.*) }
+    .notes : { *(.notes .note .note.*) }
     . = ALIGN(4096);
     __bss_start = .;
     .bss : { *(.bss .bss.* COMMON) }
@@ -23,5 +24,5 @@ SECTIONS {
     . = ALIGN(4096);
     __bss_end = .;
     _image_size = .;
-    /DISCARD/ : { *(.dynsym) *(.dynstr) *(.hash) *(.gnu.hash) *(.interp) *(.eh_frame*) *(.note*) *(.comment) }
+    /DISCARD/ : { *(.dynsym) *(.dynstr) *(.hash) *(.gnu.hash) *(.interp) *(.eh_frame*) *(.comment) }
 }

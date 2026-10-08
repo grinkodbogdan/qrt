@@ -67,7 +67,7 @@ void virtio_input_init(void) {
 }
 
 /* Linux key codes -> (scan, char); HID usages as in the USB keyboard driver */
-static void key_of(int code, int shift, int ctrl, u16 *scan, c16 *ch) {
+void arm_key_of(int code, int shift, int ctrl, u16 *scan, c16 *ch) {
     static const char row1[] = "1234567890-=", row2[] = "qwertyuiop[]", row3[] = "asdfghjkl;'`", row4[] = "\\zxcvbnm,./";
     static const char row1s[] = "!@#$%^&*()_+", row2s[] = "QWERTYUIOP{}", row3s[] = "ASDFGHJKL:\"~", row4s[] = "|ZXCVBNM<>?";
     *scan = 0; *ch = 0;
@@ -118,7 +118,7 @@ int virtio_input_poll(event_t *out, int max) {
                     out[n++] = ev;
                 } else if (value) {
                     event_t ev = { .type = EV_KEY };
-                    key_of(code, v->shift, v->ctrl, &ev.scan, &ev.ch);
+                    arm_key_of(code, v->shift, v->ctrl, &ev.scan, &ev.ch);
                     if (ev.scan || ev.ch) out[n++] = ev;
                 }
             } else if (type == 3 && code <= 1) {                        /* EV_ABS: 0..32767 */

@@ -265,7 +265,7 @@ void kfree(void *p) {
 }
 
 /* ---- logging ------------------------------------------------------------ */
-#define LOG_LINES 128
+#define LOG_LINES 600
 #define LOG_COLS  240
 static char log_ring[LOG_LINES][LOG_COLS];
 static int log_count;

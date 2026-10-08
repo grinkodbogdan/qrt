@@ -105,7 +105,7 @@ ARM_SHARED := src/kernel/rt.c src/kernel/vfs.c src/kernel/sound.c src/kernel/tim
               src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c \
               src/net/wlan.c src/net/netstack.c src/drivers/hidparse.c src/drivers/hidmouse.c
 ARM_SRC    := $(wildcard src/arch/arm64/*.c)
-ARM_OBJ    := $(ARM_SHARED:src/%.c=build/arm64/%.o) $(ARM_SRC:src/%.c=build/arm64/%.o) build/arm64/arch/arm64/boot.o
+ARM_OBJ    := $(ARM_SHARED:src/%.c=build/arm64/%.o) $(ARM_SRC:src/%.c=build/arm64/%.o) build/arm64/arch/arm64/boot.o build/arm64/arch/arm64/switch.o
 ARM_CFLAGS := -target aarch64-none-elf -fpie -mno-outline-atomics -mstrict-align
 
 build/arm64/kernel/time.o: CFLAGS += -DQRT_BUILD_EPOCH=$(shell git log -1 --format=%ct 2>/dev/null || echo 1767225600)ull
@@ -115,8 +115,16 @@ build/arm64/%.o: src/%.c $(wildcard src/*.h src/*/*.h src/*/*/*.h)
 build/arm64/%.o: src/%.S
 	@mkdir -p $(dir $@)
 	$(CC) -target aarch64-none-elf -c $< -o $@
-build/arm64/qrt.elf: $(ARM_OBJ) src/arch/arm64/link.ld
-	ld.lld -pie --no-dynamic-linker -z notext -T src/arch/arm64/link.ld -o $@ $(ARM_OBJ)
+# Linux's drivers inside the kernel, when ports/lkl-arm64.sh has built LKL
+ARM_LKL := $(wildcard build/arm64/lkl/lkl.o)
+ifneq ($(ARM_LKL),)
+build/arm64/arch/arm64/linux.o: CFLAGS += -DQRT_LKL -Ibuild/arm64/lkl/include
+build/arm64/arch/arm64/hal.o: CFLAGS += -DQRT_LKL
+build/arm64/arch/arm64/linux.o build/arm64/arch/arm64/hal.o: $(ARM_LKL)
+ARM_LIBS := $(ARM_LKL) $(shell aarch64-linux-gnu-gcc -print-libgcc-file-name 2>/dev/null)
+endif
+build/arm64/qrt.elf: $(ARM_OBJ) src/arch/arm64/link.ld $(ARM_LKL)
+	ld.lld -pie --no-dynamic-linker -z notext -T src/arch/arm64/link.ld -o $@ $(ARM_OBJ) $(ARM_LIBS)
 build/arm64/Image: build/arm64/qrt.elf
 	llvm-objcopy -O binary $< $@
 arm64: build/arm64/Image

@@ -20,7 +20,14 @@ int   arm_is_ram(u64 addr, u64 len);              /* inside a /memory bank */   
 extern const char *arm_model;
 
 /* mmu.c: identity map, RAM cacheable, the rest device memory; fb uncached */
-void  mmu_init(const u64 (*ram)[2], int nram, u64 fb_base, u64 fb_size, const u64 (*hole)[2], int nhole);
+void  mmu_init(const u64 (*ram)[2], int nram, const u64 (*nc)[2], int nnc, const u64 (*hole)[2], int nhole);
+extern u64 arm_dma_pool_base, arm_dma_pool_size;   /* uncached, for Linux's coherent DMA */
+
+/* linux.c: Linux's drivers (LKL) inside the kernel */
+int   linux_start(const void *fdt);
+int   linux_running(void);
+int   linux_input_poll(event_t *out, int max);
+const char *linux_status(char *buf, int cap);
 void  pmm_init(u64 base, u64 end);
 u64   pmm_alloc_contig(usize pages);
 u64   pmm_alloc(int high);

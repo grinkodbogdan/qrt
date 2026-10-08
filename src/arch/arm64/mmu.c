@@ -48,22 +48,21 @@ static void dcache_inval(u64 start, u64 end) {
 extern char _start[], _image_size[];
 
 /* RAM: 2 MB blocks wholly inside a bank and clear of the firmware's reserved regions
- * (no speculative reads into memory the secure world protects); the framebuffer
- * uncached; everything else device memory */
-void mmu_init(const u64 (*ram)[2], int nram, u64 fb_base, u64 fb_size, const u64 (*hole)[2], int nhole) {
-    u64 fbr[1][2] = { { fb_base, fb_size } };
+ * (no speculative reads into memory the secure world protects); the framebuffer and
+ * the DMA pool (nc) uncached; everything else device memory */
+void mmu_init(const u64 (*ram)[2], int nram, const u64 (*fbr)[2], int nfb, const u64 (*hole)[2], int nhole) {
     u64 img[1][2] = { { (u64)(usize)_start, (u64)(usize)_image_size } };   /* always runnable */
     int nl2 = 0;
     for (u64 g = 0; g < 512; g++) {
         u64 lo = g << 30, hi = lo + (1ull << 30);
-        if (!overlaps(lo, hi, ram, nram) && !overlaps(lo, hi, img, 1) && !(fb_size && overlaps(lo, hi, fbr, 1))) { l1[g] = block(lo, MAIR_DEVICE); continue; }
+        if (!overlaps(lo, hi, ram, nram) && !overlaps(lo, hi, img, 1) && !overlaps(lo, hi, fbr, nfb)) { l1[g] = block(lo, MAIR_DEVICE); continue; }
         if (nl2 == NL2) { l1[g] = block(lo, MAIR_DEVICE); continue; }
         u64 *t = l2[nl2++];
         for (u64 i = 0; i < 512; i++) {
             u64 a = lo + (i << 21), b = a + (1ull << 21);
             int attr = MAIR_DEVICE;
             if (overlaps(a, b, img, 1)) attr = MAIR_NORMAL;
-            else if (fb_size && overlaps(a, b, fbr, 1)) attr = MAIR_NC;
+            else if (overlaps(a, b, fbr, nfb)) attr = MAIR_NC;
             else if (inside(a, b, ram, nram) && !overlaps(a, b, hole, nhole)) attr = MAIR_NORMAL;
             t[i] = block(a, attr);
         }

@@ -189,6 +189,54 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.18.0: Linux's drivers inside Tessera on the Mi A1
+
+The Mi A1's hardware - touch screen, keys, backlight, eMMC - sits on the Snapdragon 625
+and only works after clocks, pins, power rails (through the RPM co-processor) and buses
+are set up.  0.18.0 brings that up **with Linux's own Qualcomm drivers, running inside
+Tessera's kernel**: the Linux 6.12 kernel as a library (LKL), built for 64-bit ARM
+(`ports/lkl-arm64.sh`) and linked into the arm64 `Image`.
+
+- **Linux gets the boot loader's device tree** and populates the SoC's devices, then its
+  drivers bring the phone up as they do on Linux: GCC clocks and resets, TLMM pins and
+  GPIO interrupts, SMEM / SMD / the RPM and its regulators and power domains, SPMI and
+  the PMICs, BLSP I2C with BAM DMA, the FocalTech touch screen, gpio-keys (volume up),
+  the PMIC power and volume-down keys, the PMI8950 WLED backlight, SDHCI (eMMC, SD).
+  The panel itself stays as the boot loader set it up: Linux's display driver is not
+  built, and `clk_ignore_unused pd_ignore_unused regulator_ignore_unused` keep Linux from
+  switching off what it does not know is in use.
+- **What Tessera gives Linux** (`src/arch/arm64/linux.c`, `sched.c`): threads
+  (a cooperative scheduler: Linux runs while the shell waits for its next frame),
+  semaphores, mutexes, timers; RAM below 4 GB; device registers mapped 1:1 so physical
+  addresses are DMA addresses; an uncached pool for coherent DMA (the SoC's DMA does not
+  snoop the caches) with cache maintenance for streaming DMA; Qualcomm shared memory
+  (SMEM) mapped as memory.
+- **The LKL patch** (`ports/lkl/qrt.patch`, `LKL_QRT_SOC`): the device tree
+  (unflattened from the host's), `qrt-gic` - an irqchip for the GICv2 distributor whose
+  interrupts Tessera takes from the CPU interface and hands to Linux - non-coherent DMA
+  with a global coherent pool, SMC calls, `ARCH_QCOM` so the Qualcomm drivers build, and
+  an idle hook so a cooperative host's timer thread runs while Linux idles.
+- **Bridges**: Linux's input devices (evdev) become the shell's touches and keys (power
+  -> lock / screen off, volume keys); the brightness slider and screen-off drive Linux's
+  backlight; System shows "Linux drivers" and the whole kernel log (600 lines), Linux's
+  boot messages included - the log to photograph when something does not work.
+- A fault in a Linux driver stops Linux only: the shell keeps running so the log can
+  be read.
+- **Tested in QEMU** (virt, Cortex-A53, GICv2): Linux boots inside Tessera, its
+  virtio-mmio driver finds the keyboard and tablet through the device tree and the GIC,
+  and a tap travels Linux's virtio-input driver -> GIC interrupt -> evdev -> the shell
+  (Settings opens).  The Mi A1 path (the Qualcomm drivers) needs the phone.
+
+### On the Mi A1
+
+`fastboot boot qrt-0.18.0-mi-a1-boot.img` as before (nothing is written).  After the
+home screen appears, Linux needs a few seconds to bring the drivers up; then touch,
+the power key (screen off/on) and the volume keys should work.
+
+**Press volume up three times** (within two seconds) for the full-screen kernel log -
+it needs no touch; three more presses go back.  If something does not work, a photo
+of that page (the last "linux:" lines) is what tells me why.
+
 ## 0.17.0: Tessera on 64-bit ARM, a first image for the Xiaomi Mi A1
 
 Tessera now also builds for **64-bit ARM** (`make arm64` -> `build/arm64/Image`), and

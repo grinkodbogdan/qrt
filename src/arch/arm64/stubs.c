@@ -42,13 +42,17 @@ void smp_run(smp_job_t job, void *arg, int count) { for (int i = 0; i < count; i
 const char *audio_status(void) { return "no sound driver on ARM yet"; }
 const char *speaker_status(void) { return "none"; }
 const char *hda_status(void) { return "none"; }
-int  backlight_available(void) { return 0; }
+/* the backlight through Linux's driver (linux.c), once it is up */
+int linux_backlight_set(int pct);
+int linux_backlight_present(void);
+static int bl_level = 70, bl_on = 1, bl_want = -1;
+int  backlight_available(void) { return linux_backlight_present(); }
 int  backlight_dim_alpha(void) { return 0; }
-int  backlight_level(void) { return 100; }
-const char *backlight_method(void) { return "the boot loader's setting"; }
-void backlight_power(int on) { (void)on; }
-void backlight_set_level(int pct) { (void)pct; }
-void backlight_tick(void) {}
+int  backlight_level(void) { return bl_level; }
+const char *backlight_method(void) { return linux_backlight_present() ? "Linux's backlight driver" : "the boot loader's setting"; }
+void backlight_power(int on) { bl_on = on; bl_want = on ? bl_level : 0; }
+void backlight_set_level(int pct) { bl_level = CLAMP(pct, 5, 100); if (bl_on) bl_want = bl_level; }
+void backlight_tick(void) { if (bl_want >= 0 && linux_backlight_set(bl_want) == 0) bl_want = -1; }
 static battery_t no_battery = { .minutes = -1 };
 const battery_t *battery_get(void) { return &no_battery; }
 void battery_poll(void) {}

@@ -1,3 +1,60 @@
+diff --git a/arch/lkl/Kconfig b/arch/lkl/Kconfig
+index ffb706aa7..84a45e80f 100644
+--- a/arch/lkl/Kconfig
++++ b/arch/lkl/Kconfig
+@@ -196,3 +196,30 @@ config LKL_HOST_MEMMOVE
+ 	help
+ 	  Set to "y" if LKL should call the host memmove hook instead of
+ 	  performing memory moves manually.
++
++config LKL_QRT_SOC
++	bool "QRT: Linux's SoC drivers from a device tree, in the host's kernel"
++	select OF
++	select OF_EARLY_FLATTREE
++	select IRQ_DOMAIN
++	select IRQCHIP
++	select HAS_DMA
++	select DMA_GLOBAL_POOL
++	select ARCH_HAS_SYNC_DMA_FOR_DEVICE
++	select ARCH_HAS_SYNC_DMA_FOR_CPU
++	select HAVE_ARM_SMCCC
++	default n
++	help
++	  QRT links LKL into its own kernel on ARM phones: the host passes the
++	  boot loader's device tree (lkl_qrt_fdt), Linux populates its platform
++	  devices and drives them with its own drivers.  Device memory is
++	  identity mapped by the host, interrupts come from the GIC through
++	  qrt-gic, DMA is non-coherent (cache maintenance here, coherent
++	  buffers from an uncached pool the host maps: lkl_qrt_dma_base/size).
++
++source "kernel/power/Kconfig"
++
++config ARCH_QCOM
++	bool "QRT: Qualcomm Snapdragon phones (drivers that need ARCH_QCOM)"
++	depends on LKL_QRT_SOC
++	default n
+diff --git a/arch/lkl/Makefile b/arch/lkl/Makefile
+index 003ca5a75..261cda7ab 100644
+--- a/arch/lkl/Makefile
++++ b/arch/lkl/Makefile
+@@ -50,7 +50,7 @@ endif
+ endif
+ 
+ LDFLAGS_vmlinux += -r
+-LKL_ENTRY_POINTS := lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
++LKL_ENTRY_POINTS := lkl_qrt_idle lkl_qrt_fdt lkl_qrt_dma_base lkl_qrt_dma_size qrt_gic_cpu_base lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
+ 	lkl_get_free_irq lkl_put_irq lkl_is_running lkl_bug lkl_printf \
+ 	lkl_init lkl_cleanup
+ 
+diff --git a/arch/lkl/drivers/Makefile b/arch/lkl/drivers/Makefile
+index 584603104..dd5835677 100644
+--- a/arch/lkl/drivers/Makefile
++++ b/arch/lkl/drivers/Makefile
+@@ -4,3 +4,4 @@ obj-$(CONFIG_PCI) += pci.o
+ obj-$(CONFIG_LKL_PCI_KUNIT_TEST) += pci_test.o
+ obj-$(CONFIG_PCI_MSI) += pci-msi.o
+ obj-$(CONFIG_LKL_PCI_MSI_KUNIT_TEST) += pci-msi-test.o
++obj-$(CONFIG_LKL_QRT_SOC) += qrt-gic.o
 diff --git a/arch/lkl/drivers/pci.c b/arch/lkl/drivers/pci.c
 index f4e969fb8..45be9bfdc 100644
 --- a/arch/lkl/drivers/pci.c
@@ -131,6 +188,134 @@ index f4e969fb8..45be9bfdc 100644
  		pci_walk_bus(bus, lkl_pci_remove_devices, NULL);
  }
  
+diff --git a/arch/lkl/drivers/qrt-gic.c b/arch/lkl/drivers/qrt-gic.c
+new file mode 100644
+index 000000000..4cca3deed
+--- /dev/null
++++ b/arch/lkl/drivers/qrt-gic.c
+@@ -0,0 +1,122 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * QRT: the ARM GICv2 distributor as Linux's interrupt controller inside QRT's
++ * kernel.  Linux masks, unmasks and configures its interrupts here; the host
++ * takes them from the CPU interface (GICC_IAR) with its own interrupts masked,
++ * runs lkl_trigger_irq(QRT_GIC_VIRQ_BASE + id) and writes GICC_EOIR.
++ * hwirq n is Linux irq QRT_GIC_VIRQ_BASE + n (a legacy domain).
++ */
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/irq.h>
++#include <linux/irqchip.h>
++#include <linux/irqdomain.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++
++#define QRT_GIC_VIRQ_BASE 1024
++#define QRT_GIC_NR 1020
++
++static void __iomem *dist;
++unsigned long qrt_gic_cpu_base;		/* the host's poller reads this */
++EXPORT_SYMBOL(qrt_gic_cpu_base);
++
++static void qrt_gic_mask(struct irq_data *d)
++{
++	unsigned long hw = irqd_to_hwirq(d);
++
++	writel_relaxed(BIT(hw % 32), dist + 0x180 + 4 * (hw / 32));
++}
++
++static void qrt_gic_unmask(struct irq_data *d)
++{
++	unsigned long hw = irqd_to_hwirq(d);
++
++	writel_relaxed(BIT(hw % 32), dist + 0x100 + 4 * (hw / 32));
++}
++
++/* acknowledged (IAR) and ended (EOIR) by the host's poller */
++static void qrt_gic_ack(struct irq_data *d)
++{
++}
++
++static int qrt_gic_set_type(struct irq_data *d, unsigned int type)
++{
++	unsigned long hw = irqd_to_hwirq(d);
++	u32 off = 0xc00 + 4 * (hw / 16), bit = BIT((hw % 16) * 2 + 1), v;
++	bool edge = type & IRQ_TYPE_EDGE_BOTH;
++
++	if (hw >= 32) {
++		v = readl_relaxed(dist + off);
++		writel_relaxed(edge ? v | bit : v & ~bit, dist + off);
++	}
++	irq_set_handler_locked(d, edge ? handle_edge_irq : handle_level_irq);
++	return 0;
++}
++
++static struct irq_chip qrt_gic_chip = {
++	.name = "qrt-gic",
++	.irq_mask = qrt_gic_mask,
++	.irq_unmask = qrt_gic_unmask,
++	.irq_ack = qrt_gic_ack,
++	.irq_set_type = qrt_gic_set_type,
++	.flags = IRQCHIP_SKIP_SET_WAKE,
++};
++
++static int qrt_gic_map(struct irq_domain *d, unsigned int virq,
++		       irq_hw_number_t hw)
++{
++	irq_set_chip_and_handler(virq, &qrt_gic_chip, handle_level_irq);
++	irq_set_probe(virq);
++	return 0;
++}
++
++static int qrt_gic_xlate(struct irq_domain *d, struct device_node *ctrlr,
++			 const u32 *spec, unsigned int size,
++			 irq_hw_number_t *hw, unsigned int *type)
++{
++	if (size < 3)
++		return -EINVAL;
++	*hw = spec[1] + (spec[0] == 0 ? 32 : 16);	/* SPI or PPI */
++	*type = spec[2] & IRQ_TYPE_SENSE_MASK;
++	return 0;
++}
++
++static const struct irq_domain_ops qrt_gic_ops = {
++	.map = qrt_gic_map,
++	.xlate = qrt_gic_xlate,
++};
++
++static int __init qrt_gic_init(struct device_node *node,
++			       struct device_node *parent)
++{
++	void __iomem *cpu;
++	u32 lines, i;
++
++	dist = of_iomap(node, 0);
++	cpu = of_iomap(node, 1);
++	if (!dist || !cpu)
++		return -ENOMEM;
++	lines = min_t(u32, 32 * ((readl_relaxed(dist + 0x004) & 0x1f) + 1), QRT_GIC_NR);
++	writel_relaxed(0, dist);			/* off while we set it up */
++	for (i = 0; i < lines; i += 32)
++		writel_relaxed(~0u, dist + 0x180 + i / 8);	/* everything masked */
++	for (i = 32; i < lines; i += 4)
++		writel_relaxed(0x01010101, dist + 0x800 + i);	/* to CPU 0 */
++	for (i = 0; i < lines; i += 4)
++		writel_relaxed(0xa0a0a0a0, dist + 0x400 + i);	/* one priority */
++	writel_relaxed(1, dist);
++	writel_relaxed(0xf0, cpu + 0x04);		/* GICC_PMR */
++	writel_relaxed(1, cpu);				/* GICC_CTLR */
++	qrt_gic_cpu_base = (unsigned long)cpu;
++	if (!irq_domain_add_legacy(node, lines, QRT_GIC_VIRQ_BASE, 0,
++				   &qrt_gic_ops, NULL))
++		return -ENOMEM;
++	pr_info("qrt-gic: %u interrupt lines, Linux irqs %d..\n", lines,
++		QRT_GIC_VIRQ_BASE);
++	return 0;
++}
++IRQCHIP_DECLARE(qrt_gic400, "arm,gic-400", qrt_gic_init);
++IRQCHIP_DECLARE(qrt_a15, "arm,cortex-a15-gic", qrt_gic_init);
++IRQCHIP_DECLARE(qrt_a7, "arm,cortex-a7-gic", qrt_gic_init);
++IRQCHIP_DECLARE(qrt_qgic2, "qcom,msm-qgic2", qrt_gic_init);
 diff --git a/arch/lkl/include/asm/barrier.h b/arch/lkl/include/asm/barrier.h
 new file mode 100644
 index 000000000..c25ddb2a8
@@ -159,3 +344,203 @@ index 000000000..c25ddb2a8
 +#include <asm-generic/barrier.h>
 +
 +#endif
+diff --git a/arch/lkl/kernel/Makefile b/arch/lkl/kernel/Makefile
+index 80a557a92..8e6cf0208 100644
+--- a/arch/lkl/kernel/Makefile
++++ b/arch/lkl/kernel/Makefile
+@@ -6,3 +6,4 @@ KASAN_SANITIZE_stacktrace.o := n
+ 
+ obj-y = setup.o threads.o irq.o time.o syscalls.o misc.o console.o \
+ 	syscalls_32.o cpu.o init.o stacktrace.o
++obj-$(CONFIG_LKL_QRT_SOC) += qrt_soc.o
+diff --git a/arch/lkl/kernel/cpu.c b/arch/lkl/kernel/cpu.c
+index 4afab4817..57bc7b49c 100644
+--- a/arch/lkl/kernel/cpu.c
++++ b/arch/lkl/kernel/cpu.c
+@@ -189,6 +189,14 @@ static void lkl_cpu_cleanup(bool shutdown)
+ 		lkl_ops->mutex_free(cpu.lock);
+ }
+ 
++/*
++ * QRT: a host whose threads are cooperative (QRT's kernel on ARM phones) has nothing
++ * else running while Linux idles; this lets its timer and interrupt threads run.
++ */
++void __weak lkl_qrt_idle(void)
++{
++}
++
+ void arch_cpu_idle(void)
+ {
+ 	if (cpu.shutdown_gate >= MAX_THREADS) {
+@@ -202,6 +210,8 @@ void arch_cpu_idle(void)
+ 
+ 		lkl_ops->thread_exit();
+ 	}
++	lkl_qrt_idle();
++
+ 	/* enable irqs now to allow direct irqs to run */
+ 	local_irq_enable();
+ 
+diff --git a/arch/lkl/kernel/irq.c b/arch/lkl/kernel/irq.c
+index fdbabc3e6..2a911b3f9 100644
+--- a/arch/lkl/kernel/irq.c
++++ b/arch/lkl/kernel/irq.c
+@@ -11,6 +11,7 @@
+ #include <asm/host_ops.h>
+ #include <asm/cpu.h>
+ #include <linux/cpu.h>
++#include <linux/irqchip.h>
+ 
+ /*
+  * To avoid much overhead we use an indirect approach: the irqs are marked using
+@@ -220,6 +221,9 @@ void init_IRQ(void)
+ 
+ 	for (i = 0; i < NR_IRQS; i++)
+ 		irq_set_chip_and_handler(i, &dummy_irq_chip, handle_simple_irq);
++#ifdef CONFIG_LKL_QRT_SOC
++	irqchip_init();			/* the device tree's interrupt controllers */
++#endif
+ 
+ 	pr_info("lkl: irqs initialized\n");
+ }
+diff --git a/arch/lkl/kernel/qrt_soc.c b/arch/lkl/kernel/qrt_soc.c
+new file mode 100644
+index 000000000..321635308
+--- /dev/null
++++ b/arch/lkl/kernel/qrt_soc.c
+@@ -0,0 +1,117 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * QRT: Linux's SoC drivers run inside QRT's kernel (Tessera) on ARM phones.
++ * The host sets these before lkl_start_kernel():
++ *   lkl_qrt_fdt         the boot loader's flattened device tree
++ *   lkl_qrt_dma_base    a physically contiguous region the host maps uncached,
++ *   lkl_qrt_dma_size    for dma_alloc_coherent() (the SoC's DMA does not snoop)
++ * Physical == virtual on the host, so DMA addresses need no translation.
++ */
++#include <linux/init.h>
++#include <linux/of.h>
++#include <linux/of_fdt.h>
++#include <linux/dma-map-ops.h>
++#include <linux/arm-smccc.h>
++
++void *lkl_qrt_fdt;
++unsigned long lkl_qrt_dma_base, lkl_qrt_dma_size;
++
++void __init lkl_qrt_soc_setup(void)
++{
++	if (!lkl_qrt_fdt)
++		return;
++	if (!early_init_dt_verify(lkl_qrt_fdt)) {
++		pr_err("qrt: the device tree is not valid\n");
++		return;
++	}
++	unflatten_device_tree();
++	pr_info("qrt: device tree: %s\n", of_flat_dt_get_machine_name());
++}
++
++static int __init lkl_qrt_dma_pool(void)
++{
++	if (lkl_qrt_dma_size)
++		return dma_init_global_coherent(lkl_qrt_dma_base, lkl_qrt_dma_size);
++	return 0;
++}
++core_initcall(lkl_qrt_dma_pool);
++
++#if defined(__aarch64__)
++static inline void qrt_dcache(unsigned long a, unsigned long e, int op)
++{
++	for (a &= ~63UL; a < e; a += 64) {
++		if (op == 0)
++			asm volatile("dc cvac, %0" : : "r"(a) : "memory");
++		else
++			asm volatile("dc civac, %0" : : "r"(a) : "memory");
++	}
++	asm volatile("dsb sy" : : : "memory");
++}
++#else
++static inline void qrt_dcache(unsigned long a, unsigned long e, int op) { }
++#endif
++
++/* to the device: write back what the CPU wrote; from it: drop what we cached */
++void arch_sync_dma_for_device(phys_addr_t paddr, size_t size,
++			      enum dma_data_direction dir)
++{
++	qrt_dcache(paddr, paddr + size, dir == DMA_TO_DEVICE ? 0 : 1);
++}
++
++void arch_sync_dma_for_cpu(phys_addr_t paddr, size_t size,
++			   enum dma_data_direction dir)
++{
++	if (dir != DMA_TO_DEVICE)
++		qrt_dcache(paddr, paddr + size, 1);
++}
++
++#if defined(__aarch64__)
++/* SMC calls (secure monitor: SCM, PSCI): Linux runs at EL1 inside the host */
++void __arm_smccc_smc(unsigned long a0, unsigned long a1, unsigned long a2,
++		     unsigned long a3, unsigned long a4, unsigned long a5,
++		     unsigned long a6, unsigned long a7,
++		     struct arm_smccc_res *res, struct arm_smccc_quirk *quirk)
++{
++	register unsigned long x0 asm("x0") = a0, x1 asm("x1") = a1,
++		x2 asm("x2") = a2, x3 asm("x3") = a3, x4 asm("x4") = a4,
++		x5 asm("x5") = a5, x6 asm("x6") = a6, x7 asm("x7") = a7;
++
++	asm volatile("smc #0"
++		     : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4),
++		       "+r"(x5), "+r"(x6), "+r"(x7)
++		     : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
++		       "x16", "x17", "memory");
++	if (res) {
++		res->a0 = x0;
++		res->a1 = x1;
++		res->a2 = x2;
++		res->a3 = x3;
++	}
++	if (quirk && quirk->id == ARM_SMCCC_QUIRK_QCOM_A6)
++		quirk->state.a6 = x6;
++}
++EXPORT_SYMBOL(__arm_smccc_smc);
++
++void __arm_smccc_hvc(unsigned long a0, unsigned long a1, unsigned long a2,
++		     unsigned long a3, unsigned long a4, unsigned long a5,
++		     unsigned long a6, unsigned long a7,
++		     struct arm_smccc_res *res, struct arm_smccc_quirk *quirk)
++{
++	register unsigned long x0 asm("x0") = a0, x1 asm("x1") = a1,
++		x2 asm("x2") = a2, x3 asm("x3") = a3, x4 asm("x4") = a4,
++		x5 asm("x5") = a5, x6 asm("x6") = a6, x7 asm("x7") = a7;
++
++	asm volatile("hvc #0"
++		     : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4),
++		       "+r"(x5), "+r"(x6), "+r"(x7)
++		     : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
++		       "x16", "x17", "memory");
++	if (res) {
++		res->a0 = x0;
++		res->a1 = x1;
++		res->a2 = x2;
++		res->a3 = x3;
++	}
++}
++EXPORT_SYMBOL(__arm_smccc_hvc);
++#endif
+diff --git a/arch/lkl/kernel/setup.c b/arch/lkl/kernel/setup.c
+index 57b075200..dbb80f472 100644
+--- a/arch/lkl/kernel/setup.c
++++ b/arch/lkl/kernel/setup.c
+@@ -43,6 +43,13 @@ void __init setup_arch(char **cl)
+ 	panic_blink = lkl_panic_blink;
+ 	parse_early_param();
+ 	bootmem_init(mem_size);
++#ifdef CONFIG_LKL_QRT_SOC
++	{
++		extern void lkl_qrt_soc_setup(void);
++
++		lkl_qrt_soc_setup();
++	}
++#endif
+ }
+ 
+ static void __init lkl_run_kernel(void *arg)
