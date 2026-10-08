@@ -14,8 +14,9 @@
 #include "sched.h"
 
 char fb_what[128] = "none";
+static u64 mdp_top;                         /* MDP5: its interrupt status counts underruns */
 u64 fb_other[4][2]; int fb_nother;                 /* other layers' memory: kept out of the heap (main.c) */
-u64 fb_reserve_base, fb_reserve_size;      /* mapped uncached by mmu.c */
+u64 fb_reserve_base, fb_reserve_size;      /* mapped cacheable by mmu.c: fb_present cleans what it writes */
 static u8 *fb;
 static int bpp = 4, byte_of[4];            /* byte_of[c]: where channel c (0 R, 1 G, 2 B) goes */
 static u64 kick;                           /* a command-mode panel's CTL START register */
@@ -173,6 +174,7 @@ static int mdp5_init(void) {
             klog("display: pipe %x: %ux%u from %x, out %ux%u at %u,%u, format %x", pipes[pi], w, h, addr, out & 0xffff, out >> 16,
                  oxy & 0xffff, oxy >> 16, format);
             mdp5_only_ours(bases[bi], pipes[pi]);
+            mdp_top = bases[bi];
             return 1;
         }
     return 0;
@@ -203,7 +205,12 @@ static int splash_init(void) {
 int fb_init(void) { return ramfb_init() || mdp5_init() || splash_init(); }
 
 /* Tessera's pixels are 0x00RRGGBB */
-/* the framebuffer is uncached: a row is converted in cached memory first and stored with
+/* the framebuffer is cached: each written row goes out to memory (dc cvac) for the
+ * display engine, which reads memory directly */
+static void clean(const u8 *p, usize n) {
+    for (u64 a = (u64)(usize)p & ~63ull, e = (u64)(usize)p + n; a < e; a += 64) __asm__ volatile("dc cvac, %0" : : "r"(a) : "memory");
+}
+/* formerly uncached: a row is converted in cached memory first and stored with
  * 8-byte writes (byte stores to uncached memory are each a bus write) */
 static void row_store(u8 *d, const u8 *s, usize n) {
     while (n && ((usize)d & 7)) { *d++ = *s++; n--; }
@@ -211,6 +218,12 @@ static void row_store(u8 *d, const u8 *s, usize n) {
     while (n--) *d++ = *s++;
 }
 static u64 fb_us, fb_frames;
+static u32 underruns;
+static void count_underruns(void) {
+    if (!mdp_top) return;
+    u32 st = R32(mdp_top + 0x14) & 0x55000000u;                        /* INTF0..3 UNDER_RUN */
+    if (st) { underruns++; W32(mdp_top + 0x18, st); }
+}
 /* a command-mode panel shows memory only when told (CTL START).  A frame takes ~15 ms to
  * go out, and a START during it cuts it short (the lower part of the screen kept an older
  * frame), while a START that is lost leaves the newest frame unseen.  So: START at most
@@ -237,6 +250,10 @@ static void refresher(void *a) {
 /* now, without the thread (the panic screen: no other thread runs again) */
 void fb_flush(void) { if (kick) W32(kick, 1); }
 void fb_stats(u64 *frames, u64 *us) { *frames = fb_frames; *us = fb_us; fb_frames = fb_us = 0; }
+u32 fb_underruns(void) { u32 n = underruns; underruns = 0; return n; }
+/* the underrun watch: a thread looking every 5 ms (a frame is 16 ms) */
+static void underrun_watch(void *a) { (void)a; for (;;) { count_underruns(); thr_sleep_us(5000); } }
+void fb_start_watch(void) { if (mdp_top) { W32(mdp_top + 0x10, R32(mdp_top + 0x10) | 0x55000000u); thr_create("display watch", underrun_watch, NULL, 16 << 10); } }
 /* px is the whole frame (stride pixels a row); the rectangle (x, y, w, h) of it goes to
  * the same place on the screen - as GOP's Blt and the x86-64 kernel's native_present */
 void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
@@ -250,7 +267,11 @@ void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     u64 t0 = k_now_us();
     usize line = (usize)k.fb_stride * (usize)bpp;
     if (bpp == 4 && byte_of[0] == 2 && byte_of[1] == 1 && byte_of[2] == 0) {
-        for (int r = 0; r < h; r++) memcpy(fb + (usize)(y + r) * line + (usize)x * 4, px + (usize)r * stride, (usize)w * 4);
+        for (int r = 0; r < h; r++) {
+            u8 *d = fb + (usize)(y + r) * line + (usize)x * 4;
+            memcpy(d, px + (usize)r * stride, (usize)w * 4);
+            clean(d, (usize)w * 4);
+        }
     } else {
         static u8 rowbuf[4096 * 4 + 16] __attribute__((aligned(16)));
         int r0 = byte_of[0], g0 = byte_of[1], b0 = byte_of[2];
@@ -264,6 +285,7 @@ void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
                 o[r0] = (u8)(v >> 16); o[g0] = (u8)(v >> 8); o[b0] = (u8)v;
             }
             row_store(d, b, (usize)n * (usize)bpp);
+            clean(d, (usize)n * (usize)bpp);
         }
     }
     fb_us += k_now_us() - t0;

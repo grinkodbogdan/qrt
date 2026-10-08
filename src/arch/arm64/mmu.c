@@ -60,20 +60,24 @@ extern char _start[], __bss_end[];   /* the image: _start .. __bss_end (both rel
 
 static const u64 (*m_ram)[2], (*m_nc)[2], (*m_hole)[2];
 static int m_nram, m_nnc, m_nhole;
-static u64 m_img[1][2];
+static u64 m_img[2][2];
+static int m_nimg = 1;
+/* another range mapped write-back cacheable whatever else it is (the framebuffer: written
+ * through the cache and cleaned line by line, so the memory sees whole-line bursts) */
+void mmu_cached(u64 base, u64 size) { if (size) { m_img[1][0] = base; m_img[1][1] = size; m_nimg = 2; } }
 
 /* what [a, b) is: the kernel image runs; uncached ranges (framebuffer, DMA pool, shared
  * memory) are uncached; RAM wholly clear of the firmware's reserved regions is
  * cacheable; everything else - reserved regions included, so nothing ever reads into
  * memory the secure world protects, not even speculatively - is device memory */
 static int attr_of(u64 a, u64 b) {
-    if (overlaps(a, b, m_img, 1)) return MAIR_NORMAL;
+    if (overlaps(a, b, m_img, m_nimg)) return MAIR_NORMAL;
     if (inside(a, b, m_nc, m_nnc)) return MAIR_NC;
     if (inside(a, b, m_ram, m_nram) && !overlaps(a, b, m_hole, m_nhole) && !overlaps(a, b, m_nc, m_nnc)) return MAIR_NORMAL;
     return MAIR_DEVICE;
 }
 static int mixed(u64 a, u64 b) {
-    return edge_in(a, b, m_img, 1) || edge_in(a, b, m_nc, m_nnc) || edge_in(a, b, m_ram, m_nram) || edge_in(a, b, m_hole, m_nhole);
+    return edge_in(a, b, m_img, m_nimg) || edge_in(a, b, m_nc, m_nnc) || edge_in(a, b, m_ram, m_nram) || edge_in(a, b, m_hole, m_nhole);
 }
 
 /* 1 GB blocks, 2 MB blocks where a GB is not uniform, 4 KB pages where a 2 MB block is not

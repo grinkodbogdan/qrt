@@ -65,6 +65,7 @@ int hal_poll(event_t *out, int max) {
     int m = 0;
     for (int i = 0; i < n; i++) {
         if (out[i].type == EV_KEY && out[i].scan == SCAN_VOLUP && logview_key()) { if (!logview_active()) shell_redraw(); continue; }
+        if (logview_active() && out[i].type == EV_KEY && out[i].scan == SCAN_VOLDN) { void logview_older(void); logview_older(); continue; }
         if (!logview_active()) out[m++] = out[i];
     }
     n = m;

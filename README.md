@@ -189,6 +189,22 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.19.8: lighter framebuffer writes; underruns counted; a scrollable log
+
+The Mi A1's screen still showed flat-coloured bands in its lower part.  On a video-mode
+panel that is what an **underrun** looks like: the display engine cannot fetch the frame
+from memory in time and fills the rest of it.
+
+- **The framebuffer is cached** (`mmu.c`, `fb.c`): Tessera wrote it with millions of
+  8-byte uncached stores per frame, each its own trip to memory, competing with the
+  display engine.  It is now mapped write-back and each written row is cleaned to memory
+  (`dc cvac`): whole 64-byte lines, far fewer memory transactions.
+- **Underruns counted**: the display engine's underrun flags (INTF0..3) are watched; the
+  `cpu: display:` line in the log says how many frames underran.
+- **The log scrolls**: with the log up, volume down goes a screen further back (past the
+  oldest line, back to the newest); the summary repeats the boot's `display:` and `gic:`
+  lines.
+
 ## 0.19.7: one layer on the Mi A1's screen
 
 0.19.6 on the Mi A1: parts of the screen showed old pictures - the dock where it had

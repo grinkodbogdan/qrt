@@ -461,6 +461,14 @@ static void linux_summary(void) {
         }
         klog("linux: interrupts delivered (SPI:count): %s", il[0] ? il : "none");
     }
+    {                                                             /* the boot's display lines, again */
+        int nl = 0, shown = 0;
+        while (klog_line(nl)) nl++;
+        for (int i = 0; i < nl && shown < 12; i++) {
+            const char *l = klog_line(i);
+            if (l && (!strncmp(l, "display:", 8) || !strncmp(l, "gic:", 4))) { char c[160]; strlcpy(c, l, sizeof c); klog("%s", c); shown++; }
+        }
+    }
     klog("linux: %d regulator(s); %d device(s) waiting; %d line(s) to note:", nreg, n, nprob);
     for (int i = 0; i < nprob; i++) klog("linux: ! %s", probs[i]);
 }

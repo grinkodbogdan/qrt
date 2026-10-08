@@ -222,8 +222,10 @@ void arm_main(const void *dtb, u64 base) {
     arm_dma_pool_size = 16ull << 20;
     hi -= arm_dma_pool_size;
     arm_dma_pool_base = hi;
-    u64 nc[10][2] = { { fb_reserve_base, fb_reserve_size }, { arm_dma_pool_base, arm_dma_pool_size } };
-    int nnc = 2;
+    void mmu_cached(u64 base, u64 size);
+    mmu_cached(fb_reserve_base, fb_reserve_size);                   /* fb.c cleans what it writes */
+    u64 nc[10][2] = { { arm_dma_pool_base, arm_dma_pool_size } };
+    int nnc = 1;
     for (int i = 0; i < nshared; i++) { nc[nnc][0] = shared[i][0]; nc[nnc][1] = shared[i][1]; nnc++; }
     mmu_init((const u64 (*)[2])ram, nram, (const u64 (*)[2])nc, nnc, (const u64 (*)[2])hole, nhole);
     pmm_init(lo, hi);
@@ -242,6 +244,8 @@ void arm_main(const void *dtb, u64 base) {
     hal_arm_init();
     time_init();
     if (gic_init()) __asm__ volatile("msr daifclr, #2");          /* preemption from here on */
+    void fb_start_watch(void);
+    fb_start_watch();
     /* Linux's drivers, on threads - unless the last boot reset the phone while they were
      * starting: then this boot stays without them and shows that boot's log */
     int ch = fdt_node("/chosen"), alen;

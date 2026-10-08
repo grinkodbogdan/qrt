@@ -221,7 +221,8 @@ void thr_report(void) {
     void fb_stats(u64 *frames, u64 *us);
     u64 fr, fus;
     fb_stats(&fr, &fus);
-    klog("cpu: display: %llu frames presented, %llu ms each", fr, fr ? fus / fr / 1000 : 0);
+    u32 fb_underruns(void);
+    klog("cpu: display: %llu frames presented, %llu ms each; %u underrun(s)", fr, fr ? fus / fr / 1000 : 0, fb_underruns());
 }
 
 /* ---- semaphores and mutexes: a count and a FIFO of waiters ---- */
