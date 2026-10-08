@@ -259,6 +259,23 @@ void arm_main(const void *dtb, u64 base) {
                  t[mmu_attr_at(s0 - 4096) % 3], t[mmu_attr_at(s0) % 3], t[mmu_attr_at(e - 4096) % 3], t[mmu_attr_at(e) % 3]);
         }
     }
+    /* Argon: postmarketOS's tissot device tree names its panel "xiaomi,tissot-panel" (lk2nd
+     * fills in the real one); the boot loader reports which it is - "...otm1911_fhd_video" -
+     * so Tessera writes the matching driver's compatible in place before Linux reads it */
+    int pnode = fdt_find_compatible(-1, "xiaomi,tissot-panel");
+    if (pnode >= 0) {
+        static const char *const panels[][2] = { { "otm1911_fhd", "mdss,otm1911-fhd" }, { "ili7807_fhd", "mdss,ili7807-fhd" },
+                                                 { "ft8716_fhd", "mdss,ft8716-fhd" } };
+        int plen;
+        char *pc = (char *)fdt_prop(pnode, "compatible", &plen);
+        const char *which = NULL;
+        for (int i = 0; i < 3 && bootargs && !which; i++) if (strstr(bootargs, panels[i][0])) which = panels[i][1];
+        if (pc && which && (int)strlen(which) < plen) {
+            memset(pc, 0, (usize)plen);
+            memcpy(pc, which, strlen(which));
+            klog("argon: panel %s (the boot loader's)", which);
+        } else klog("argon: panel not named by the boot loader; Linux will not drive the display");
+    }
     if (bootargs && strstr(bootargs, "qrt.nolinux")) klog("linux: off (qrt.nolinux)");
     else if (plog_last_boot_failed()) {
         klog("safe boot: the last boot reset while Linux's drivers were starting (%d lines kept); Linux stays off",

@@ -133,13 +133,14 @@ arm64: build/arm64/Image
 # appended (as aboot wants it), a small ramdisk (a cpio archive: the file tree).
 # Try it without flashing: fastboot boot build/arm64/qrt-mi-a1-boot.img
 # the device tree: mainline Linux 6.12's msm8953-xiaomi-tissot.dts, compiled into
-# src/arch/arm64/dts (regenerate with: make dts-tissot LINUX_DTS=<a Linux 6.12 tree>)
+# src/arch/arm64/dts: postmarketOS's tissot device tree (msm8953-mainline, branch 6.12/main) -
+# regenerate with: make dts-tissot LINUX_DTS=<msm8953-mainline> LINUX_INC=<any Linux 6.12 tree>
 build/arm64/tissot.dtb: src/arch/arm64/dts/msm8953-xiaomi-tissot.dtb
 	@mkdir -p $(dir $@)
 	cp $< $@
 dts-tissot:
 	@test -n "$(LINUX_DTS)" || { echo "set LINUX_DTS to a Linux 6.12 tree"; exit 1; }
-	cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp -I $(LINUX_DTS)/include -I $(LINUX_DTS)/arch/arm64/boot/dts/qcom \
+	cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp -I $(LINUX_DTS)/include $(if $(LINUX_INC),-I $(LINUX_INC)/include) -I $(LINUX_DTS)/arch/arm64/boot/dts/qcom \
 	    -I $(LINUX_DTS)/scripts/dtc/include-prefixes $(LINUX_DTS)/arch/arm64/boot/dts/qcom/msm8953-xiaomi-tissot.dts | dtc -q -I dts -O dtb -o src/arch/arm64/dts/msm8953-xiaomi-tissot.dtb -
 build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null)
 	$(PYTHON) tools/mkcpio.py src/arch/arm64/rootfs $@

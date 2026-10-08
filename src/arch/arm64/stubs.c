@@ -54,7 +54,8 @@ void backlight_power(int on) { bl_on = on; bl_want = on ? bl_level : 0; }
 void backlight_set_level(int pct) { bl_level = CLAMP(pct, 5, 100); if (bl_on) bl_want = bl_level; }
 void backlight_tick(void) { if (bl_want >= 0) { linux_backlight_set(bl_want); bl_want = -1; } }   /* never waits */
 static battery_t no_battery = { .minutes = -1 };
-const battery_t *battery_get(void) { return &no_battery; }
+const battery_t *linux_battery(void);                 /* linux.c: Linux's fuel gauge, NULL if none */
+const battery_t *battery_get(void) { const battery_t *b = linux_battery(); return b ? b : &no_battery; }
 void battery_poll(void) {}
 int  buttons_active(void) { return 0; }
 int  buttons_debug(char lines[][112], int max) { (void)lines; (void)max; return 0; }

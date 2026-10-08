@@ -476,6 +476,197 @@ static void display_loop(void *a) {
     }
 }
 
+/* ---- Argon storage: every file system on a disk Linux drives (the eMMC, an SD card)
+ * appears in Tessera's file tree as /mnt/<partition>, read-only - nothing on the
+ * phone's own partitions can be damaged.  The modem partition is also Linux's
+ * firmware: Wi-Fi, modem, DSP and video firmware come from its image/ directory, as
+ * postmarketOS's msm-firmware-loader does it. ---- */
+#include "../../kernel/vfs.h"
+#define NR_NEWFSTATAT 79
+#define NR_PREAD64    67
+#define NAMNT 24
+static struct amnt { char name[40], lpath[56]; } amnts[NAMNT];
+static int namnt;
+static void join(char *out, usize cap, const struct amnt *m, const char *path) {
+    while (*path == '/') path++;
+    fmt(out, cap, "%s%s%s", m->lpath, *path ? "/" : "", path);
+}
+static i64 argon_vfs(void *mnt, int op, const char *path, const char *path2, u64 off, void *buf, u64 len) {
+    (void)path2;
+    struct amnt *m = mnt;
+    char p[512];
+    join(p, sizeof p, m, path);
+    if (op == VR_READ) {
+        long fd = l_open(p, 0);
+        if (fd < 0) return fd;
+        long n = sys(NR_PREAD64, fd, (long)buf, (long)len, (long)off, 0);
+        l_close((int)fd);
+        return n;
+    }
+    if (op != VR_LIST) return -30;                                   /* EROFS: read-only */
+    long fd = l_open(p, 0200000);                                    /* O_DIRECTORY */
+    if (fd < 0) return fd;
+    static char dents[8192];
+    u8 *out = buf;
+    u64 o = 0;
+    long n;
+    while ((n = sys(NR_GETDENTS64, fd, (long)dents, sizeof dents, 0, 0)) > 0)
+        for (long d = 0; d < n; d += *(u16 *)(dents + d + 16)) {
+            const char *nm = dents + d + 19;
+            if (!strcmp(nm, ".") || !strcmp(nm, "..")) continue;
+            u8 st[128] = { 0 };
+            if (sys(NR_NEWFSTATAT, fd, (long)nm, (long)st, 0x100, 0) < 0) continue;   /* AT_SYMLINK_NOFOLLOW */
+            u32 mode = *(u32 *)(st + 16);
+            u64 size = *(u64 *)(st + 48);
+            usize l = MIN(strlen(nm), (usize)255);
+            if (o + 12 + l > len) break;
+            out[o] = (mode & 0170000) == 0040000;
+            out[o + 1] = (u8)(mode & 0777); out[o + 2] = (u8)((mode & 0777) >> 8);
+            memcpy(out + o + 3, &size, 8);
+            out[o + 11] = (u8)l;
+            memcpy(out + o + 12, nm, l);
+            o += 12 + l;
+        }
+    l_close((int)fd);
+    return (i64)o;
+}
+static int read_text(const char *path, char *out, int cap) {
+    long fd = l_open(path, 0);
+    if (fd < 0) return -1;
+    long n = l_read((int)fd, out, cap - 1);
+    l_close((int)fd);
+    out[n > 0 ? n : 0] = 0;
+    return (int)(n > 0 ? n : 0);
+}
+static void write_text(const char *path, const char *text) {
+    long fd = sys(NR_OPENAT, AT_FDCWD, (long)path, 1, 0, 0);
+    if (fd < 0) return;
+    sys(64, fd, (long)text, (long)strlen(text), 0, 0);
+    l_close((int)fd);
+}
+static int mounted(const char *dev) { for (int i = 0; i < namnt; i++) if (strstr(amnts[i].lpath, dev)) return 1; return 0; }
+static void firmware_from(const struct amnt *m) {
+    char p[96];
+    fmt(p, sizeof p, "%s/image", m->lpath);
+    write_text("/sys/module/firmware_class/parameters/path", p);
+    klog("argon: firmware from %s (the phone's own)", p);
+    long fd = l_open("/sys/class/remoteproc", 0200000);              /* the processors that wait for it */
+    if (fd < 0) return;
+    static char d[2048];
+    long n = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+    l_close((int)fd);
+    for (long o = 0; o < n; o += *(u16 *)(d + o + 16)) {
+        const char *nm = d + o + 19;
+        if (strncmp(nm, "remoteproc", 10)) continue;
+        char sp[96], st[32], fw[64] = "";
+        fmt(sp, sizeof sp, "/sys/class/remoteproc/%s/firmware", nm);
+        read_text(sp, fw, sizeof fw);
+        fmt(sp, sizeof sp, "/sys/class/remoteproc/%s/state", nm);
+        read_text(sp, st, sizeof st);
+        if (!strncmp(st, "offline", 7)) { write_text(sp, "start"); read_text(sp, st, sizeof st); }
+        for (char *c = fw; *c; c++) if (*c == '\n') *c = 0;
+        for (char *c = st; *c; c++) if (*c == '\n') *c = 0;
+        klog("argon: %s (%s): %s", nm, fw, st);
+    }
+}
+static void storage_scan(void) {
+    long fd = l_open("/sys/class/block", 0200000);
+    if (fd < 0) return;
+    static char d[8192];
+    long n = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+    l_close((int)fd);
+    sys(NR_MKDIRAT, AT_FDCWD, (long)"/mnt", 0755, 0, 0);
+    if (!vfs_lookup("/mnt")) vfs_create("/mnt", 1);
+    for (long o = 0; o < n && namnt < NAMNT; o += *(u16 *)(d + o + 16)) {
+        const char *dev = d + o + 19;
+        if (dev[0] == '.' || mounted(dev)) continue;
+        char ue[512], p[96], part[40] = "";
+        fmt(p, sizeof p, "/sys/class/block/%s/uevent", dev);
+        if (read_text(p, ue, sizeof ue) <= 0 || !strstr(ue, "DEVTYPE=partition")) continue;
+        const char *pn = strstr(ue, "PARTNAME=");
+        if (pn) { int i = 0; for (pn += 9; *pn && *pn != '\n' && i < 39; pn++) part[i++] = *pn; part[i] = 0; }
+        struct amnt *m = &amnts[namnt];
+        strlcpy(m->name, part[0] ? part : dev, sizeof m->name);
+        fmt(m->lpath, sizeof m->lpath, "/mnt/%s", dev);
+        fmt(p, sizeof p, "/dev/%s", dev);
+        sys(NR_MKDIRAT, AT_FDCWD, (long)m->lpath, 0755, 0, 0);
+        static const char *const fss[] = { "ext4", "f2fs", "vfat", "exfat", NULL };
+        const char *got = NULL;
+        for (int i = 0; fss[i] && !got; i++)
+            if (sys(NR_MOUNT, (long)p, (long)m->lpath, (long)fss[i], 1, 0) == 0) got = fss[i];   /* MS_RDONLY */
+        if (!got) continue;
+        char tp[64];
+        fmt(tp, sizeof tp, "/mnt/%s", m->name);
+        if (vfs_lookup(tp)) fmt(tp, sizeof tp, "/mnt/%s-%s", m->name, dev);
+        namnt++;
+        vfs_mount_remote(tp, m);
+        klog("argon: %s (%s, %s) at %s, read-only", dev, m->name, got, tp);
+        if (!strncmp(m->name, "modem", 5)) firmware_from(m);
+    }
+}
+static void storage_loop(void *a) {
+    (void)a;
+    vfs_remote_call = argon_vfs;
+    for (;;) { if (linux_running()) storage_scan(); thr_sleep_us(10ull * 1000000); }
+}
+
+/* ---- Argon power: Linux's fuel gauge and charger (PMI8950 on the Mi A1) as Tessera's
+ * battery (the top bar, Settings) ---- */
+#include "../../drivers/battery.h"
+static battery_t lbat = { .minutes = -1 };
+const battery_t *linux_battery(void) { return lbat.present ? &lbat : NULL; }
+static long num_at(const char *dir, const char *f) {
+    char p[128], t[32];
+    fmt(p, sizeof p, "/sys/class/power_supply/%s/%s", dir, f);
+    if (read_text(p, t, sizeof t) <= 0) return -1;
+    long v = 0, sign = 1;
+    const char *c = t;
+    if (*c == '-') { sign = -1; c++; }
+    while (*c >= '0' && *c <= '9') v = v * 10 + (*c++ - '0');
+    return v * sign;
+}
+static void power_poll(void) {
+    long fd = l_open("/sys/class/power_supply", 0200000);
+    if (fd < 0) return;
+    static char d[2048];
+    long n = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+    l_close((int)fd);
+    battery_t b = { .minutes = -1 };
+    for (long o = 0; o < n; o += *(u16 *)(d + o + 16)) {
+        const char *nm = d + o + 19;
+        if (nm[0] == '.') continue;
+        char p[128], type[24] = "", st[24] = "";
+        fmt(p, sizeof p, "/sys/class/power_supply/%s/type", nm);
+        read_text(p, type, sizeof type);
+        if (!strncmp(type, "Battery", 7)) {
+            long cap = num_at(nm, "capacity");
+            if (cap < 0) continue;
+            b.present = 1;
+            b.percent = (int)MIN(100, MAX(0, cap));
+            fmt(p, sizeof p, "/sys/class/power_supply/%s/status", nm);
+            read_text(p, st, sizeof st);
+            b.charging = !strncmp(st, "Charging", 8);
+            b.discharging = !strncmp(st, "Discharging", 11);
+            long uv = num_at(nm, "voltage_now"), ua = num_at(nm, "current_now");
+            if (uv > 0) b.mv = (int)(uv / 1000);
+            if (ua != -1) b.ma = (int)((ua < 0 ? -ua : ua) / 1000);
+            b.critical = b.discharging && b.percent <= 3;
+        } else if (num_at(nm, "online") > 0) b.ac = 1;                 /* USB or mains with power */
+    }
+    if (b.present) lbat = b;
+}
+static void sensors_loop(void *a) {
+    (void)a;
+    int said = 0;
+    for (;;) {
+        if (linux_running()) {
+            power_poll();
+            if (!said && lbat.present) { said = 1; klog("argon: battery %d%%%s (Linux's fuel gauge)", lbat.percent, lbat.charging ? ", charging" : ""); }
+        }
+        thr_sleep_us(5ull * 1000000);
+    }
+}
+
 /* ---- start ---- */
 static const void *dtb;
 /* what did not come up and why: the devices still waiting for something (debugfs's
@@ -568,6 +759,8 @@ static void linux_main(void *a) {
     thr_create("evdev scan", input_scan, NULL, 32 << 10);
     thr_create("backlight", bl_loop, NULL, 32 << 10);
     thr_create("linux display", display_loop, NULL, 32 << 10);
+    thr_create("linux storage", storage_loop, NULL, 64 << 10);
+    thr_create("linux sensors", sensors_loop, NULL, 32 << 10);
     thr_sleep_us(25ull * 1000000);
     if (!dead) linux_summary();
     thr_sleep_us(5ull * 1000000);
@@ -593,6 +786,8 @@ const char *linux_status(char *buf, int cap) {
 }
 #else
 int linux_has_keys(void) { return 0; }
+#include "../../drivers/battery.h"
+const battery_t *linux_battery(void) { return NULL; }
 void linux_failed(const char *why) { (void)why; }
 int linux_backlight_set(int pct) { (void)pct; return -1; }
 int linux_backlight_present(void) { return 0; }
