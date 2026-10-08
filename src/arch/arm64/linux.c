@@ -357,9 +357,10 @@ static void linux_main(void *a) {
     lkl_qrt_fdt = (void *)dtb;
     lkl_qrt_dma_base = arm_dma_pool_base;
     lkl_qrt_dma_size = arm_dma_pool_size;
+    plog_state(PLOG_LINUX_STARTING);                                /* a reset from here on: the next boot is safe */
     if (lkl_init(&ops) < 0) { klog("linux: lkl_init failed"); return; }
-    int r = lkl_start_kernel("mem=160M loglevel=7 clk_ignore_unused pd_ignore_unused regulator_ignore_unused "
-                             "fw_devlink=permissive");
+    int r = lkl_start_kernel("mem=160M loglevel=8 initcall_debug clk_ignore_unused pd_ignore_unused "
+                             "regulator_ignore_unused fw_devlink=permissive");
     if (r < 0) { klog("linux: did not start (%d)", r); return; }
     running = 1;
     klog("linux: running; %d threads", thr_count());
@@ -368,6 +369,8 @@ static void linux_main(void *a) {
     sys(NR_MOUNT, (long)"sysfs", (long)"/sys", (long)"sysfs", 0, 0);
     sys(NR_MOUNT, (long)"devtmpfs", (long)"/dev", (long)"devtmpfs", 0, 0);
     thr_create("evdev scan", input_scan, NULL, 32 << 10);
+    thr_sleep_us(40ull * 1000000);                                  /* settled: probes, deferred probes, sync_state */
+    if (!dead) { plog_state(PLOG_LINUX_OK); klog("linux: drivers settled"); }
 }
 
 int linux_start(const void *fdt) {

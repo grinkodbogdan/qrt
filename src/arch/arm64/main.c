@@ -99,12 +99,15 @@ static int mem_one(int c, void *arg) {
  * modem, the remote file system buffer) are mapped uncached-normal, not device memory */
 static u64 shared[8][2];
 static int nshared;
+static u64 ramoops[2];
 static int rsv_one(int c, void *arg) {
     (void)arg;
     u64 a, s;
     int len;
     const char *compat = fdt_prop(c, "compatible", &len);
-    int mem = compat && (!strcmp(compat, "qcom,smem") || !strcmp(compat, "qcom,rmtfs-mem"));
+    int oops = compat && !strcmp(compat, "ramoops");
+    int mem = compat && (!strcmp(compat, "qcom,smem") || !strcmp(compat, "qcom,rmtfs-mem") || oops);
+    if (oops && fdt_reg(c, 0, &a, &s)) { ramoops[0] = a; ramoops[1] = s; }
     for (int i = 0; i < 4 && fdt_reg(c, i, &a, &s); i++) {
         add_hole(a, s);
         if (mem && nshared < 8) { shared[nshared][0] = a; shared[nshared][1] = s; nshared++; }
@@ -214,6 +217,10 @@ void arm_main(const void *dtb, u64 base) {
     for (int i = 0; i < nshared; i++) { nc[nnc][0] = shared[i][0]; nc[nnc][1] = shared[i][1]; nnc++; }
     mmu_init((const u64 (*)[2])ram, nram, (const u64 (*)[2])nc, nnc, (const u64 (*)[2])hole, nhole);
     pmm_init(lo, hi);
+    if (ramoops[1]) {                                               /* the log across resets */
+        plog_init(ramoops[0], ramoops[1]);
+        for (int i = 0; klog_line(i); i++) plog_line(klog_line(i));
+    }
     arm_ram_base = lo; arm_ram_size = hi - lo;
     klog("memory: %llu MB in all, heap and pages %llx-%llx (%llu MB)", k.ram_bytes >> 20, lo, hi, (hi - lo) >> 20);
     klog("display: %s, %u x %u", fb_what, k.fb_w, k.fb_h);
@@ -224,7 +231,13 @@ void arm_main(const void *dtb, u64 base) {
     }
     hal_arm_init();
     time_init();
-    linux_start(dtb);                                               /* Linux's drivers, on threads */
+    /* Linux's drivers, on threads - unless the last boot reset the phone while they were
+     * starting: then this boot stays without them and shows that boot's log */
+    if (plog_last_boot_failed()) {
+        klog("safe boot: the last boot reset while Linux's drivers were starting (%d lines kept); Linux stays off",
+             plog_prev_lines());
+        logview_show_previous();
+    } else linux_start(dtb);
     shell_main();
     panic("the shell returned");
 }

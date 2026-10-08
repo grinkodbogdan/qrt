@@ -58,3 +58,14 @@ int   virtio_input_poll(event_t *out, int max);
 /* msm.c: Qualcomm MSM8953 (Xiaomi Mi A1): volume key GPIO */
 int   msm_init(void);
 int   msm_poll(event_t *out, int max);
+
+/* plog.c: the log kept across a reset (the ramoops region) */
+enum { PLOG_BOOT = 1, PLOG_LINUX_STARTING = 2, PLOG_LINUX_OK = 3 };
+void  plog_init(u64 base, u64 size);
+void  plog_line(const char *s);
+void  plog_state(int s);
+int   plog_last_boot_failed(void);
+int   plog_prev_lines(void);
+const char *plog_prev_line(int i);
+/* logview.c */
+void  logview_show_previous(void);

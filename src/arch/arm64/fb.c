@@ -45,12 +45,12 @@ static int ramfb_init(void) {
         if (*p == 'x') for (p++; *p >= '0' && *p <= '9'; p++) c = c * 10 + (u32)(*p - '0');
         if (a >= 320 && c >= 320 && a <= 4096 && c <= 4096) { w = a; h = c; }
     }
-    /* the buffer: the top of the first RAM bank (kept out of the heap as a hole) */
+    /* the buffer: near the top of the first RAM bank (kept out of the heap as a hole) */
     int mem = fdt_node("/memory");
     u64 rb, rs;
     if (mem < 0 || !fdt_reg(mem, 0, &rb, &rs)) return 0;
     u64 bytes = ((u64)w * h * 4 + 0x1fffff) & ~0x1fffffull;
-    u64 base = (rb + rs - bytes) & ~0x1fffffull;
+    u64 base = (rb + rs - (16ull << 20) - bytes) & ~0x1fffffull;   /* clear of anything kept at the very top */
     static struct __attribute__((packed)) { u64 addr; u32 fourcc, flags, width, height, stride; } rc;
     rc.addr = __builtin_bswap64(base);
     rc.fourcc = be32(0x34325258);                       /* XR24: XRGB8888 */

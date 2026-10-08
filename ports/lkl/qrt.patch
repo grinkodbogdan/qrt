@@ -544,3 +544,24 @@ index 57b075200..dbb80f472 100644
  }
  
  static void __init lkl_run_kernel(void *arg)
+diff --git a/drivers/pmdomain/qcom/rpmpd.c b/drivers/pmdomain/qcom/rpmpd.c
+index 0be6b3026..23c62afcf 100644
+--- a/drivers/pmdomain/qcom/rpmpd.c
++++ b/drivers/pmdomain/qcom/rpmpd.c
+@@ -1144,6 +1144,16 @@ static void rpmpd_sync_state(struct device *dev)
+ 	unsigned int i;
+ 	int ret;
+ 
++	/*
++	 * QRT: only some of the SoC's drivers run inside QRT; the rails the
++	 * others need (CX, MX for memory) must keep the boot loader's votes,
++	 * so the corners are never lowered to what Linux alone asked for.
++	 */
++	if (IS_ENABLED(CONFIG_LKL_QRT_SOC)) {
++		dev_info(dev, "QRT: keeping the boot loader's corners\n");
++		return;
++	}
++
+ 	mutex_lock(&rpmpd_lock);
+ 	for (i = 0; i < desc->num_pds; i++) {
+ 		pd = rpmpds[i];

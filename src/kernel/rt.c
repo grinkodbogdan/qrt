@@ -284,6 +284,9 @@ void klog(const char *f, ...) {
 #endif
     strlcpy(log_ring[log_count % LOG_LINES], line, sizeof line);
     log_count++;
+#if defined(__aarch64__)
+    plog_line(line);                     /* kept across a reset (plog.c) */
+#endif
     if (k.native || k.graphics_up) {
         if (uart_present()) { uart_write(line); uart_write("\n"); }
 #if defined(__x86_64__) || defined(__aarch64__)

@@ -189,6 +189,32 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.18.1: the Mi A1 reset - the likely cause, and a log that survives it
+
+0.18.0 showed the home screen on the Mi A1 and then the phone reset.
+
+- **The likely cause**: Linux's RPM power-domain driver (rpmpd), once boot settles
+  (`sync_state`), lowers the votes for the SoC's CX and MX rails - logic and memory - to
+  what Linux's own drivers asked for.  Inside QRT most of the SoC's drivers do not run,
+  so that is nearly nothing: the rails drop under the CPU and the phone resets.  The LKL
+  patch now keeps the boot loader's votes (`rpmpd_sync_state` does nothing under
+  `LKL_QRT_SOC`).
+- **A log that survives a reset** (`src/arch/arm64/plog.c`): every log line is also
+  written to the device tree's `ramoops` region (1 MB at 0x9ff00000 on the Mi A1, mapped
+  uncached), which a phone's RAM keeps through a reset, with a note of how far the boot
+  got.
+- **Safe boot**: if the last boot reset while Linux's drivers were starting, the next
+  boot leaves Linux off and opens the last boot's log by itself (its end is where the
+  phone reset; Linux now logs every driver it starts - `initcall_debug`), so the next
+  boot after that tries Linux again.
+- Tested in QEMU: a reset while Linux starts -> the next boot is a safe boot showing
+  the last boot's log; a normal boot still runs Linux's drivers (a tap travels Linux's
+  virtio-input driver into the shell).
+
+On the phone: `fastboot boot qrt-0.18.1-mi-a1-boot.img`.  If it still resets, run the
+same `fastboot boot` once more: that boot is a safe boot and shows the last boot's log
+full screen - a photo of it shows which driver reset the phone.
+
 ## 0.18.0: Linux's drivers inside Tessera on the Mi A1
 
 The Mi A1's hardware - touch screen, keys, backlight, eMMC - sits on the Snapdragon 625

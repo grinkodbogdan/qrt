@@ -7,7 +7,8 @@
 #include "arm.h"
 #include "../../ui/gfx.h"
 
-static int on;
+static int on, previous;                 /* previous: the last boot's log (plog.c) */
+void logview_show_previous(void) { on = 1; previous = 1; }
 static u64 presses[3];
 static canvas_t cv;
 
@@ -19,6 +20,7 @@ int logview_key(void) {
     presses[0] = presses[1]; presses[1] = presses[2]; presses[2] = now;
     if (presses[0] && now - presses[0] < 2000) {
         on = !on;
+        previous = 0;
         presses[0] = presses[1] = presses[2] = 0;
         if (!on && cv.px) { canvas_free(&cv); memset(&cv, 0, sizeof cv); }
         return 1;
@@ -36,12 +38,13 @@ void logview_draw(void) {
     const font_t *f = font_pick(F_MONO, k.fb_w >= 1000 ? 26 : 15);
     int lh = k.fb_w >= 1000 ? 32 : 19, rows = ((int)k.fb_h - lh * 2) / lh;
     gfx_fill(&cv, (rect_t){ 0, 0, (int)k.fb_w, (int)k.fb_h }, RGB(12, 12, 16));
-    gfx_text(&cv, f, 8, 4, "QRT kernel log (volume up x3 to close)", RGB(120, 200, 255));
+    gfx_text(&cv, f, 8, 4, previous ? "The LAST boot's log - it reset here (volume up x3 to close)" : "QRT kernel log (volume up x3 to close)",
+             previous ? RGB(255, 200, 120) : RGB(120, 200, 255));
     int n = 0;
-    while (klog_line(n)) n++;
+    if (previous) n = plog_prev_lines(); else while (klog_line(n)) n++;
     int first = n > rows ? n - rows : 0;
     for (int i = first, y = lh + 8; i < n; i++, y += lh) {
-        const char *l = klog_line(i);
+        const char *l = previous ? plog_prev_line(i) : klog_line(i);
         u32 col = !strncmp(l, "linux:", 6) ? RGB(200, 230, 200) : strstr(l, "panic") || strstr(l, "fault") ? RGB(255, 120, 120) : RGB(230, 230, 230);
         gfx_text_fit(&cv, f, 8, y, (int)k.fb_w - 16, l, col);
     }
