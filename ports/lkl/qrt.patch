@@ -590,10 +590,18 @@ index 0be6b3026..23c62afcf 100644
  	for (i = 0; i < desc->num_pds; i++) {
  		pd = rpmpds[i];
 diff --git a/drivers/rpmsg/qcom_smd.c b/drivers/rpmsg/qcom_smd.c
-index 43f601c84..1cb5a2028 100644
+index 43f601c84..9b9f07656 100644
 --- a/drivers/rpmsg/qcom_smd.c
 +++ b/drivers/rpmsg/qcom_smd.c
-@@ -1218,8 +1218,10 @@ static void qcom_channel_scan_worker(struct work_struct *work)
+@@ -774,6 +774,7 @@ static int __qcom_smd_send(struct qcom_smd_channel *channel, const void *data,
+ 		/* Wait without holding the tx_lock */
+ 		spin_unlock_irqrestore(&channel->tx_lock, flags);
+ 
++		pr_info("smd: %s: waiting for room in the FIFO\n", channel->name);	/* QRT */
+ 		ret = wait_event_interruptible(channel->fblockread_event,
+ 				       qcom_smd_get_tx_avail(channel) >= tlen ||
+ 				       channel->state != SMD_CHANNEL_OPENED);
+@@ -1218,8 +1219,10 @@ static void qcom_channel_scan_worker(struct work_struct *work)
  	for (tbl = 0; tbl < SMD_ALLOC_TBL_COUNT; tbl++) {
  		alloc_tbl = qcom_smem_get(edge->remote_pid,
  				    smem_items[tbl].alloc_tbl_id, NULL);
@@ -605,7 +613,7 @@ index 43f601c84..1cb5a2028 100644
  
  		for (i = 0; i < SMD_ALLOC_TBL_SIZE; i++) {
  			entry = &alloc_tbl[i];
-@@ -1251,7 +1253,7 @@ static void qcom_channel_scan_worker(struct work_struct *work)
+@@ -1251,7 +1254,7 @@ static void qcom_channel_scan_worker(struct work_struct *work)
  			list_add(&channel->list, &edge->channels);
  			spin_unlock_irqrestore(&edge->channels_lock, flags);
  
@@ -614,7 +622,7 @@ index 43f601c84..1cb5a2028 100644
  			set_bit(i, edge->allocated[tbl]);
  
  			wake_up_interruptible_all(&edge->new_channel_event);
-@@ -1302,6 +1304,7 @@ static void qcom_channel_state_worker(struct work_struct *work)
+@@ -1302,6 +1305,7 @@ static void qcom_channel_state_worker(struct work_struct *work)
  			continue;
  
  		spin_unlock_irqrestore(&edge->channels_lock, flags);
@@ -623,10 +631,19 @@ index 43f601c84..1cb5a2028 100644
  		spin_lock_irqsave(&edge->channels_lock, flags);
  		channel->registered = true;
 diff --git a/drivers/soc/qcom/smd-rpm.c b/drivers/soc/qcom/smd-rpm.c
-index f2b3e02ab..3052d80fa 100644
+index f2b3e02ab..974f53162 100644
 --- a/drivers/soc/qcom/smd-rpm.c
 +++ b/drivers/soc/qcom/smd-rpm.c
-@@ -132,8 +132,10 @@ int qcom_rpm_smd_write(struct qcom_smd_rpm *rpm,
+@@ -127,15 +127,23 @@ int qcom_rpm_smd_write(struct qcom_smd_rpm *rpm,
+ 	pkt->req.data_len = cpu_to_le32(count);
+ 	memcpy(pkt->payload, buf, count);
+ 
++	if (msg_id <= 4)
++		pr_info("rpm: request %u (type %08x id %u) sending\n", msg_id - 1, type, id);	/* QRT */
+ 	ret = rpmsg_send(rpm->rpm_channel, pkt, size);
++	if (msg_id <= 4)
++		pr_info("rpm: request %u sent (%d)\n", msg_id - 1, ret);	/* QRT */
+ 	if (ret)
  		goto out;
  
  	left = wait_for_completion_timeout(&rpm->ack, RPM_REQUEST_TIMEOUT);
@@ -637,8 +654,12 @@ index f2b3e02ab..3052d80fa 100644
 +	}
  	else
  		ret = rpm->ack_status;
++	if (msg_id <= 4 || ret)
++		pr_info("rpm: request %u answered (%d)\n", msg_id - 1, ret);	/* QRT */
  
-@@ -207,6 +209,7 @@ static int qcom_smd_rpm_probe(struct rpmsg_device *rpdev)
+ out:
+ 	kfree(pkt);
+@@ -207,6 +215,7 @@ static int qcom_smd_rpm_probe(struct rpmsg_device *rpdev)
  	rpm->rpm_channel = rpdev->ept;
  	dev_set_drvdata(&rpdev->dev, rpm);
  

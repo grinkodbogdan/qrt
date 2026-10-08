@@ -11,6 +11,7 @@
  * offsets from Linux's mdp5_cfg.c (msm8x53_config); MDP at 0x1a01000.
  */
 #include "arm.h"
+#include "sched.h"
 
 char fb_what[64] = "none";
 u64 fb_reserve_base, fb_reserve_size;      /* mapped uncached by mmu.c */
@@ -142,6 +143,20 @@ static void row_store(u8 *d, const u8 *s, usize n) {
     while (n--) *d++ = *s++;
 }
 static u64 fb_us, fb_frames;
+/* a command-mode panel shows memory only when told (CTL START), and a START that arrives
+ * while the last transfer is still running is lost: the newest frame would stay unseen
+ * until the next change.  So START again every 16 ms for half a second after a change,
+ * and once a second otherwise */
+static volatile u64 last_present;
+static void refresher(void *a) {
+    (void)a;
+    u64 last_kick = 0;
+    for (;;) {
+        u64 now = k_now_us();
+        if (now - last_present < 500000 || now - last_kick > 1000000) { W32(kick, 1); last_kick = now; }
+        thr_sleep_us(16000);
+    }
+}
 void fb_stats(u64 *frames, u64 *us) { *frames = fb_frames; *us = fb_us; fb_frames = fb_us = 0; }
 void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     if (!fb) return;
@@ -172,5 +187,10 @@ void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     fb_us += k_now_us() - t0;
     fb_frames++;
     __asm__ volatile("dsb sy" ::: "memory");
-    if (kick) W32(kick, 1);
+    if (kick) {
+        W32(kick, 1);
+        last_present = k_now_us();
+        static int started;
+        if (!started) { started = 1; thr_create("display", refresher, NULL, 16 << 10); }
+    }
 }

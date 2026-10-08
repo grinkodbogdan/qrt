@@ -189,6 +189,20 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.19.1: the screen keeps up; tracing the RPM's regulators
+
+- **Stale screen on the Mi A1** (`fb.c`): its panel is in command mode - it shows memory
+  only when the display engine is told to send a frame (CTL START), and a START sent
+  while the previous frame is still going out is lost.  The newest frame could then stay
+  unseen until the next change (half-old screens after a volume change).  A display
+  thread now sends START every 16 ms for half a second after each change, and once a
+  second otherwise.
+- **The RPM link** (0.19.0's log): SMEM is found, the `rpm_requests` channel opens and the
+  RPM driver starts, but the RPM's regulators never appear (2 regulators in all).  This
+  release logs the first RPM requests (sent, answered), a wait for room in the SMD FIFO,
+  and in the summary how many devices each of the RPM regulator, RPM clock, RPM power
+  domain, I2C and SD drivers has.
+
 ## 0.19.0: the Mi A1 bring-up so far
 
 Where the Mi A1 stands, with Linux's own drivers running inside Tessera (LKL):

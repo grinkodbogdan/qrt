@@ -425,6 +425,24 @@ static void linux_summary(void) {
         for (long o = 0; o < len; o += *(u16 *)(d + o + 16)) if (d[o + 19] != '.') nreg++;
         l_close((int)fd);
     }
+    /* the drivers the touch screen and storage need, and how many devices each has */
+    static const char *const drv[] = { "qcom_rpm_smd_regulator", "qcom-clk-smd-rpm", "qcom-rpmpd", "i2c_qup", "sdhci_msm", NULL };
+    char line[160] = "", p[96];
+    for (int i = 0; drv[i]; i++) {
+        fmt(p, sizeof p, "/sys/bus/platform/drivers/%s", drv[i]);
+        int bound = -1;
+        long dfd = l_open(p, 0200000);
+        if (dfd >= 0) {
+            static char d[1024];
+            long len = sys(NR_GETDENTS64, dfd, (long)d, sizeof d, 0, 0);
+            bound = 0;
+            for (long o = 0; o < len; o += *(u16 *)(d + o + 16)) if (d[o + 19] != '.' && (strchr(d + o + 19, '.') || strchr(d + o + 19, ':'))) bound++;
+            l_close((int)dfd);
+        }
+        usize l = strlen(line);
+        fmt(line + l, sizeof line - l, "%s%s %d", i ? ", " : "", drv[i], bound);
+    }
+    klog("linux: drivers (devices bound, -1 = no driver): %s", line);
     klog("linux: %d regulator(s); %d device(s) waiting; %d line(s) to note:", nreg, n, nprob);
     for (int i = 0; i < nprob; i++) klog("linux: ! %s", probs[i]);
 }
