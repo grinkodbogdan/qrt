@@ -23,6 +23,6 @@ SECTIONS {
     _stack_top = .;
     . = ALIGN(4096);
     __bss_end = .;
-    _image_size = .;
+    _image_size = ABSOLUTE(__bss_end - _start);   /* a size, not an address: not relocated */
     /DISCARD/ : { *(.dynsym) *(.dynstr) *(.hash) *(.gnu.hash) *(.interp) *(.eh_frame*) *(.comment) }
 }

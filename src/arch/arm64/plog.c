@@ -65,6 +65,8 @@ void plog_line(const char *s) {
 void plog_state(int s) { if (pl) { pl->state = (u32)s; __asm__ volatile("dsb sy" ::: "memory"); } }
 
 /* the last boot reset the phone while Linux's drivers were starting */
-int plog_last_boot_failed(void) { return prev_state == PLOG_LINUX_STARTING; }
+/* the last boot reset before Linux's drivers had settled (a boot that ended with the
+ * power key held after they had settled does not count) */
+int plog_last_boot_failed(void) { return prev_state == PLOG_BOOT || prev_state == PLOG_LINUX_STARTING; }
 int plog_prev_lines(void) { return nprev; }
 const char *plog_prev_line(int i) { return i >= 0 && i < nprev ? prev[i] : NULL; }

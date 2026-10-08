@@ -41,7 +41,7 @@ void uart_write(const char *s) { for (; *s; s++) { if (*s == '\n') uart_putc('\r
 int  uart_getc(void) { if (!pl011 || (R32(pl011 + 0x18) & (1 << 4))) return -1; return (int)(R32(pl011) & 0xff); }
 u64  uart_rx_count(void) { return 0; }
 
-extern char _start[], _image_size[];
+extern char _start[], __bss_end[];   /* the image: _start .. __bss_end (both relocated) */
 
 /* ---- crashes: the registers on the console and the screen ---- */
 static const char *const kinds[] = { "EL1t sync", "EL1t IRQ", "EL1t FIQ", "EL1t SError", "synchronous exception", "IRQ", "FIQ",
@@ -201,7 +201,7 @@ void arm_main(const void *dtb, u64 base) {
     for (int i = 0; i < nhole; i++) klog("reserved: %llx-%llx", hole[i][0], hole[i][0] + hole[i][1]);
     if (!nram) panic("no /memory in the device tree");
 
-    u64 img_lo = (u64)(usize)_start, img_hi = img_lo + (u64)(usize)_image_size;
+    u64 img_lo = (u64)(usize)_start, img_hi = img_lo + (u64)(__bss_end - _start);
     if (!fb_init()) klog("display: none found");                    /* before the MMU: device reads */
     extern u64 fb_reserve_base, fb_reserve_size;
     add_hole(fb_reserve_base, fb_reserve_size);
@@ -233,7 +233,19 @@ void arm_main(const void *dtb, u64 base) {
     time_init();
     /* Linux's drivers, on threads - unless the last boot reset the phone while they were
      * starting: then this boot stays without them and shows that boot's log */
-    if (plog_last_boot_failed()) {
+    int ch = fdt_node("/chosen"), alen;
+    const char *bootargs = ch >= 0 ? fdt_prop(ch, "bootargs", &alen) : NULL;
+    if (bootargs && strstr(bootargs, "qrt.mmucheck")) {               /* each reserved region's edges */
+        int mmu_attr_at(u64 pa);
+        static const char *const t[] = { "device", "cached", "uncached" };
+        for (int i = 0; i < nhole; i++) {
+            u64 s0 = hole[i][0] & ~0xfffull, e = (hole[i][0] + hole[i][1] + 0xfff) & ~0xfffull;
+            klog("mmu: %llx-%llx: before %s, first %s, last %s, after %s", hole[i][0], hole[i][0] + hole[i][1],
+                 t[mmu_attr_at(s0 - 4096) % 3], t[mmu_attr_at(s0) % 3], t[mmu_attr_at(e - 4096) % 3], t[mmu_attr_at(e) % 3]);
+        }
+    }
+    if (bootargs && strstr(bootargs, "qrt.nolinux")) klog("linux: off (qrt.nolinux)");
+    else if (plog_last_boot_failed()) {
         klog("safe boot: the last boot reset while Linux's drivers were starting (%d lines kept); Linux stays off",
              plog_prev_lines());
         logview_show_previous();

@@ -189,6 +189,27 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.18.2: the Mi A1 reset, found
+
+0.18.0 and 0.18.1 reset the Mi A1 just after the home screen appeared.  The cause was in
+Tessera's own memory map, not in Linux:
+
+- **The kernel's size was read as an address.**  The arm64 kernel is position-
+  independent, and `_image_size` - a linker symbol - was relocated like an address
+  (load address + size).  On the phone (loaded at 0x80008000) "the kernel image" so
+  became about 0x80008000 to past 4 GB: mapped cacheable across the modem's, TrustZone's
+  and the DSPs' memory, swept by a cache-maintenance loop, and kept out of the heap.
+  With 0.17.0's small image nothing touched it; with Linux inside (18 MB) the phone's
+  memory protection reset it.  The size is now `__bss_end - _start`, and the Image
+  header carries the true size (it said 0, so the boot loader did not know how much
+  room the kernel needs).
+- **Reserved memory is mapped to the page.**  Where a reserved region's edge falls
+  inside a 2 MB block, that block is mapped in 4 KB pages, so shared memory Linux reads
+  (SMEM, uncached) never shares a block with TrustZone's memory next to it.  Checked in
+  QEMU with the Mi A1's own device tree (`qrt.mmucheck`: every reserved region's edges).
+- Safe boot also follows a boot that reset before Linux had even started.  The boot
+  options `qrt.nolinux` (Linux off) and `qrt.mmucheck` are for testing.
+
 ## 0.18.1: the Mi A1 reset - the likely cause, and a log that survives it
 
 0.18.0 showed the home screen on the Mi A1 and then the phone reset.

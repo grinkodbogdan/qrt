@@ -4,8 +4,8 @@
  * snooping the caches), everything else device memory; a page allocator over the free
  * RAM; the kernel heap (the same first-fit list as the x86-64 kernel's).
  *
- * 4 KB granule, 39-bit addresses: one level-1 table of 1 GB blocks, with a level-2
- * table of 2 MB blocks where the framebuffer needs a different memory type.
+ * 4 KB granule, 39-bit addresses: 1 GB blocks, 2 MB blocks, and 4 KB pages wherever a
+ * region's edge falls inside a block.
  */
 #include "arm.h"
 
@@ -21,15 +21,18 @@
 #define D_ATTR(i) ((u64)(i) << 2)
 
 #define NL2 16
+#define NL3 96
 static u64 l1[512] __attribute__((aligned(4096)));
 static u64 l2[NL2][512] __attribute__((aligned(4096)));
+static u64 l3[NL3][512] __attribute__((aligned(4096)));
 
-static u64 block(u64 pa, int attr) {
-    u64 d = pa | D_BLOCK | D_AF | D_ATTR(attr);
+static u64 desc(u64 pa, int attr, u64 type) {
+    u64 d = pa | type | D_AF | D_ATTR(attr);
     if (attr == MAIR_DEVICE) d |= D_PXN | D_UXN;
     else d |= D_ISH;
     return d;
 }
+static u64 block(u64 pa, int attr) { return desc(pa, attr, D_BLOCK); }
 
 static int overlaps(u64 a, u64 b, const u64 (*r)[2], int n) {
     for (int i = 0; i < n; i++) if (a < r[i][0] + r[i][1] && b > r[i][0]) return 1;
@@ -39,38 +42,66 @@ static int inside(u64 a, u64 b, const u64 (*r)[2], int n) {
     for (int i = 0; i < n; i++) if (a >= r[i][0] && b <= r[i][0] + r[i][1]) return 1;
     return 0;
 }
+/* a region starts or ends strictly inside (a, b): the range needs finer pages */
+static int edge_in(u64 a, u64 b, const u64 (*r)[2], int n) {
+    for (int i = 0; i < n; i++) {
+        u64 s = r[i][0], e = r[i][0] + r[i][1];
+        if ((s > a && s < b) || (e > a && e < b)) return 1;
+    }
+    return 0;
+}
 
 static void dcache_inval(u64 start, u64 end) {
     for (u64 a = start & ~63ull; a < end; a += 64) __asm__ volatile("dc ivac, %0" : : "r"(a) : "memory");
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
-extern char _start[], _image_size[];
+extern char _start[], __bss_end[];   /* the image: _start .. __bss_end (both relocated) */
 
-/* RAM: 2 MB blocks wholly inside a bank and clear of the firmware's reserved regions
- * (no speculative reads into memory the secure world protects); the framebuffer and
- * the DMA pool (nc) uncached; everything else device memory */
-void mmu_init(const u64 (*ram)[2], int nram, const u64 (*fbr)[2], int nfb, const u64 (*hole)[2], int nhole) {
-    u64 img[1][2] = { { (u64)(usize)_start, (u64)(usize)_image_size } };   /* always runnable */
-    int nl2 = 0;
+static const u64 (*m_ram)[2], (*m_nc)[2], (*m_hole)[2];
+static int m_nram, m_nnc, m_nhole;
+static u64 m_img[1][2];
+
+/* what [a, b) is: the kernel image runs; uncached ranges (framebuffer, DMA pool, shared
+ * memory) are uncached; RAM wholly clear of the firmware's reserved regions is
+ * cacheable; everything else - reserved regions included, so nothing ever reads into
+ * memory the secure world protects, not even speculatively - is device memory */
+static int attr_of(u64 a, u64 b) {
+    if (overlaps(a, b, m_img, 1)) return MAIR_NORMAL;
+    if (inside(a, b, m_nc, m_nnc)) return MAIR_NC;
+    if (inside(a, b, m_ram, m_nram) && !overlaps(a, b, m_hole, m_nhole) && !overlaps(a, b, m_nc, m_nnc)) return MAIR_NORMAL;
+    return MAIR_DEVICE;
+}
+static int mixed(u64 a, u64 b) {
+    return edge_in(a, b, m_img, 1) || edge_in(a, b, m_nc, m_nnc) || edge_in(a, b, m_ram, m_nram) || edge_in(a, b, m_hole, m_nhole);
+}
+
+/* 1 GB blocks, 2 MB blocks where a GB is not uniform, 4 KB pages where a 2 MB block is not
+ * (a reserved region's neighbour must not share its memory type) */
+void mmu_init(const u64 (*ram)[2], int nram, const u64 (*nc)[2], int nnc, const u64 (*hole)[2], int nhole) {
+    m_ram = ram; m_nram = nram; m_nc = nc; m_nnc = nnc; m_hole = hole; m_nhole = nhole;
+    m_img[0][0] = (u64)(usize)_start; m_img[0][1] = (u64)(__bss_end - _start);
+    int nl2 = 0, nl3 = 0;
     for (u64 g = 0; g < 512; g++) {
         u64 lo = g << 30, hi = lo + (1ull << 30);
-        if (!overlaps(lo, hi, ram, nram) && !overlaps(lo, hi, img, 1) && !overlaps(lo, hi, fbr, nfb)) { l1[g] = block(lo, MAIR_DEVICE); continue; }
+        if (!mixed(lo, hi) && attr_of(lo, hi) == MAIR_DEVICE && !overlaps(lo, hi, ram, nram)) { l1[g] = block(lo, MAIR_DEVICE); continue; }
         if (nl2 == NL2) { l1[g] = block(lo, MAIR_DEVICE); continue; }
         u64 *t = l2[nl2++];
         for (u64 i = 0; i < 512; i++) {
             u64 a = lo + (i << 21), b = a + (1ull << 21);
-            int attr = MAIR_DEVICE;
-            if (overlaps(a, b, img, 1)) attr = MAIR_NORMAL;
-            else if (overlaps(a, b, fbr, nfb)) attr = MAIR_NC;
-            else if (inside(a, b, ram, nram) && !overlaps(a, b, hole, nhole)) attr = MAIR_NORMAL;
-            t[i] = block(a, attr);
+            if (!mixed(a, b) || nl3 == NL3) { t[i] = block(a, attr_of(a, b)); continue; }
+            u64 *p = l3[nl3++];
+            for (u64 j = 0; j < 512; j++) {
+                u64 pa = a + (j << 12);
+                p[j] = desc(pa, attr_of(pa, pa + 4096), 3);              /* a page */
+            }
+            t[i] = (u64)(usize)p | D_TABLE;
         }
         l1[g] = (u64)(usize)t | D_TABLE;
     }
     /* RAM the boot loader may have cached before we wrote it with the caches off */
     u64 base = (u64)(usize)_start;
-    dcache_inval(base, base + (u64)(usize)_image_size);
+    dcache_inval(base, base + (u64)(__bss_end - _start));
     SYSREG_W(mair_el1, 0x04ull << (8 * MAIR_DEVICE) | 0xffull << (8 * MAIR_NORMAL) | 0x44ull << (8 * MAIR_NC));
     u64 pa_range = SYSREG_R(id_aa64mmfr0_el1) & 7;
     u64 tcr = 25 | (1ull << 8) | (1ull << 10) | (3ull << 12) | (1ull << 23) | (pa_range << 32);   /* T0SZ 25, WB, ISH, 4K, EPD1 */
@@ -189,4 +220,14 @@ int heap_owns(const void *p) {
     u64 a = (u64)(usize)p;
     for (int i = 0; i < n_arenas; i++) if (a >= arenas[i].start && a < arenas[i].end) return 1;
     return 0;
+}
+
+/* the memory type the tables give an address (the walk the MMU does): for checking */
+int mmu_attr_at(u64 pa) {
+    u64 d = l1[(pa >> 30) & 511];
+    if ((d & 3) == D_TABLE) {
+        d = ((u64 *)(usize)(d & 0xfffffffff000ull))[(pa >> 21) & 511];
+        if ((d & 3) == D_TABLE) d = ((u64 *)(usize)(d & 0xfffffffff000ull))[(pa >> 12) & 511];
+    }
+    return (int)((d >> 2) & 7);
 }
