@@ -431,6 +431,18 @@ index 9652daf7d..0b85696de 100644
  #include <asm-generic/io.h>
  
  #ifdef __clang__
+diff --git a/arch/lkl/include/asm/irq.h b/arch/lkl/include/asm/irq.h
+index e2fbe1a5c..64a5dadd0 100644
+--- a/arch/lkl/include/asm/irq.h
++++ b/arch/lkl/include/asm/irq.h
+@@ -11,4 +11,7 @@ void lkl_put_irq_block(int irq, int nr_irqs, const char *user);
+ 
+ #include <uapi/asm/irq.h>
+ 
++/* the serial core asks for it; LKL's interrupt numbers need no translation */
++#define irq_canonicalize(irq) (irq)
++
+ #endif
 diff --git a/arch/lkl/include/uapi/asm/host_ops.h b/arch/lkl/include/uapi/asm/host_ops.h
 index 673a05951..481f76ac2 100644
 --- a/arch/lkl/include/uapi/asm/host_ops.h
