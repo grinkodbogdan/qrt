@@ -189,6 +189,59 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.17.0: Tessera on 64-bit ARM, a first image for the Xiaomi Mi A1
+
+Tessera now also builds for **64-bit ARM** (`make arm64` -> `build/arm64/Image`), and
+there is a first boot image for the **Xiaomi Mi A1** (`make mi-a1` ->
+`build/arm64/qrt-mi-a1-boot.img`, shipped as `dist/qrt-0.17.0-mi-a1-boot.img`).
+
+- **The same shell and apps**: the shell, the apps, the network stack (TCP, TLS,
+  HTTP), the VFS and the sound mixer are shared code; `src/arch/arm64` is the new
+  platform layer: a Linux-style arm64 `Image` (so Android boot loaders and QEMU load it
+  like a Linux kernel), position-independent and self-relocating, entered at EL2 or EL1
+  with the device tree in x0.
+- **Memory** from the device tree: RAM from `/memory`, minus every `/reserved-memory`
+  region (on a Qualcomm phone the modem, TrustZone and DSP firmware live there - those
+  blocks are mapped as device memory so the CPU never reads into them speculatively);
+  an identity-mapped MMU with caches; the heap and page allocator in the largest free
+  stretch.
+- **Display**: on QEMU, ramfb; on Qualcomm phones the panel the boot loader left on:
+  Tessera reads the MDP5 source pipe's registers (address, size, stride, byte order) and
+  draws into that buffer in its format (RGB888), mapped uncached; a command-mode panel is
+  told to refresh after each frame; if the registers say nothing, the device tree's
+  continuous-splash region is used.
+- **Input**: QEMU's virtio keyboard and tablet (the tablet plays the touch screen); on the
+  Mi A1 the volume-up key (TLMM GPIO 85, from the device tree's gpio-keys).
+- **Clock**: the ARM generic timer; the wall clock from a PL031 RTC (QEMU).
+- One core and no interrupts yet - the shell polls, as Tessera did on the firmware.
+- **Tested in QEMU** (`tools/run-qemu-arm.sh`: virt board, Cortex-A53 like the Mi A1,
+  GICv2, a 720 x 1280 screen): boots to the home screen in 1.7 s, taps open Settings and
+  Files, the ramdisk's files are in the file tree.
+
+### Trying it on the Mi A1 (unlocked boot loader)
+
+Nothing is written to the phone: `fastboot boot` runs the image once from RAM.
+
+1. Power off; hold **volume down + power** for the fastboot screen; connect USB.
+2. `fastboot boot qrt-0.17.0-mi-a1-boot.img`
+3. Expected: QRT's home screen (clock, dock) on the panel, drawn into the boot
+   loader's framebuffer.  Volume up works; **touch does not yet** (see below).
+4. To leave: hold **power** for about 10 seconds (the PMIC's hard reset); Android boots
+   as before.
+
+If the screen stays black, keeps the fastboot picture, or the colours are swapped,
+a photo tells me which of the display paths to fix.
+
+### What the Mi A1 still needs
+
+The phone's devices are not on a bus Tessera can enumerate; they sit on the SoC and
+work only after clocks, power rails (through the RPM co-processor), pins and
+interconnects are set up - Linux does that with its Qualcomm drivers.  The plan is the
+0.16.0 approach on ARM: the Linux driver host (LKL for arm64) given the device tree,
+the SoC's register ranges and its interrupt lines, running Linux's own drivers for the
+touch screen (FocalTech FT5x06 on I2C), USB, eMMC, Wi-Fi (WCN3680), sound and the
+display.  That needs processes and the Linux system-call layer on ARM first - next.
+
 ## 0.16.0: any hardware Linux has a driver for
 
 0.15.0 ran one Linux driver (e1000e) for one device.  0.16.0 makes Linux's driver

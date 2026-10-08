@@ -59,7 +59,12 @@ void time_init(void) {
     tz_offset = tz_known ? (i32)tz : 0;
     EFI_TIME t;
     memset(&t, 0, sizeof t);
+#if defined(__aarch64__)
+    int arm_rtc_get(EFI_TIME *t);                    /* src/arch/arm64/hal.c */
+    rtc_ok = arm_rtc_get(&t) && t.Year >= 1970 && t.Month >= 1 && t.Month <= 12 && t.Day >= 1 && t.Day <= 31;
+#else
     rtc_ok = !EFI_ERROR(k.rt->GetTime(&t, NULL)) && t.Year >= 1970 && t.Month >= 1 && t.Month <= 12 && t.Day >= 1 && t.Day <= 31;
+#endif
     i64 now_s = (i64)(k_now_ms() / 1000);
     if (rtc_ok) rtc_local_at_boot = secs_of(&t) - now_s;
     i64 utc = rtc_ok ? secs_of(&t) - tz_offset : 0;
@@ -85,6 +90,11 @@ int time_zone_known(void) { return tz_known; }
 static void rtc_write(void) {
     EFI_TIME t;
     civil_from_secs((i64)time_utc() + tz_offset, &t);
+#if defined(__aarch64__)
+    int arm_rtc_set(const EFI_TIME *t);
+    if (!arm_rtc_set(&t)) klog("clock: no writable RTC");
+    return;
+#endif
 #if defined(__x86_64__)
     u64 fl = k.native ? irq_save() : 0;
 #endif

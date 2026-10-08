@@ -304,11 +304,15 @@ int ccm_decrypt(const aes128_t *a, const u8 nonce[13], const u8 *aad, usize alen
 }
 
 /* ---- randomness: RDRAND when the CPU has it, else hashed TSC jitter ---------------- */
+#if defined(__aarch64__)
+static int have_rdrand(void) { return 0; }
+#else
 static int have_rdrand(void) {
     u32 a = 1, b, c, d;
     __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
     return (c >> 30) & 1;
 }
+#endif
 
 void random_bytes(u8 *out, usize n) {
     static u8 pool[20];
@@ -316,6 +320,7 @@ void random_bytes(u8 *out, usize n) {
     int hw = have_rdrand();
     while (n) {
         u8 blk[20];
+#if !defined(__aarch64__)
         if (hw) {
             u32 v[5];
             for (int i = 0; i < 5; i++) {
@@ -326,6 +331,11 @@ void random_bytes(u8 *out, usize n) {
         }
         u32 lo, hi;
         __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+#else
+        u64 cnt;                                      /* the counter's low bits: timing jitter */
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cnt));
+        u32 lo = (u32)cnt, hi = (u32)(cnt >> 32);
+#endif
         struct { u8 pool[20]; u64 tsc, ctr; u8 hw[20]; } mix;
         memcpy(mix.pool, pool, 20);
         mix.tsc = ((u64)hi << 32) | lo;

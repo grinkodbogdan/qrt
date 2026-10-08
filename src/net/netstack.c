@@ -17,7 +17,11 @@ void net_lock(void) {
 #if defined(__x86_64__)
         if (k.native) thread_yield(); else
 #endif
+#if defined(__aarch64__)
+        __asm__ volatile("yield");
+#else
         __asm__ volatile("pause");
+#endif
     }
 #if defined(__x86_64__)
     if (k.native) owner = thread_current();

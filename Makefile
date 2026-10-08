@@ -50,7 +50,7 @@ OVMF32VAR := $(OVMF_DIR)/OVMF32_VARS_4M.fd
 OVMF64    := $(OVMF_DIR)/OVMF_CODE_4M.fd
 OVMF64VAR := $(OVMF_DIR)/OVMF_VARS_4M.fd
 
-.PHONY: check-tls all efi run run64 test check clean fonts
+.PHONY: check-tls all efi run run64 test check clean fonts arm64 mi-a1 dts-tissot
 
 all: build/qrt.img
 
@@ -96,6 +96,50 @@ build/BOOTX64.EFI: $(X64_OBJ) tools/symtab.py
 	$(PYTHON) tools/symtab.py build/x64/sym/pass1.map build/x64/sym/symtab.c
 	$(CC) $(CFLAGS) $(X64_CFLAGS) -c build/x64/sym/symtab.c -o build/x64/sym/symtab.o
 	$(LINK) $(LDFLAGS) -machine:x64 -map:build/BOOTX64.map -out:$@ $(X64_OBJ) build/x64/sym/symtab.o
+
+# ---- 64-bit ARM (QEMU virt, Xiaomi Mi A1): build/arm64/Image, a Linux-style arm64 kernel image ----
+ARM_SHARED := src/kernel/rt.c src/kernel/vfs.c src/kernel/sound.c src/kernel/time.c \
+              src/ui/gfx.c src/ui/shell.c src/ui/clientwin.c src/ui/fontdata.c src/ui/osk.c \
+              src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c src/apps/settings.c src/apps/life.c \
+              src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/apps/browser.c src/apps/bluetooth.c src/apps/html.c \
+              src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c \
+              src/net/wlan.c src/net/netstack.c src/drivers/hidparse.c src/drivers/hidmouse.c
+ARM_SRC    := $(wildcard src/arch/arm64/*.c)
+ARM_OBJ    := $(ARM_SHARED:src/%.c=build/arm64/%.o) $(ARM_SRC:src/%.c=build/arm64/%.o) build/arm64/arch/arm64/boot.o
+ARM_CFLAGS := -target aarch64-none-elf -fpie -mno-outline-atomics -mstrict-align
+
+build/arm64/kernel/time.o: CFLAGS += -DQRT_BUILD_EPOCH=$(shell git log -1 --format=%ct 2>/dev/null || echo 1767225600)ull
+build/arm64/%.o: src/%.c $(wildcard src/*.h src/*/*.h src/*/*/*.h)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(ARM_CFLAGS) -c $< -o $@
+build/arm64/%.o: src/%.S
+	@mkdir -p $(dir $@)
+	$(CC) -target aarch64-none-elf -c $< -o $@
+build/arm64/qrt.elf: $(ARM_OBJ) src/arch/arm64/link.ld
+	ld.lld -pie --no-dynamic-linker -z notext -T src/arch/arm64/link.ld -o $@ $(ARM_OBJ)
+build/arm64/Image: build/arm64/qrt.elf
+	llvm-objcopy -O binary $< $@
+arm64: build/arm64/Image
+
+# Xiaomi Mi A1 (tissot): an Android boot image - Image.gz with the mainline device tree
+# appended (as aboot wants it), a small ramdisk (a cpio archive: the file tree).
+# Try it without flashing: fastboot boot build/arm64/qrt-mi-a1-boot.img
+# the device tree: mainline Linux 6.12's msm8953-xiaomi-tissot.dts, compiled into
+# src/arch/arm64/dts (regenerate with: make dts-tissot LINUX_DTS=<a Linux 6.12 tree>)
+build/arm64/tissot.dtb: src/arch/arm64/dts/msm8953-xiaomi-tissot.dtb
+	@mkdir -p $(dir $@)
+	cp $< $@
+dts-tissot:
+	@test -n "$(LINUX_DTS)" || { echo "set LINUX_DTS to a Linux 6.12 tree"; exit 1; }
+	cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp -I $(LINUX_DTS)/include -I $(LINUX_DTS)/arch/arm64/boot/dts/qcom \
+	    -I $(LINUX_DTS)/scripts/dtc/include-prefixes $(LINUX_DTS)/arch/arm64/boot/dts/qcom/msm8953-xiaomi-tissot.dts | dtc -q -I dts -O dtb -o src/arch/arm64/dts/msm8953-xiaomi-tissot.dtb -
+build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null)
+	$(PYTHON) tools/mkcpio.py src/arch/arm64/rootfs $@
+build/arm64/qrt-mi-a1-boot.img: build/arm64/Image build/arm64/tissot.dtb build/arm64/ramdisk.cpio
+	gzip -9nc build/arm64/Image > build/arm64/Image.gz
+	cat build/arm64/Image.gz build/arm64/tissot.dtb > build/arm64/Image.gz-dtb
+	$(PYTHON) tools/mkbootimg.py build/arm64/Image.gz-dtb build/arm64/ramdisk.cpio $@ "qrt"
+mi-a1: build/arm64/qrt-mi-a1-boot.img
 
 # Linux programs shipped in /bin (run by the native kernel's Linux layer)
 BUSYBOX ?= /bin/busybox

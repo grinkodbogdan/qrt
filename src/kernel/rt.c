@@ -8,8 +8,29 @@
 #if defined(__x86_64__)
 #include "../arch/x64/mm.h"
 void native_panic(const char *what, void *frame);
+#elif defined(__aarch64__)
+#include "../arch/arm64/arm.h"
 #endif
 
+#if defined(__aarch64__)
+/* ARM64: word loops (-ffreestanding keeps the compiler from making them calls to themselves) */
+void *memset(void *d, int c, usize n) {
+    u8 *p = d;
+    u64 w = (u8)c * 0x0101010101010101ull;
+    while (n && ((usize)p & 7)) { *p++ = (u8)c; n--; }
+    for (; n >= 8; n -= 8, p += 8) *(volatile u64 *)p = w;
+    while (n--) *p++ = (u8)c;
+    return d;
+}
+void *memcpy(void *d, const void *s, usize n) {
+    u8 *dp = d;
+    const u8 *sp = s;
+    if ((((usize)dp | (usize)sp) & 7) == 0)
+        for (; n >= 8; n -= 8, dp += 8, sp += 8) *(volatile u64 *)dp = *(const u64 *)sp;
+    while (n--) *dp++ = *sp++;
+    return d;
+}
+#else
 void *memset(void *d, int c, usize n) {
     void *p = d;
     __asm__ volatile("rep stosb" : "+D"(p), "+c"(n) : "a"(c) : "memory");
@@ -29,6 +50,7 @@ void *memcpy(void *d, const void *s, usize n) {
     __asm__ volatile("rep movsb" : "+D"(dst), "+S"(s), "+c"(tail) : : "memory");
     return d;
 }
+#endif
 
 void *memmove(void *d, const void *s, usize n) {
     u8 *dp = d;
@@ -221,7 +243,7 @@ void fmt_bytes(char *buf, usize cap, u64 b) {
 /* ---- memory: the firmware's pool allocator is our heap ---------------- */
 /* The firmware's pool while it runs; the kernel heap afterwards. */
 void *kalloc(usize n) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     if (k.native) return heap_alloc(n);
 #endif
     void *p = NULL;
@@ -233,7 +255,7 @@ void *kalloc(usize n) {
 
 void kfree(void *p) {
     if (!p) return;
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     if (k.native) {                 /* pool blocks from before the handover are simply kept */
         if (heap_owns(p)) heap_free(p);
         return;
@@ -257,14 +279,14 @@ void klog(const char *f, ...) {
     va_end(ap);
     /* one line at a time: a thread preempted halfway through its line would let another
      * line land in the middle of it (the QEMU test reads the log back) */
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     u64 fl = k.native ? irq_save() : 0;
 #endif
     strlcpy(log_ring[log_count % LOG_LINES], line, sizeof line);
     log_count++;
     if (k.native || k.graphics_up) {
         if (uart_present()) { uart_write(line); uart_write("\n"); }
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
         if (k.native) irq_restore(fl);
 #endif
     } else if (k.st && k.st->ConOut) {
@@ -282,7 +304,7 @@ const char *klog_line(int i) {
 }
 
 void panic(const char *msg) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     if (k.native) native_panic(msg, NULL);
 #endif
     k.graphics_up = 0;
