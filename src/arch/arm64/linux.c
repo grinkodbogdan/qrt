@@ -140,14 +140,18 @@ static thr_t *timer_thr;
 static void *h_timer_alloc(void (*fn)(void)) {
     struct qtimer *t = kalloc(sizeof *t);
     t->fn = fn;
+    u64 f = irq_save();
     t->next = timers;
     timers = t;
+    irq_restore(f);
     return t;
 }
 static int h_timer_set(void *p, unsigned long ns) {
     struct qtimer *t = p;
+    u64 f = irq_save();
     t->due = k_now_us() + ns / 1000;
     t->armed = 1;
+    irq_restore(f);
     thr_wake(timer_thr);
     return 0;
 }
@@ -156,11 +160,14 @@ static void timer_loop(void *a) {
     (void)a;
     for (;;) {
         u64 now = k_now_us(), next = now + 10000;
-        for (struct qtimer *t = timers; t; t = t->next)
-            if (t->armed) {
-                if (t->due <= now) { t->armed = 0; t->fn(); now = k_now_us(); }
-                else if (t->due < next) next = t->due;
-            }
+        for (struct qtimer *t = timers; t; t = t->next) {
+            u64 f = irq_save();
+            int fire = t->armed && t->due <= now;
+            if (fire) t->armed = 0;
+            else if (t->armed && t->due < next) next = t->due;
+            irq_restore(f);
+            if (fire) { t->fn(); now = k_now_us(); }
+        }
         thr_sleep_until(next);
     }
 }
@@ -179,18 +186,14 @@ static struct lkl_host_operations ops = {
     .memcpy = h_memcpy, .memset = h_memset, .memmove = h_memmove,
 };
 
-/* ---- interrupts: the GIC's CPU interface, polled (our own interrupts stay masked) ---- */
+/* ---- interrupts: Linux's SPIs, pending and enabled in the distributor (gic.c) ---- */
 static u64 nirq;
+int gic_pending(void (*fn)(u32 id));
+static void deliver(u32 id) { lkl_trigger_irq(1024 + (int)id); nirq++; }
 static void irq_loop(void *a) {
     (void)a;
     for (;;) {
-        u64 c = qrt_gic_cpu_base;
-        for (int n = 0; c && n < 64; n++) {
-            u32 iar = R32(c + 0x0c), id = iar & 0x3ff;
-            if (id >= 1020) break;                                 /* nothing pending */
-            if (id >= 16) { lkl_trigger_irq(1024 + (int)id); nirq++; }
-            W32(c + 0x10, iar);                                    /* EOI */
-        }
+        gic_pending(deliver);
         thr_sleep_us(1000);
     }
 }
@@ -199,14 +202,18 @@ static void irq_loop(void *a) {
 static event_t inq[64];
 static int inq_n;
 static void inq_put(event_t e) {
-    if (e.type == EV_MOVE && inq_n && inq[inq_n - 1].type == EV_MOVE) { inq[inq_n - 1] = e; return; }
-    if (inq_n < (int)ARRAY_LEN(inq)) inq[inq_n++] = e;
+    u64 f = irq_save();
+    if (e.type == EV_MOVE && inq_n && inq[inq_n - 1].type == EV_MOVE) inq[inq_n - 1] = e;
+    else if (inq_n < (int)ARRAY_LEN(inq)) inq[inq_n++] = e;
+    irq_restore(f);
 }
 int linux_input_poll(event_t *out, int max) {
+    u64 f = irq_save();
     int n = MIN(inq_n, max);
     memcpy(out, inq, (usize)n * sizeof *out);
     memmove(inq, inq + n, (usize)(inq_n - n) * sizeof *inq);
     inq_n -= n;
+    irq_restore(f);
     return n;
 }
 
@@ -259,6 +266,8 @@ static void input_loop(void *arg) {
 }
 
 static struct indev indevs[8];
+static int have_keys, have_touch;
+int linux_has_keys(void) { return have_keys; }
 static int bit(const u8 *b, int n) { return b[n / 8] >> (n % 8) & 1; }
 static void input_open(const char *name) {
     for (int i = 0; i < 8; i++) if (indevs[i].fd > 0 && !strcmp(indevs[i].name, name)) return;
@@ -284,6 +293,8 @@ static void input_open(const char *name) {
     char nm[64] = "";
     l_ioctl((int)fd, EVIOCGNAME(sizeof nm - 1), nm);
     klog("linux: %s (%s) into Tessera's input%s", name, nm, d->abs ? " (touch)" : "");
+    if (strstr(nm, "gpio-keys") || strstr(nm, "gpio_keys")) have_keys = 1;
+    if (d->abs) have_touch = 1;
     thr_create("evdev", input_loop, d, 32 << 10);
 }
 static void input_scan(void *a) {
@@ -369,7 +380,13 @@ static void linux_main(void *a) {
     sys(NR_MOUNT, (long)"sysfs", (long)"/sys", (long)"sysfs", 0, 0);
     sys(NR_MOUNT, (long)"devtmpfs", (long)"/dev", (long)"devtmpfs", 0, 0);
     thr_create("evdev scan", input_scan, NULL, 32 << 10);
-    thr_sleep_us(40ull * 1000000);                                  /* settled: probes, deferred probes, sync_state */
+    thr_sleep_us(30ull * 1000000);
+    if (!have_touch && !dead) {                                     /* no touch screen: the log says why */
+        klog("linux: no touch screen 30 s after boot - showing the log (volume up x3 closes it)");
+        void logview_show_current(void);
+        logview_show_current();
+    }
+    thr_sleep_us(10ull * 1000000);                                  /* settled: probes, deferred probes, sync_state */
     if (!dead) { plog_state(PLOG_LINUX_OK); klog("linux: drivers settled"); }
 }
 
@@ -385,6 +402,7 @@ const char *linux_status(char *buf, int cap) {
     return buf;
 }
 #else
+int linux_has_keys(void) { return 0; }
 void linux_failed(const char *why) { (void)why; }
 int linux_backlight_set(int pct) { (void)pct; return -1; }
 int linux_backlight_present(void) { return 0; }

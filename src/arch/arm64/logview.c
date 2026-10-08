@@ -9,6 +9,7 @@
 
 static int on, previous;                 /* previous: the last boot's log (plog.c) */
 void logview_show_previous(void) { on = 1; previous = 1; }
+void logview_show_current(void) { on = 1; previous = 0; }
 static u64 presses[3];
 static canvas_t cv;
 

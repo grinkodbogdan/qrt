@@ -63,7 +63,10 @@ void native_panic(const char *what, void *frame) {
     for (;;) __asm__ volatile("wfe");
 }
 void linux_failed(const char *why);
+void gic_irq(void);
+int  gic_init(void);
 void arm_exception(u64 kind, u64 *frame) {
+    if (kind == 5) { gic_irq(); return; }                         /* EL1h IRQ: the scheduler's tick */
     char m[96];
     fmt(m, sizeof m, "%s at %llx (ESR %llx, address %llx)", kind < 12 ? kinds[kind] : "exception", frame[31],
         SYSREG_R(esr_el1), SYSREG_R(far_el1));
@@ -231,6 +234,7 @@ void arm_main(const void *dtb, u64 base) {
     }
     hal_arm_init();
     time_init();
+    if (gic_init()) __asm__ volatile("msr daifclr, #2");          /* preemption from here on */
     /* Linux's drivers, on threads - unless the last boot reset the phone while they were
      * starting: then this boot stays without them and shows that boot's log */
     int ch = fdt_node("/chosen"), alen;

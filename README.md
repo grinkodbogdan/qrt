@@ -189,6 +189,27 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.18.3: preemption, sturdier interrupts, the log when touch is missing
+
+0.18.2 reached the home screen on the Mi A1 but nothing responded.
+
+- **Preemptive threads** (`sched.c`, `gic.c`): the ARM generic timer interrupts every
+  10 ms and the scheduler gives the CPU to the next ready thread.  Before, a Linux driver
+  that spins on a register (common on real hardware) kept the shell, the timer thread
+  and the interrupt thread from running at all.  Every scheduler, semaphore and mutex
+  operation now runs with interrupts masked; each thread keeps its own interrupt mask
+  across a switch.
+- **Interrupts**: Tessera owns the GIC's CPU interface (its timer, PPI 27).  Linux's
+  device interrupts (SPIs) sit under the CPU interface's priority mask, never
+  interrupting the CPU; the interrupt thread finds them pending and enabled in the
+  distributor and runs Linux's handlers (edge-triggered ones are cleared first).  The
+  LKL irqchip no longer touches the CPU interface, SGIs or PPIs.
+- **Volume up keeps working** natively until Linux's gpio-keys device exists, so the log
+  page (volume up x3) always opens.  **No touch screen 30 seconds after boot: the log
+  opens by itself** - a photo of it is what is needed.
+- Tested in QEMU: Linux boots on the preemptive threads; a tap goes through Linux's
+  virtio-input driver into the shell.
+
 ## 0.18.2: the Mi A1 reset, found
 
 0.18.0 and 0.18.1 reset the Mi A1 just after the home screen appeared.  The cause was in

@@ -34,7 +34,7 @@ index ffb706aa7..84a45e80f 100644
 +	depends on LKL_QRT_SOC
 +	default n
 diff --git a/arch/lkl/Makefile b/arch/lkl/Makefile
-index 003ca5a75..261cda7ab 100644
+index 003ca5a75..5d0e8b6e4 100644
 --- a/arch/lkl/Makefile
 +++ b/arch/lkl/Makefile
 @@ -50,7 +50,7 @@ endif
@@ -42,7 +42,7 @@ index 003ca5a75..261cda7ab 100644
  
  LDFLAGS_vmlinux += -r
 -LKL_ENTRY_POINTS := lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
-+LKL_ENTRY_POINTS := lkl_qrt_idle lkl_qrt_fdt lkl_qrt_dma_base lkl_qrt_dma_size qrt_gic_cpu_base lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
++LKL_ENTRY_POINTS := lkl_qrt_idle lkl_qrt_fdt lkl_qrt_dma_base lkl_qrt_dma_size qrt_gic_cpu_base qrt_gic_lines lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
  	lkl_get_free_irq lkl_put_irq lkl_is_running lkl_bug lkl_printf \
  	lkl_init lkl_cleanup
  
@@ -190,16 +190,18 @@ index f4e969fb8..45be9bfdc 100644
  
 diff --git a/arch/lkl/drivers/qrt-gic.c b/arch/lkl/drivers/qrt-gic.c
 new file mode 100644
-index 000000000..4cca3deed
+index 000000000..a84735768
 --- /dev/null
 +++ b/arch/lkl/drivers/qrt-gic.c
 @@ -0,0 +1,122 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * QRT: the ARM GICv2 distributor as Linux's interrupt controller inside QRT's
-+ * kernel.  Linux masks, unmasks and configures its interrupts here; the host
-+ * takes them from the CPU interface (GICC_IAR) with its own interrupts masked,
-+ * runs lkl_trigger_irq(QRT_GIC_VIRQ_BASE + id) and writes GICC_EOIR.
++ * kernel.  Linux masks, unmasks and configures its shared interrupts (SPIs)
++ * here; they sit below the CPU interface's priority mask, so they never
++ * interrupt the CPU: the host finds them pending and enabled in the
++ * distributor and runs lkl_trigger_irq(QRT_GIC_VIRQ_BASE + id).  The CPU
++ * interface, SGIs and PPIs are the host's (its scheduler's timer).
 + * hwirq n is Linux irq QRT_GIC_VIRQ_BASE + n (a legacy domain).
 + */
 +#include <linux/init.h>
@@ -214,8 +216,10 @@ index 000000000..4cca3deed
 +#define QRT_GIC_NR 1020
 +
 +static void __iomem *dist;
-+unsigned long qrt_gic_cpu_base;		/* the host's poller reads this */
++unsigned long qrt_gic_cpu_base;		/* the distributor, for the host's poller */
 +EXPORT_SYMBOL(qrt_gic_cpu_base);
++unsigned long qrt_gic_lines;
++EXPORT_SYMBOL(qrt_gic_lines);
 +
 +static void qrt_gic_mask(struct irq_data *d)
 +{
@@ -286,25 +290,21 @@ index 000000000..4cca3deed
 +static int __init qrt_gic_init(struct device_node *node,
 +			       struct device_node *parent)
 +{
-+	void __iomem *cpu;
 +	u32 lines, i;
 +
 +	dist = of_iomap(node, 0);
-+	cpu = of_iomap(node, 1);
-+	if (!dist || !cpu)
++	if (!dist)
 +		return -ENOMEM;
 +	lines = min_t(u32, 32 * ((readl_relaxed(dist + 0x004) & 0x1f) + 1), QRT_GIC_NR);
-+	writel_relaxed(0, dist);			/* off while we set it up */
-+	for (i = 0; i < lines; i += 32)
-+		writel_relaxed(~0u, dist + 0x180 + i / 8);	/* everything masked */
++	for (i = 32; i < lines; i += 32)
++		writel_relaxed(~0u, dist + 0x180 + i / 8);	/* SPIs masked */
 +	for (i = 32; i < lines; i += 4)
 +		writel_relaxed(0x01010101, dist + 0x800 + i);	/* to CPU 0 */
-+	for (i = 0; i < lines; i += 4)
-+		writel_relaxed(0xa0a0a0a0, dist + 0x400 + i);	/* one priority */
++	for (i = 32; i < lines; i += 4)
++		writel_relaxed(0xa0a0a0a0, dist + 0x400 + i);	/* under the host's mask */
 +	writel_relaxed(1, dist);
-+	writel_relaxed(0xf0, cpu + 0x04);		/* GICC_PMR */
-+	writel_relaxed(1, cpu);				/* GICC_CTLR */
-+	qrt_gic_cpu_base = (unsigned long)cpu;
++	qrt_gic_lines = lines;
++	qrt_gic_cpu_base = (unsigned long)dist;
 +	if (!irq_domain_add_legacy(node, lines, QRT_GIC_VIRQ_BASE, 0,
 +				   &qrt_gic_ops, NULL))
 +		return -ENOMEM;

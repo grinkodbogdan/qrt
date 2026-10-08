@@ -33,3 +33,5 @@ void  tls_put(int k, void *v);
 void *tls_fetch(int k);
 int   thr_is_main(void);
 void  thr_park(void);
+void  thr_tick(void);                /* the timer interrupt (gic.c) */
+u64   thr_switches(void);

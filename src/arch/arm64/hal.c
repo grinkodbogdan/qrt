@@ -55,7 +55,8 @@ static int serial_keys(event_t *out, int max) {
 
 int hal_poll(event_t *out, int max) {
     int n = virtio_input_poll(out, max);
-    if (!linux_running()) n += msm_poll(out + n, max - n);   /* until Linux's gpio-keys has the key */
+    int linux_has_keys(void);
+    if (!linux_has_keys()) n += msm_poll(out + n, max - n);  /* until Linux's gpio-keys has the key */
     n += linux_input_poll(out + n, max - n);
     /* volume up x3: the full-screen log (logview.c); while it is up, input goes nowhere */
     int m = 0;
