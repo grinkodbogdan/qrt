@@ -189,6 +189,22 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.19.4: reliable I2C for the touch screen
+
+0.19.3 on the Mi A1: the touch controller's probe failed with -ETIMEDOUT after 15 s
+(0.19.2's log already had "Unable to fetch data, error: -110" from it).
+
+- **I2C by the CPU** (`drivers/i2c/busses/i2c-qup.c` in `qrt.patch`): the QUP I2C
+  controller moved longer transfers (the touch reports) with the BAM DMA engine, and
+  those timed out.  Under QRT it now always uses its FIFO, filled and drained by the CPU
+  on the controller's own interrupt.  A transfer that still times out is logged with the
+  controller's state.
+- **udelay** (`linux.c`, `main.c`): Linux's busy-wait delays read the host's clock, which
+  counted whole microseconds - `udelay(1)`, which the I2C driver waits with for a state
+  change, could return at once.  The clock is now the ARM counter in nanoseconds.
+- The summary lists the device interrupts Linux has received (SPI and count), so a
+  device whose interrupt never comes shows.
+
 ## 0.19.3: a clean screen and quicker touch on the Mi A1
 
 0.19.2 on the Mi A1: the screen kept up, the RPM's 22 regulators came up and with them

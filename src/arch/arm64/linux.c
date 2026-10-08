@@ -131,7 +131,8 @@ static void *h_mem_alloc(unsigned long n) { return kalloc(n); }
 static void h_mem_free(void *p) { kfree(p); }
 static void *h_page_alloc(unsigned long n) { return (void *)(usize)pmm_alloc_contig((n + 4095) / 4096); }
 static void h_page_free(void *p, unsigned long n) { (void)p; (void)n; }
-static unsigned long long h_time(void) { return k_now_us() * 1000ull; }
+u64 k_now_ns(void);
+static unsigned long long h_time(void) { return k_now_ns(); }
 static void *h_ioremap(long addr, int size) { (void)size; return (void *)(usize)addr; }
 static int h_iomem(const volatile void *a, void *v, int size, int write) {
     switch (size) {
@@ -211,7 +212,8 @@ static struct lkl_host_operations ops = {
 /* ---- interrupts: Linux's SPIs, pending and enabled in the distributor (gic.c) ---- */
 static u64 nirq;
 int gic_pending(void (*fn)(u32 id));
-static void deliver(u32 id) { lkl_trigger_irq(1024 + (int)id); nirq++; }
+static u32 irq_count[1024];                  /* deliveries per interrupt ID, for the summary */
+static void deliver(u32 id) { lkl_trigger_irq(1024 + (int)id); nirq++; if (id < 1024) irq_count[id]++; }
 static void irq_loop(void *a) {
     (void)a;
     for (;;) {
@@ -445,6 +447,20 @@ static void linux_summary(void) {
         klog("linux: driver %s: %d device(s)%s", drv[i], bound < 0 ? 0 : bound, bound < 0 ? " (no such driver)" : "");
     }
     (void)line;
+    {                                                             /* the busiest device interrupts */
+        char il[160] = "";
+        static u8 shown[1024];
+        memset(shown, 0, sizeof shown);
+        for (int k2 = 0; k2 < 8; k2++) {
+            int best = -1;
+            for (int i = 32; i < 1024; i++) if (!shown[i] && irq_count[i] && (best < 0 || irq_count[i] > irq_count[best])) best = i;
+            if (best < 0) break;
+            shown[best] = 1;
+            usize l = strlen(il);
+            fmt(il + l, sizeof il - l, "%s%d:%u", k2 ? " " : "", best - 32, irq_count[best]);
+        }
+        klog("linux: interrupts delivered (SPI:count): %s", il[0] ? il : "none");
+    }
     klog("linux: %d regulator(s); %d device(s) waiting; %d line(s) to note:", nreg, n, nprob);
     for (int i = 0; i < nprob; i++) klog("linux: ! %s", probs[i]);
 }

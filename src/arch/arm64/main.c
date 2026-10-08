@@ -23,6 +23,8 @@ static u64 cnt_freq = 1, cnt_boot;
 static u64 cntvct(void) { u64 v; __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v)); return v; }
 u64 k_now_ms(void) { return (cntvct() - cnt_boot) * 1000 / cnt_freq; }
 u64 k_now_us(void) { u64 d = cntvct() - cnt_boot; return d / cnt_freq * 1000000 + d % cnt_freq * 1000000 / cnt_freq; }
+/* nanoseconds, to the counter's resolution (52 ns at 19.2 MHz): Linux's udelay() waits on it */
+u64 k_now_ns(void) { u64 d = cntvct() - cnt_boot; return d / cnt_freq * 1000000000ull + d % cnt_freq * 1000000000ull / cnt_freq; }
 
 /* ---- interrupts are never on yet; the shared code still brackets with these ---- */
 u64 irq_save(void) { u64 f; __asm__ volatile("mrs %0, daif; msr daifset, #2" : "=r"(f) :: "memory"); return f; }

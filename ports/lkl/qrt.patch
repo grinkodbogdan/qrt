@@ -582,6 +582,49 @@ index f0e4b4aba..5cbb275e3 100644
  	switch (drv->probe_type) {
  	case PROBE_PREFER_ASYNCHRONOUS:
  		return true;
+diff --git a/drivers/i2c/busses/i2c-qup.c b/drivers/i2c/busses/i2c-qup.c
+index d480162a4..86c184b00 100644
+--- a/drivers/i2c/busses/i2c-qup.c
++++ b/drivers/i2c/busses/i2c-qup.c
+@@ -393,6 +393,7 @@ static int qup_i2c_poll_state_mask(struct qup_i2c_dev *qup,
+ 		udelay(1);
+ 	} while (retries--);
+ 
++	pr_warn("qup: timeout: state %x, wanted %x\n", state, req_state);	/* QRT */
+ 	return -ETIMEDOUT;
+ }
+ 
+@@ -793,8 +794,10 @@ static int qup_i2c_bam_schedule_desc(struct qup_i2c_dev *qup)
+ 		dma_async_issue_pending(qup->brx.dma);
+ 	}
+ 
+-	if (!wait_for_completion_timeout(&qup->xfer, qup->xfer_timeout))
++	if (!wait_for_completion_timeout(&qup->xfer, qup->xfer_timeout)) {
++		pr_warn("qup: DMA timeout\n");	/* QRT */
+ 		ret = -ETIMEDOUT;
++	}
+ 
+ 	if (ret || qup->bus_err || qup->qup_err) {
+ 		reinit_completion(&qup->xfer);
+@@ -902,6 +905,8 @@ static int qup_i2c_wait_for_complete(struct qup_i2c_dev *qup,
+ 
+ 	left = wait_for_completion_timeout(&qup->xfer, qup->xfer_timeout);
+ 	if (!left) {
++		pr_warn("qup: timeout: no interrupt (operational %x, status %x)\n",	/* QRT */
++			readl(qup->base + QUP_OPERATIONAL), readl(qup->base + QUP_I2C_STATUS));
+ 		writel(1, qup->base + QUP_SW_RESET);
+ 		ret = -ETIMEDOUT;
+ 	}
+@@ -1691,7 +1696,8 @@ static int qup_i2c_probe(struct platform_device *pdev)
+ 		qup->adap.algo = &qup_i2c_algo_v2;
+ 		qup->adap.quirks = &qup_i2c_quirks_v2;
+ 		is_qup_v1 = false;
+-		if (acpi_match_device(qup_i2c_acpi_match, qup->dev))
++		if (acpi_match_device(qup_i2c_acpi_match, qup->dev) ||
++		    IS_ENABLED(CONFIG_LKL_QRT_SOC))	/* QRT: the FIFO, by the CPU (BAM transfers time out) */
+ 			goto nodma;
+ 		else
+ 			ret = qup_i2c_req_dma(qup);
 diff --git a/drivers/pmdomain/qcom/rpmpd.c b/drivers/pmdomain/qcom/rpmpd.c
 index 0be6b3026..23c62afcf 100644
 --- a/drivers/pmdomain/qcom/rpmpd.c
