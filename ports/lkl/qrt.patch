@@ -1772,6 +1772,25 @@ index d480162a4..22437e4e4 100644
  			goto nodma;
  		else
  			ret = qup_i2c_req_dma(qup);
+diff --git a/drivers/interconnect/core.c b/drivers/interconnect/core.c
+index 7e9b996b4..f85da9c56 100644
+--- a/drivers/interconnect/core.c
++++ b/drivers/interconnect/core.c
+@@ -1100,6 +1100,14 @@ void icc_sync_state(struct device *dev)
+ 
+ 	if (count < providers_count)
+ 		return;
++	/*
++	 * QRT: Linux shares the SoC with its host, which keeps drawing on the
++	 * display the boot loader set up; dropping the boot loader's bandwidth
++	 * before every consumer has voted starves the display engine (underruns).
++	 * The boot-time maximum stays.
++	 */
++	if (IS_ENABLED(CONFIG_LKL_QRT_SOC))
++		return;
+ 
+ 	mutex_lock(&icc_lock);
+ 	mutex_lock(&icc_bw_lock);
 diff --git a/drivers/iommu/Kconfig b/drivers/iommu/Kconfig
 index b3aa1f5d5..93d6ee7d9 100644
 --- a/drivers/iommu/Kconfig

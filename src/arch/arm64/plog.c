@@ -3,9 +3,8 @@
  * (a phone's RAM keeps its contents through a warm reset; the region is mapped uncached,
  * so every line is in RAM the moment it is written).
  *
- * The region also records how far the last boot got.  A boot that started Linux's
- * drivers but did not see them settle (a reset while drivers were probing) makes the
- * next boot a safe one: Linux stays off and the previous boot's log is shown, so the
+ * The region also records how far the last boot got.  Two boots in a row that reset
+ * while Linux's kernel was starting make the next boot a safe one: Linux stays off and the previous boot's log is shown, so the
  * driver that reset the phone can be read off the screen.
  */
 #include "arm.h"
@@ -17,6 +16,7 @@ struct plog {
     u32 state;                                /* PLOG_* of this boot */
     u32 lines, cap;                           /* lines written (free-running), ring size */
     u32 boot;                                 /* boots counted */
+    u32 linux_fails;                          /* boots in a row that reset while Linux started */
     char ring[][COLS];
 };
 
@@ -43,11 +43,13 @@ void plog_init(u64 base, u64 size) {
     klog("plog: %s at %llx (magic %llx, state %u, %u lines)", nprev ? "the last boot's log" : "a new log", base,
          (u64)pl->magic, pl->state, pl->lines);
     u32 boot = pl->magic == PLOG_MAGIC ? pl->boot + 1 : 1;
+    u32 fails = nprev && prev_state == PLOG_LINUX_STARTING ? pl->linux_fails + 1 : 0;
     pl->magic = PLOG_MAGIC;
     pl->cap = cap;
     pl->lines = 0;
     pl->state = PLOG_BOOT;
     pl->boot = boot;
+    pl->linux_fails = fails;
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
@@ -64,9 +66,10 @@ void plog_line(const char *s) {
 
 void plog_state(int s) { if (pl) { pl->state = (u32)s; __asm__ volatile("dsb sy" ::: "memory"); } }
 
-/* the last boot reset the phone while Linux's drivers were starting */
-/* the last boot reset before Linux's drivers had settled (a boot that ended with the
- * power key held after they had settled does not count) */
-int plog_last_boot_failed(void) { return prev_state == PLOG_BOOT || prev_state == PLOG_LINUX_STARTING; }
+/* Linux's drivers reset the phone while starting, twice in a row.  Only a reset while
+ * Linux's kernel was starting counts (not one before it - the power key held to get
+ * back to fastboot - nor one after it was up), and only twice: once may be the user. */
+int plog_last_boot_failed(void) { return pl && pl->linux_fails >= 2; }
+void plog_clear_fails(void) { if (pl) { pl->linux_fails = 0; __asm__ volatile("dsb sy" ::: "memory"); } }
 int plog_prev_lines(void) { return nprev; }
 const char *plog_prev_line(int i) { return i >= 0 && i < nprev ? prev[i] : NULL; }

@@ -773,6 +773,7 @@ static void linux_main(void *a) {
     int r = lkl_start_kernel("mem=160M loglevel=8 initcall_debug clk_ignore_unused pd_ignore_unused "
                              "regulator_ignore_unused fw_devlink=permissive");
     if (r < 0) { klog("linux: did not start (%d)", r); return; }
+    plog_state(PLOG_LINUX_OK);                                      /* up: a later reset is not its start's */
     running = 1;
     klog("linux: running; %d threads", thr_count());
     sys(NR_MKDIRAT, AT_FDCWD, (long)"/sys", 0755, 0, 0);
@@ -793,7 +794,7 @@ static void linux_main(void *a) {
         logview_show_current();
     }
     thr_sleep_us(10ull * 1000000);                                  /* settled: probes, deferred probes, sync_state */
-    if (!dead) { plog_state(PLOG_LINUX_OK); klog("linux: drivers settled"); }
+    if (!dead) klog("linux: drivers settled");
 }
 
 int linux_start(const void *fdt) {

@@ -283,10 +283,12 @@ void arm_main(const void *dtb, u64 base) {
     }
     if (bootargs && strstr(bootargs, "qrt.nolinux")) klog("linux: off (qrt.nolinux)");
     else if (plog_last_boot_failed()) {
-        klog("safe boot: the last boot reset while Linux's drivers were starting (%d lines kept); Linux stays off",
+        klog("safe boot: the last two boots reset while Linux's drivers were starting (%d lines kept); Linux stays off this once",
              plog_prev_lines());
         logview_show_previous();
         plog_state(PLOG_LINUX_OK);           /* the next boot tries Linux again */
+        void plog_clear_fails(void);
+        plog_clear_fails();
     } else linux_start(dtb);
     shell_main();
     panic("the shell returned");

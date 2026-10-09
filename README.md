@@ -189,6 +189,19 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.2: Linux is not switched off by a reboot; the display keeps its bandwidth
+
+- **Safe boot only after two failed Linux starts** (`plog.c`, `linux.c`): a boot counted
+  as failed unless it lived 40 s - holding the power key to get back to fastboot, or
+  restarting early, made the next boot a safe one with Linux off: Tessera's own display
+  (the scrambled one) and no touch at all.  Now Linux counts as started the moment its
+  kernel is up (about 10 s), a reset before that point is not Linux's, and safe boot needs
+  two failed starts in a row.
+- **The display engine keeps the boot loader's memory bandwidth** (LKL
+  `drivers/interconnect/core.c`): once probing ended, Linux's interconnect driver dropped
+  every bus to what had been voted for - before the display voted, the display engine
+  starved and underran (the flat bands).  Inside QRT the boot-time maximum now stays.
+
 ## 0.21.1: three bugs under Linux's drivers - starved timers, lost interrupts, clobbered registers
 
 0.21.0 on the Mi A1: the screen stayed scrambled and touch did nothing.  Three bugs in
