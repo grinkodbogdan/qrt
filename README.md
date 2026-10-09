@@ -189,6 +189,26 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.3: a serial console on the Mi A1; booting through lk2nd
+
+- **Serial console** (`main.c`): Tessera writes its whole log - Linux's lines too, from
+  the first line of the boot - to the MSM8953's debug UART (BLSP1 UART1 at `78af000`,
+  115200 8N1), the way Linux's `msm_serial` drives it.  Only when the boot loader left its
+  clocks running (an unclocked UART can hang the bus); the log says which.  On the Mi A1
+  the UART's TX/RX are test pads on the board: a 1.8 V USB serial adapter there shows
+  where a boot stops even when the screen shows nothing.  While Tessera uses the UART,
+  Linux's own driver for it is off.
+- **lk2nd** (postmarketOS's boot loader for MSM8953 phones) should work as the boot loader (not yet tried):
+  it names the panel in the device tree itself (the same three panels, the same names
+  Tessera uses from the stock boot loader's arguments).  To boot QRT the way
+  postmarketOS boots: `fastboot flash boot lk2nd.img` (from lk2nd's releases; the stock
+  boot image can be flashed back), reboot into lk2nd's fastboot (volume down), then
+  `fastboot boot qrt-<version>-mi-a1-boot.img`.  QRT does not need it.
+- **Debugging in QEMU**: QEMU has no MSM8953, so the phone's own drivers cannot run
+  there; the QEMU `virt` machine runs the same Tessera and Argon (Linux's virtio drivers)
+  and is where 0.21.1's scheduler, interrupt and register bugs were found, with QEMU's
+  monitor sampling where the CPU was.
+
 ## 0.21.2: Linux is not switched off by a reboot; the display keeps its bandwidth
 
 - **Safe boot only after two failed Linux starts** (`plog.c`, `linux.c`): a boot counted

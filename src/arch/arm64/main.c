@@ -30,16 +30,47 @@ u64 k_now_ns(void) { u64 d = cntvct() - cnt_boot; return d / cnt_freq * 10000000
 u64 irq_save(void) { u64 f; __asm__ volatile("mrs %0, daif; msr daifset, #2" : "=r"(f) :: "memory"); return f; }
 void irq_restore(u64 f) { __asm__ volatile("msr daif, %0" : : "r"(f) : "memory"); }
 
-/* ---- the console: QEMU's PL011 when the tree has one ---- */
-static u64 pl011;
-int  uart_init(void) { return pl011 != 0; }
-int  uart_present(void) { return pl011 != 0; }
+/* ---- the console: QEMU's PL011, or a Qualcomm phone's UARTDM (the Mi A1's debug UART
+ * at 78af000, on test pads), when the tree has one - every line of the log, Linux's too,
+ * goes out from the first one.  UARTDM as Linux's msm_serial writes it (its register
+ * offsets: SR 08, CR 10, ISR 14, NCF_TX 40, TF 70): wait for the
+ * transmitter, reset TX_READY, say how many characters come, then up to 4 per word.
+ * Every wait is bounded: with its clock off the UART must not hang the kernel. ---- */
+static u64 pl011, uartdm;
+int  uart_init(void) { return pl011 != 0 || uartdm != 0; }
+int  uart_present(void) { return pl011 != 0 || uartdm != 0; }
+static void dm_send(const char *b, u32 n) {
+    for (int t = 0; t < 200000 && !(R32(uartdm + 0x08) & 8) && !(R32(uartdm + 0x14) & 0x80); t++) {}  /* SR TX_EMPTY / ISR TX_READY */
+    W32(uartdm + 0x10, 3u << 8);                                       /* CR: reset TX_READY */
+    W32(uartdm + 0x40, n);                                            /* NCF_TX */
+    (void)R32(uartdm + 0x40);
+    for (u32 i = 0; i < n; i += 4) {
+        u32 w = 0;
+        for (u32 j = 0; j < 4 && i + j < n; j++) w |= (u32)(u8)b[i + j] << (8 * j);
+        for (int t = 0; t < 200000 && !(R32(uartdm + 0x08) & 4); t++) {}   /* SR: TX_READY (FIFO room) */
+        W32(uartdm + 0x70, w);                                        /* TF */
+    }
+}
 void uart_putc(char c) {
+    if (uartdm) { dm_send(&c, 1); return; }
     if (!pl011) return;
     while (R32(pl011 + 0x18) & (1 << 5)) {}                    /* TX FIFO full */
     W32(pl011, (u8)c);
 }
-void uart_write(const char *s) { for (; *s; s++) { if (*s == '\n') uart_putc('\r'); uart_putc(*s); } }
+void uart_write(const char *s) {
+    if (uartdm) {                                                     /* a line at a time, with \r */
+        char b[256];
+        u32 n = 0;
+        for (; *s; s++) {
+            if (n > sizeof b - 2) { dm_send(b, n); n = 0; }
+            if (*s == '\n') b[n++] = '\r';
+            b[n++] = *s;
+        }
+        if (n) dm_send(b, n);
+        return;
+    }
+    for (; *s; s++) { if (*s == '\n') uart_putc('\r'); uart_putc(*s); }
+}
 int  uart_getc(void) { if (!pl011 || (R32(pl011 + 0x18) & (1 << 4))) return -1; return (int)(R32(pl011) & 0xff); }
 u64  uart_rx_count(void) { return 0; }
 
@@ -203,10 +234,30 @@ void arm_main(const void *dtb, u64 base) {
     int n = fdt_find_compatible(-1, "arm,pl011");
     u64 a, s;
     if (n >= 0 && fdt_reg(n, 0, &a, &s)) pl011 = a;
+    if (!pl011) {                                                 /* the boot loader's UART (enabled in the tree) */
+        int u = fdt_find_compatible(-1, "qcom,msm-uartdm-v1.4");
+        if (u < 0) u = fdt_find_compatible(-1, "qcom,msm-uartdm");
+        int sl;
+        const char *st = u >= 0 ? fdt_prop(u, "status", &sl) : NULL;
+        /* only with its clocks running (an unclocked BLSP block can hang the bus): known
+         * for the MSM8953's BLSP1 UART1 - GCC's CBCR bit 31 is CLK_OFF */
+        int g = fdt_find_compatible(-1, "qcom,gcc-msm8953");
+        u64 gcc = 0, gs;
+        int clocked = g >= 0 && fdt_reg(g, 0, &gcc, &gs) && u >= 0 && fdt_reg(u, 0, &a, &s) && a == 0x78af000 &&
+                      !(R32(gcc + 0x203c) & (1u << 31)) && !(R32(gcc + 0x1008) & (1u << 31));
+        if (u >= 0 && clocked && (!st || !strcmp(st, "okay"))) {
+            uartdm = a;
+            /* Tessera's now: Linux's msm_serial would reprogram it under Tessera's writes */
+            char *ws = (char *)fdt_prop(u, "status", &sl);
+            if (ws && sl >= 9) { memset(ws, 0, (usize)sl); memcpy(ws, "disabled", 8); }
+        }
+    }
     int len;
     const char *model = fdt_prop(0, "model", &len);
     if (model) arm_model = model;
     klog("QRT %s (arm64) - Tessera kernel on %s, loaded at %llx", QRT_VERSION, arm_model, base);
+    if (uartdm) klog("console: the Qualcomm UART at %llx, 115200 8N1 (Linux's msm_serial is off: the UART is Tessera's)", uartdm);
+    else if (!pl011 && fdt_find_compatible(-1, "qcom,msm-uartdm") >= 0) klog("console: the Qualcomm UART's clocks are off (the boot loader did not use it): no serial log");
     scan_memory(dtb);
     scan_chosen();
     for (int i = 0; i < nram; i++) { klog("memory: %llx-%llx", ram[i][0], ram[i][0] + ram[i][1]); k.ram_bytes += ram[i][1]; }
