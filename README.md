@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.14: Linux gets what QRT uses - nothing that can reset the phone
+
+0.21.13 on the Mi A1: touch arrives, every driver QRT needs binds - and the phone still
+reset now and then, which 0.17-0.19 never did.  What changed since then is Linux
+running postmarketOS's whole driver set, and some of those drivers reset or power off
+the phone by themselves: Linux's PS_HOLD driver (`qcom,pshold`) restarts or powers off
+the phone whenever anything inside Linux asks - a thermal zone reaching "critical" on a
+sensor read wrong inside QRT does - and the charger, the display's LAB/IBB rails and USB
+reprogram the power hardware.  None of them is used by QRT yet, so Linux no longer
+sees them (`main.c`), together with what goes through the secure world (0.21.10, now
+also SCM, audio, camera, IPA and the modem's links): PS_HOLD, the thermal sensors and
+the PMIC's temperature alarm, the charger, LAB/IBB, USB, haptics, CPR and the CPU clock
+controller.  Linux keeps touch, keys, the backlight, the battery gauge, the eMMC and the
+clock, power and PMIC plumbing they need.  `qrt.allhw` gives Linux everything again.
+
 ## 0.21.13: quicker touch; the serial console no longer stalls the shell
 
 0.21.12 on the Mi A1: touch works - slowly, and the shell freezes now and then.

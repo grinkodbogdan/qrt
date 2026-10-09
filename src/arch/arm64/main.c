@@ -396,17 +396,28 @@ void arm_main(const void *dtb, u64 base) {
         hide_from_linux(mdss);
         klog("argon: the display stays Tessera's (Linux's display driver off; qrt.linuxdisplay turns it on)");
     }
-    /* hardware that needs Qualcomm's secure world to start (it resets the phone when a
-     * request does not suit it) and that QRT has no use for yet: the IOMMU, the GPU, the
-     * video codec, the modem, Wi-Fi and the audio DSP.  0.21.5 and 0.21.6 froze and reset
-     * seconds after Linux started with all of it; qrt.allhw gives it to Linux anyway */
+    /* Linux gets what QRT uses - touch, keys, backlight, battery gauge, eMMC and the clock,
+     * power and PMIC plumbing under them - like 0.17-0.19, which never reset.  Kept from it:
+     * what goes through Qualcomm's secure world (IOMMU, GPU, video, modem, Wi-Fi, DSP,
+     * audio, camera, IPA), and what can reset or power off the phone by itself: Linux's
+     * PS_HOLD restart/power-off driver (a thermal "critical" shutdown, any reboot inside
+     * Linux, pulls it), the thermal sensors, the charger, the display's LAB/IBB rails, USB
+     * and haptics.  qrt.allhw gives Linux all of it */
     if (!(bootargs && strstr(bootargs, "qrt.allhw"))) {
-        static const char *const secure[] = { "qcom,msm-iommu-v1", "qcom,adreno", "qcom,msm8916-venus", "qcom,msm8953-venus",
-                                              "qcom,msm8953-mss-pil", "qcom,pronto", "qcom,msm8953-adsp-pil", NULL };
+        static const char *const kept[] = {
+            /* the secure world */
+            "qcom,msm-iommu-v1", "qcom,adreno", "qcom,msm8953-venus", "qcom,msm8953-mss-pil", "qcom,pronto",
+            "qcom,msm8953-adsp-pil", "qcom,scm-msm8953", "qcom,smp2p", "qcom,smsm", "qcom,wcnss", "qcom,memshare",
+            "qcom,rmtfs-mem", "qcom,apr-v2", "qcom,msm8953-qdsp6-sndcard", "qcom,msm8916-wcd-digital-codec",
+            "qcom,pm8916-wcd-analog-codec", "qcom,ipa-lite-v2.6", "qcom,msm8953-camss", "qcom,msm8974-cci",
+            /* what can reset or power off the phone */
+            "qcom,pshold", "qcom,msm8953-tsens", "qcom,spmi-temp-alarm", "qcom,pmi8996-smbchg", "qcom,pmi8998-lab-ibb",
+            "qcom,msm8953-dwc3", "qcom,msm8953-qusb2-phy", "qcom,pmi8950-haptics", "qcom,msm8953-cpr4pd",
+            "qcom,apcs-cc-msm8953", NULL };
         int hidden = 0;
-        for (int i = 0; secure[i]; i++)
-            for (int n = fdt_find_compatible(-1, secure[i]); n >= 0; n = fdt_find_compatible(n, secure[i])) { hide_from_linux(n); hidden++; }
-        klog("argon: %d device(s) needing the secure world kept from Linux (IOMMU, GPU, video, modem, Wi-Fi, DSP; qrt.allhw gives them)", hidden);
+        for (int i = 0; kept[i]; i++)
+            for (int n = fdt_find_compatible(-1, kept[i]); n >= 0; n = fdt_find_compatible(n, kept[i])) { hide_from_linux(n); hidden++; }
+        klog("argon: %d device(s) kept from Linux (secure world, reset/power-off, thermal, charger, USB; qrt.allhw gives them)", hidden);
     }
     if (bootargs && strstr(bootargs, "qrt.nolinux")) klog("linux: off (qrt.nolinux)");
     else if (plog_last_boot_failed()) {
