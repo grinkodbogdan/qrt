@@ -82,16 +82,22 @@ void uart_flush_now(void) {
         stail += n;
     }
 }
+/* the UART's clocks running (GCC's CBCR bit 31: CLK_OFF) - Linux's I2C driver, idle,
+ * switches off the BLSP bus clock the UART shares, and an access then aborts */
+static u64 uart_gcc;
+static int uart_clocked(void) { return !uart_gcc || (!(R32(uart_gcc + 0x203c) & (1u << 31)) && !(R32(uart_gcc + 0x1008) & (1u << 31))); }
 static void serial_loop(void *a) {
     (void)a;
     for (;;) {
-        if (stail == shead) { thr_sleep_us(20000); continue; }
+        if (stail == shead || !uart_clocked()) { thr_sleep_us(20000); continue; }
         char b[64];
         u32 n = 0;
         while (n < sizeof b && stail + n != shead) { b[n] = sring[(stail + n) % SRING]; n++; }
-        for (int t = 0; t < 1000 && !(R32(uartdm + 0x08) & 8) && !(R32(uartdm + 0x14) & 0x80); t++) thr_sleep_us(200);
-        dm_send(b, n);                                                /* 64 bytes: the FIFO takes them */
-        stail += n;
+        int ok = 1;
+        for (int t = 0; t < 1000 && (ok = uart_clocked()) && !(R32(uartdm + 0x08) & 8) && !(R32(uartdm + 0x14) & 0x80); t++) thr_sleep_us(200);
+        u64 f = irq_save();                                            /* checked and sent without a switch between */
+        if (ok && uart_clocked()) { dm_send(b, n); stail += n; }      /* 64 bytes: the FIFO takes them */
+        irq_restore(f);
     }
 }
 void serial_start(void) { if (uartdm && !serial_thread) { serial_thread = 1; thr_create("serial", serial_loop, NULL, 16 << 10); } }
@@ -129,7 +135,7 @@ void native_panic(const char *what, void *frame) {
              r[30] >= b0 && r[30] < b1 ? r[30] - b0 : 0, QRT_VERSION);
         for (int i = 0; i < 30; i += 3) klog("x%-2d %016llx  x%-2d %016llx  x%-2d %016llx", i, r[i], i + 1, r[i + 1], i + 2, r[i + 2]);
     }
-    if (uartdm) uart_flush_now();                                 /* the panic's lines out on the UART */
+    if (uartdm && uart_clocked()) uart_flush_now();               /* the panic's lines out on the UART */
     if (k.fb_base) { void logview_panic(void); logview_panic(); }   /* the panic's lines on the screen */
     if (k.fb_base) {                                              /* a red band across the top */
         static u32 red[2048 * 32];
@@ -153,10 +159,16 @@ void arm_exception(u64 kind, u64 *frame) {
     char m[96];
     fmt(m, sizeof m, "%s at %llx (ESR %llx, address %llx)", kind < 12 ? kinds[kind] : "exception", frame[31],
         SYSREG_R(esr_el1), SYSREG_R(far_el1));
-    if (!thr_is_main()) {                                         /* a Linux thread: Linux stops, the shell goes on */
-        klog("*** fault in a driver thread: %s", m);
-        klog("pc %llx  lr %llx  (kernel loaded at %llx)", frame[31], frame[30], (u64)(usize)_start);
-        linux_failed(m);
+    if (!thr_is_main()) {                                         /* a thread: it stops, the shell goes on */
+        const char *nm = thr_name(thr_self());
+        u64 b0 = (u64)(usize)_start;
+        klog("*** fault in thread \"%s\": %s", nm ? nm : "?", m);
+        klog("pc %llx  lr %llx  (kernel loaded at %llx; in the image pc +%llx lr +%llx)", frame[31], frame[30], b0,
+             frame[31] - b0, frame[30] - b0);
+        /* only Linux's own threads take Linux down: a fault in one of Tessera's (the serial
+         * console in 0.21.15) stopped Linux - and the backlight, the battery - with it */
+        if (nm && !strncmp(nm, "linux", 5)) linux_failed(m);
+        else if (nm && !strcmp(nm, "serial")) { uartdm = 0; klog("console: the UART is off for this boot"); }
         thr_park();
     }
     native_panic(m, frame);
@@ -290,6 +302,7 @@ void arm_main(const void *dtb, u64 base) {
                       !(R32(gcc + 0x203c) & (1u << 31)) && !(R32(gcc + 0x1008) & (1u << 31));
         if (u >= 0 && clocked && (!st || !strcmp(st, "okay"))) {
             uartdm = a;
+            uart_gcc = gcc;
             hide_from_linux(u);              /* Tessera's now: Linux's msm_serial would reprogram it under Tessera's writes */
         }
     }

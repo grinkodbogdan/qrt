@@ -40,6 +40,7 @@ static int main_boost;               /* the shell was woken: it runs next (the U
 static void account(void) { u64 now = k_now_us(); cur->run_us += now - last_switch; last_switch = now; }
 
 thr_t *thr_self(void) { return cur; }
+const char *thr_name(thr_t *t) { return t ? t->name : NULL; }
 int thr_count(void) { return nthreads; }
 u64 thr_switches(void) { return switches; }
 int thr_is_main(void) { return cur == &main_thr; }

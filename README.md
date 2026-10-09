@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.16: the serial console no longer stops Linux; brightness works again
+
+0.21.15 on the Mi A1: **touch works** - responsive, dragging, no stalls.  Its log had one
+fault left: `pc 110f413c` - in Tessera's serial-console thread (0.21.13), writing to the
+UART while its clocks were off: the UART shares the BLSP bus clock with the I2C
+controllers, and Linux's I2C driver switches it off when idle.  Worse, any thread's fault
+was taken for Linux's: Linux was marked stopped, and with it the backlight slider (and
+the battery readings) stopped working.
+
+- The serial thread checks GCC's clock status (CLK_OFF) before every write and waits
+  while the clocks are off (`main.c`).
+- A fault in one of Tessera's own threads stops only that thread; only a fault in a
+  Linux thread stops Linux.  The fault line names the thread and gives the program
+  counter as an offset into the image.
+
 ## 0.21.15: the GPU's IOMMU kept from Linux too
 
 0.21.14 on the Mi A1: Linux stopped while starting - a fault in

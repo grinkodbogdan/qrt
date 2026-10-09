@@ -9,6 +9,7 @@ typedef struct mtx mtx_t;
 
 thr_t *thr_create(const char *name, void (*fn)(void *), void *arg, usize stack);
 thr_t *thr_self(void);
+const char *thr_name(thr_t *t);
 int   thr_count(void);
 void  thr_yield(void);
 void  thr_sleep_us(u64 us);
