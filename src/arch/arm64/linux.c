@@ -581,6 +581,44 @@ static void write_text(const char *path, const char *text) {
     sys(64, fd, (long)text, (long)strlen(text), 0, 0);
     l_close((int)fd);
 }
+/* for lwifi.c: Linux's system calls, where a partition is, a remote processor started */
+long argon_sys(long nr, long a, long b, long c, long d, long e) { return sys(nr, a, b, c, d, e); }
+long argon_sys6(long nr, long a, long b, long c, long d, long e, long f) { long p[6] = { a, b, c, d, e, f }; return lkl_syscall(nr, p); }
+const char *argon_part_path(const char *part) {
+    for (int i = 0; i < namnt; i++) if (!strcmp(amnts[i].name, part)) return amnts[i].lpath;
+    return NULL;
+}
+/* the remote processor whose firmware name starts with fw (wcnss: the Wi-Fi/Bluetooth
+ * core): started through the secure world - 1 running, 0 none such, -1 failed */
+int argon_remoteproc_start(const char *fw) {
+    long fd = l_open("/sys/class/remoteproc", 0200000);
+    if (fd < 0) return 0;
+    static char d[2048];
+    long n = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+    l_close((int)fd);
+    for (long o = 0; o < n; o += *(u16 *)(d + o + 16)) {
+        const char *nm = d + o + 19;
+        if (strncmp(nm, "remoteproc", 10)) continue;
+        char sp[96], st[32] = "", f[64] = "";
+        fmt(sp, sizeof sp, "/sys/class/remoteproc/%s/firmware", nm);
+        read_text(sp, f, sizeof f);
+        if (strncmp(f, fw, strlen(fw))) continue;
+        fmt(sp, sizeof sp, "/sys/class/remoteproc/%s/state", nm);
+        read_text(sp, st, sizeof st);
+        if (!strncmp(st, "running", 7)) return 1;
+        klog("argon: starting %s (%s) through the secure world", nm, fw);
+        write_text(sp, "start");
+        for (int t = 0; t < 100; t++) {                               /* up to 10 s */
+            read_text(sp, st, sizeof st);
+            if (!strncmp(st, "running", 7)) { klog("argon: %s running", nm); return 1; }
+            thr_sleep_us(100000);
+        }
+        for (char *c = st; *c; c++) if (*c == '\n') *c = 0;
+        klog("argon: %s did not start (state %s)", nm, st);
+        return -1;
+    }
+    return 0;
+}
 static int mounted(const char *dev) { for (int i = 0; i < namnt; i++) if (strstr(amnts[i].lpath, dev)) return 1; return 0; }
 static void firmware_from(const struct amnt *m) {
     char p[96];
@@ -797,8 +835,12 @@ static void linux_main(void *a) {
     plog_state(PLOG_LINUX_STARTING);                                /* a reset from here on: the next boot is safe */
     if (lkl_init(&ops) < 0) { klog("linux: lkl_init failed"); return; }
     lkl_up = 1;
-    int r = lkl_start_kernel("mem=160M loglevel=8 initcall_debug clk_ignore_unused pd_ignore_unused "
-                             "regulator_ignore_unused fw_devlink=permissive");
+    /* mac80211_hwsim (virtual radios, lwifi.c's QEMU test) only in QEMU */
+    int qemu = fdt_find_compatible(-1, "linux,dummy-virt") >= 0;
+    int r = lkl_start_kernel(qemu ? "mem=160M loglevel=8 initcall_debug clk_ignore_unused pd_ignore_unused "
+                                    "regulator_ignore_unused fw_devlink=permissive"
+                                  : "mem=160M loglevel=8 initcall_debug clk_ignore_unused pd_ignore_unused "
+                                    "regulator_ignore_unused fw_devlink=permissive mac80211_hwsim.radios=0");
     if (r < 0) { klog("linux: did not start (%d)", r); return; }
     plog_state(PLOG_LINUX_OK);                                      /* up: a later reset is not its start's */
     running = 1;
@@ -826,6 +868,12 @@ static void linux_main(void *a) {
 
 int linux_start(const void *fdt) {
     dtb = fdt;
+    {
+        int ch = fdt_node("/chosen"), al;
+        const char *args = ch >= 0 ? fdt_prop(ch, "bootargs", &al) : NULL;
+        void lwifi_test_boot(int wpa);
+        if (args && strstr(args, "qrt.wifitest")) lwifi_test_boot(strstr(args, "qrt.wifitest=wpa") != NULL);
+    }
     void fb_linux_owns_mdp(void);
     fb_linux_owns_mdp();
     timer_thr = thr_create("linux timers", timer_loop, NULL, 64 << 10);

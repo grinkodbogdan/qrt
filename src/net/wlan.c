@@ -57,6 +57,15 @@ static struct {
     u8 eapol_ver;
 } w;
 
+/* the Linux backend, when there is one (wlan.h) */
+__attribute__((weak)) const wlan_softmac_t *wlan_softmac(void) { return NULL; }
+static const wlan_softmac_t *sm(void) {
+    static const wlan_softmac_t *b; static int asked;
+    if (!asked) { asked = 1; b = wlan_softmac(); }
+    return b;
+}
+static const u8 *my_mac(void) { return sm() ? sm()->mac() : wifi_macaddr(); }
+
 const char *wlan_security_name(int s) {
     static const char *n[] = { "open", "WEP", "WPA (TKIP)", "WPA2", "WPA2-Enterprise", "WPA3", "WPA2 (TKIP group key)" };
     return s >= 0 && s < (int)ARRAY_LEN(n) ? n[s] : "?";
@@ -98,6 +107,7 @@ static int data_send(const u8 dst[6], u16 ethertype, const u8 *payload, usize le
 static int nif_send(netif_t *n, const u8 *eth, usize len) {
     (void)n;
     if (w.state != WL_CONNECTED || len < 14) return -1;
+    if (sm()) return sm()->send(eth, len);                  /* Linux frames it */
     return data_send(eth, (u16)(eth[12] << 8 | eth[13]), eth + 14, len - 14, w.rsn);
 }
 
@@ -224,7 +234,7 @@ static void set_state(int s) {
 static void fail(const char *why) {
     LOG("connection failed: %s", why);
     strlcpy(w.state_text, why, sizeof w.state_text);
-    wifi_disconnect();
+    if (sm()) sm()->disconnect(); else wifi_disconnect();
     if (w.nif.link) { w.nif.link = 0; net_link_changed(&w.nif); }
     set_state(WL_FAILED);
 }
@@ -295,7 +305,7 @@ enum { KI_TYPE_PAIRWISE = 1 << 3, KI_INSTALL = 1 << 6, KI_ACK = 1 << 7, KI_MIC =
 
 static void derive_ptk(void) {
     u8 data[76];
-    const u8 *aa = w.cur.bssid, *spa = wifi_macaddr();
+    const u8 *aa = w.cur.bssid, *spa = my_mac();
     int a_first = memcmp(aa, spa, 6) < 0;
     memcpy(data, a_first ? aa : spa, 6);
     memcpy(data + 6, a_first ? spa : aa, 6);
@@ -329,8 +339,13 @@ static void eapol_send(u16 info, const u8 *replay, const u8 *nonce, const u8 *kd
     put16(k + 93, (u16)klen);
     if (klen) memcpy(k + 95, kdata, klen);
     if (info & KI_MIC) eapol_mic(f, len, k + 77);
-    static const u8 bc[6] = { 0 };
-    (void)bc;
+    if (sm()) {                                            /* an Ethernet frame to the AP */
+        u8 e[14 + 256];
+        memcpy(e, w.cur.bssid, 6); memcpy(e + 6, my_mac(), 6); e[12] = 0x88; e[13] = 0x8e;
+        memcpy(e + 14, f, len);
+        sm()->send(e, 14 + len);
+        return;
+    }
     data_send(w.cur.bssid, 0x888e, f, len, w.have_ptk_candidate == 2);
 }
 
@@ -398,6 +413,13 @@ static void eapol_input(const u8 *f, usize len) {
         eapol_send(2 | KI_TYPE_PAIRWISE | KI_MIC | KI_SECURE, k + 5, NULL, NULL, 0);
         LOG("4-way handshake: message 3 received, 4 sent");
         /* keys become active after message 4 has gone out */
+        if (sm()) {
+            hal_delay_us(2000);                            /* message 4 out, unencrypted */
+            if (sm()->set_keys(w.ptk + 32, w.gtk_id, w.have_gtk ? w.gtk : NULL)) { fail("could not install the keys"); return; }
+            w.have_ptk_candidate = 2;
+            connected();
+            return;
+        }
         wifi_poll();
         hal_delay_us(2000);
         if (wifi_set_pairwise_key(w.ptk + 32)) { fail("could not install the key"); return; }
@@ -411,6 +433,7 @@ static void eapol_input(const u8 *f, usize len) {
         if (klen - 8 > sizeof kd || aes_unwrap(w.ptk + 16, k + 95, klen, kd)) { LOG("group key did not decrypt"); return; }
         if (find_gtk(kd, klen - 8) == 0) LOG("group key updated (id %d)", w.gtk_id);
         eapol_send(2 | KI_MIC | KI_SECURE, k + 5, NULL, NULL, 0);
+        if (sm() && w.have_gtk) sm()->set_keys(NULL, w.gtk_id, w.gtk);
     }
 }
 
@@ -480,7 +503,7 @@ static void rx(const u8 *f, usize len, const iwm_rxinfo_t *ri) {
     if (type == 0x08) { if (w.state >= WL_ASSOC) data_input(f, len, ri); return; }
     if (type != 0x00) return;
     if (sub == 0x80 || sub == 0x50) { scan_result(f, len, ri); return; }
-    if (w.state < WL_AUTH || memcmp(f + 16, w.cur.bssid, 6) || memcmp(f + 4, wifi_macaddr(), 6)) return;
+    if (w.state < WL_AUTH || memcmp(f + 16, w.cur.bssid, 6) || memcmp(f + 4, my_mac(), 6)) return;
     const u8 *b = f + 24;
     usize bl = len - 24;
     switch (sub) {
@@ -512,7 +535,44 @@ static void rx(const u8 *f, usize len, const iwm_rxinfo_t *ri) {
 }
 
 /* ---- public ------------------------------------------------------------------------------------- */
-int wlan_available(void) { return wifi_present(); }
+int wlan_available(void) { return sm() ? sm()->present() : wifi_present(); }
+
+/* ---- the Linux backend's events (wlan.h) ---- */
+/* a scan result: made into the beacon scan_result() reads */
+void wlan_sm_bss(const u8 bssid[6], int freq, int rssi, u16 capinfo, u16 bint, const u8 *ies, usize ielen) {
+    static u8 f[2048];
+    if (ielen > sizeof f - 36) ielen = sizeof f - 36;
+    memset(f, 0, 36);
+    f[0] = 0x80;                                           /* beacon */
+    memset(f + 4, 0xff, 6);
+    memcpy(f + 10, bssid, 6); memcpy(f + 16, bssid, 6);
+    f[32] = (u8)bint; f[33] = (u8)(bint >> 8);
+    f[34] = (u8)capinfo; f[35] = (u8)(capinfo >> 8);
+    memcpy(f + 36, ies, ielen);
+    iwm_rxinfo_t ri;
+    memset(&ri, 0, sizeof ri);
+    ri.rssi = rssi;
+    ri.channel = freq >= 5000 ? (freq - 5000) / 5 : freq == 2484 ? 14 : (freq - 2407) / 5;
+    scan_result(f, 36 + ielen, &ri);
+}
+void wlan_sm_assoc(int ok, int status) {
+    if (w.state != WL_ASSOC) return;
+    if (!ok) { char m[64]; fmt(m, sizeof m, "association refused (status %d)", status); fail(m); return; }
+    LOG("associated with %s", w.cur.ssid);
+    if (w.rsn) { set_state(WL_HANDSHAKE); w.handshake_deadline = k_now_ms() + 6000; }
+    else connected();
+}
+void wlan_sm_eth(const u8 *eth, usize len) {
+    if (len < 14) return;
+    u16 type = (u16)(eth[12] << 8 | eth[13]);
+    if (type == 0x888e) { eapol_input(eth + 14, len - 14); return; }
+    if (w.state == WL_CONNECTED) net_input(&w.nif, eth, len);
+}
+void wlan_sm_lost(int reason) {
+    if (w.state < WL_ASSOC || w.state > WL_CONNECTED) return;
+    LOG("the access point dropped us (reason %d)", reason);
+    fail(w.state == WL_HANDSHAKE ? "wrong password (the access point disconnected)" : "disconnected by the access point");
+}
 int wlan_state(void) { return w.state; }
 
 const char *wlan_state_text(void) {
@@ -534,30 +594,36 @@ const char *wlan_state_text(void) {
     return "";
 }
 
+/* the radio is up: the interface, the state */
+static void powered_on(void) {
+    if (!w.nif.name) {
+        w.nif.name = "Wi-Fi";
+        memcpy(w.nif.mac, my_mac(), 6);
+        w.nif.send = nif_send;
+        net_register(&w.nif);
+    }
+    w.powered = 1;
+    set_state(WL_IDLE);
+    hal_setting_set(u"QrtWifiOn", 1);
+}
+static void power_failed(void) {
+    set_state(WL_OFF);
+    strlcpy(w.state_text, "the radio did not start (see the log)", sizeof w.state_text);
+    hal_setting_set(u"QrtWifiOn", 0);                  /* do not retry at every boot */
+}
 int wlan_power(int on) {
     if (on && w.state == WL_OFF) {
         set_state(WL_STARTING);
-        wifi_set_rx(rx);
-        if (wifi_start()) {
-            set_state(WL_OFF);
-            strlcpy(w.state_text, "the radio did not start (see the log)", sizeof w.state_text);
-            hal_setting_set(u"QrtWifiOn", 0);          /* do not retry at every boot */
-            return -1;
-        }
-        if (!w.nif.name) {
-            w.nif.name = "Wi-Fi";
-            memcpy(w.nif.mac, wifi_macaddr(), 6);
-            w.nif.send = nif_send;
-            net_register(&w.nif);
-        }
-        w.powered = 1;
-        set_state(WL_IDLE);
-        hal_setting_set(u"QrtWifiOn", 1);
+        if (!sm()) wifi_set_rx(rx);
+        int r = sm() ? sm()->start() : wifi_start();
+        if (r == 1) return 0;                          /* the backend is still starting: wlan_poll asks again */
+        if (r) { power_failed(); return -1; }
+        powered_on();
         return 0;
     }
     if (!on && w.state != WL_OFF) {
         wlan_disconnect();
-        wifi_stop();
+        if (sm()) sm()->stop(); else wifi_stop();
         w.powered = 0;
         set_state(WL_OFF);
         hal_setting_set(u"QrtWifiOn", 0);
@@ -568,20 +634,23 @@ int wlan_power(int on) {
 int wlan_scan(void) {
     if (w.state == WL_OFF || w.state == WL_STARTING) return -1;
     if (w.state >= WL_AUTH && w.state <= WL_CONNECTED) return -1;     /* no background scans yet */
-    if (wifi_scan()) return -1;
+    if (sm() ? sm()->scan() : wifi_scan()) return -1;
     set_state(WL_SCANNING);
     w.deadline = k_now_ms() + 15000;
     return 0;
 }
 
 void wlan_disconnect(void) {
-    if (w.state >= WL_AUTH && w.state <= WL_CONNECTED) {
-        u8 reason[2] = { 3, 0 };                                    /* leaving */
-        mgmt_send(0xc0, reason, 2);
-        wifi_poll();
-        hal_delay_us(5000);
+    if (sm()) sm()->disconnect();
+    else {
+        if (w.state >= WL_AUTH && w.state <= WL_CONNECTED) {
+            u8 reason[2] = { 3, 0 };                                /* leaving */
+            mgmt_send(0xc0, reason, 2);
+            wifi_poll();
+            hal_delay_us(5000);
+        }
+        wifi_disconnect();
     }
-    wifi_disconnect();
     w.have_ptk_candidate = 0;
     w.have_gtk = 0;
     if (w.nif.link) { w.nif.link = 0; net_link_changed(&w.nif); }
@@ -638,6 +707,17 @@ int wlan_connect(const char *ssid, const char *pass) {
     LOG("joining %s (%02x:%02x:%02x:%02x:%02x:%02x, channel %d, %d dBm, %s)", best->ssid,
         best->bssid[0], best->bssid[1], best->bssid[2], best->bssid[3], best->bssid[4], best->bssid[5],
         best->channel, best->rssi, wlan_security_name(best->security));
+    if (sm()) {                                                 /* Linux associates; the handshake is ours */
+        int ch = best->channel;
+        int freq = ch == 14 ? 2484 : ch < 14 ? 2407 + 5 * ch : 5000 + 5 * ch;
+        set_state(WL_ASSOC);
+        w.deadline = k_now_ms() + 12000;
+        if (sm()->connect(best->bssid, best->ssid, freq, w.rsn ? w.rsn_ie : NULL, w.rsn ? sizeof w.rsn_ie : 0)) {
+            fail("Linux refused the connection (see the log)");
+            return -1;
+        }
+        return 0;
+    }
     if (wifi_auth_prepare(&d)) { fail("the card could not prepare the connection"); return -1; }
     set_state(WL_AUTH);
     w.tries = 0;
@@ -656,8 +736,10 @@ void wlan_poll(void) {
         /* came up on at boot last time: start again once the shell runs */
         static int boot_checked;
         if (!boot_checked && k_now_ms() > k.boot_ms + 1500 && k.boot_ms) {
+            /* a backend's card may appear later (Linux starting): wait for it, a minute at most */
+            if (!wlan_available() && k_now_ms() < k.boot_ms + 60000) return;
             boot_checked = 1;
-            if (wifi_present() && hal_setting_get(u"QrtWifiOn", 0) == 1) {
+            if (wlan_available() && hal_setting_get(u"QrtWifiOn", 0) == 1) {
                 LOG("Wi-Fi was on: starting");
                 if (wlan_power(1) == 0) {
                     char s[33];
@@ -667,13 +749,23 @@ void wlan_poll(void) {
         }
         return;
     }
-    wifi_poll();
+    if (w.state == WL_STARTING && sm()) {                         /* the backend starting the radio */
+        int r = sm()->start();
+        if (r < 0) power_failed();
+        else if (r == 0) {
+            powered_on();
+            if (w.want_ssid[0]) wlan_scan();
+        }
+        return;
+    }
+    if (sm()) sm()->poll(); else wifi_poll();
     u64 now = k_now_ms();
     static int prev = -1;
     switch (w.state) {
     case WL_SCANNING:
-        if (wifi_scanning() && now > w.deadline) { LOG("no scan-complete notification: using what arrived"); wifi_scan_forget(); }
-        if (!wifi_scanning()) {
+        if (!sm() && wifi_scanning() && now > w.deadline) { LOG("no scan-complete notification: using what arrived"); wifi_scan_forget(); }
+        if (sm() && sm()->scanning() && now > w.deadline) LOG("the scan took too long: using what arrived");
+        if (sm() ? !sm()->scanning() || now > w.deadline : !wifi_scanning()) {
             set_state(WL_IDLE);
             wlan_net_t nets[32];
             int n = wlan_networks(nets, 32);
@@ -688,6 +780,7 @@ void wlan_poll(void) {
         if (now > w.deadline) { if (++w.tries >= 4) fail("no answer from the access point"); else send_auth(); }
         break;
     case WL_ASSOC:
+        if (sm()) { if (now > w.deadline) fail("the access point did not answer the association"); break; }
         if (now > w.deadline) { if (++w.tries >= 4) fail("the access point did not answer the association"); else send_assoc(); }
         break;
     case WL_HANDSHAKE:
@@ -696,7 +789,7 @@ void wlan_poll(void) {
     case WL_CONNECTED:
         if (prev != WL_CONNECTED) remember();
         /* the firmware stops passing our AP's beacons once associated; it reports losses */
-        if (wifi_missed_beacons() >= 20) fail("lost the access point");
+        if (!sm() && wifi_missed_beacons() >= 20) fail("lost the access point");
         break;
     }
     prev = w.state;

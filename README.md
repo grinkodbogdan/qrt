@@ -189,6 +189,39 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.22.0: Wi-Fi on the Mi A1 - Linux's wcn36xx, QRT's WPA2
+
+The Mi A1's Wi-Fi (WCN3680 behind the Pronto core) runs on Linux's own driver,
+`wcn36xx` over mac80211, and plugs into QRT's existing Wi-Fi stack - the same Settings
+page, network list, saved networks, WPA2 and IP as on the tablets.
+
+- **`wlan.c` gets a second kind of card** (`wlan.h`: `wlan_softmac_t`): one whose 802.11
+  association runs elsewhere.  `wlan.c` keeps the network list, the password, the WPA2
+  4-way and group-key handshakes and the IP side; the backend scans, associates,
+  carries Ethernet frames (EAPOL included) and installs the keys.  The Intel cards'
+  path is unchanged.
+- **The Linux backend** (`arch/arm64/lwifi.c`) does what `wpa_supplicant` does on Linux,
+  over nl80211: scan, connect (open or WPA2-PSK/CCMP, with a control port), install the
+  pairwise and group keys and open the port when the handshake is done.  Frames go over
+  a packet socket on `wlan0`, which Linux leaves without an address (IPv6 off): IP is
+  QRT's.
+- **Starting the radio** happens only when Wi-Fi is turned on, in a thread (the shell
+  shows "Turning on..."): the Pronto core's calibration file
+  (`WCNSS_qcom_wlan_nv.bin`, from the vendor, persist or system partition) is put
+  where `wcn36xx` asks for it, the core's firmware comes from the modem partition, and
+  the core is started through the secure world.  For that the Pronto core, its SMD
+  driver, SMSM, SCM and its own smp2p link are Linux's again; the modem, the DSP and
+  their links stay hidden.  If the phone resets when Wi-Fi is turned on, that start is
+  the step to look at - Wi-Fi stays off at boot unless it was on.
+- **Tested in QEMU** (`qrt.wifitest`, `qrt.wifitest=wpa`): `mac80211_hwsim`'s second
+  radio becomes a minimal access point ("QRT-Test", hostapd's part done by hand over
+  nl80211 - beacons, authentication, association and, for WPA2, the authenticator's
+  side of the 4-way handshake with password `qrtpassword`).  QRT finds it, joins it,
+  completes the handshake (the access point checks the MIC), installs the keys and
+  runs DHCP over it; frames go both ways, broadcasts decrypted with the group key.
+- Linux gains packet sockets and `mac80211_hwsim` (`config-arm64`); on the phone hwsim
+  makes no radios.
+
 ## 0.21.16: the serial console no longer stops Linux; brightness works again
 
 0.21.15 on the Mi A1: **touch works** - responsive, dragging, no stalls.  Its log had one

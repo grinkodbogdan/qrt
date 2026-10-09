@@ -411,16 +411,16 @@ void arm_main(const void *dtb, u64 base) {
     }
     /* Linux gets what QRT uses - touch, keys, backlight, battery gauge, eMMC and the clock,
      * power and PMIC plumbing under them - like 0.17-0.19, which never reset.  Kept from it:
-     * what goes through Qualcomm's secure world (IOMMU, GPU, video, modem, Wi-Fi, DSP,
-     * audio, camera, IPA), and what can reset or power off the phone by itself: Linux's
+     * what goes through Qualcomm's secure world (IOMMU, GPU, video, modem, DSP, audio,
+     * camera, IPA - not Wi-Fi: lwifi.c starts it when it is turned on), and what can reset or power off the phone by itself: Linux's
      * PS_HOLD restart/power-off driver (a thermal "critical" shutdown, any reboot inside
      * Linux, pulls it), the thermal sensors, the charger, the display's LAB/IBB rails, USB
      * and haptics.  qrt.allhw gives Linux all of it */
     if (!(bootargs && strstr(bootargs, "qrt.allhw"))) {
         static const char *const kept[] = {
             /* the secure world */
-            "qcom,msm-iommu-v1", "qcom,msm-iommu-v2", "qcom,adreno", "qcom,msm8953-venus", "qcom,msm8953-mss-pil", "qcom,pronto",
-            "qcom,msm8953-adsp-pil", "qcom,scm-msm8953", "qcom,smp2p", "qcom,smsm", "qcom,wcnss", "qcom,memshare",
+            "qcom,msm-iommu-v1", "qcom,msm-iommu-v2", "qcom,adreno", "qcom,msm8953-venus", "qcom,msm8953-mss-pil",
+            "qcom,msm8953-adsp-pil", "qcom,smp2p", "qcom,memshare",
             "qcom,rmtfs-mem", "qcom,apr-v2", "qcom,msm8953-qdsp6-sndcard", "qcom,msm8916-wcd-digital-codec",
             "qcom,pm8916-wcd-analog-codec", "qcom,ipa-lite-v2.6", "qcom,msm8953-camss", "qcom,msm8974-cci",
             /* what can reset or power off the phone */
@@ -428,8 +428,14 @@ void arm_main(const void *dtb, u64 base) {
             "qcom,msm8953-dwc3", "qcom,msm8953-qusb2-phy", "qcom,pmi8950-haptics", "qcom,msm8953-cpr4pd",
             "qcom,apcs-cc-msm8953", NULL };
         int hidden = 0;
+        /* Wi-Fi stays Linux's: the Pronto core, its SMD driver, SMSM, SCM and the Pronto core's
+         * own smp2p link - started only when Wi-Fi is turned on (lwifi.c) */
         for (int i = 0; kept[i]; i++)
-            for (int n = fdt_find_compatible(-1, kept[i]); n >= 0; n = fdt_find_compatible(n, kept[i])) { hide_from_linux(n); hidden++; }
+            for (int n = fdt_find_compatible(-1, kept[i]); n >= 0; n = fdt_find_compatible(n, kept[i])) {
+                if (!strcmp(fdt_name(n), "smp2p-wcnss")) continue;
+                hide_from_linux(n);
+                hidden++;
+            }
         klog("argon: %d device(s) kept from Linux (secure world, reset/power-off, thermal, charger, USB; qrt.allhw gives them)", hidden);
     }
     if (bootargs && strstr(bootargs, "qrt.nolinux")) klog("linux: off (qrt.nolinux)");
