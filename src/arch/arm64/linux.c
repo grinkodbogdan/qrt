@@ -576,6 +576,13 @@ static void firmware_from(const struct amnt *m) {
     fmt(p, sizeof p, "%s/image", m->lpath);
     write_text("/sys/module/firmware_class/parameters/path", p);
     klog("argon: firmware from %s (the phone's own)", p);
+    /* starting the modem, Wi-Fi and DSP goes through the secure world, which resets the
+     * phone when it does not like what it is given - 0.21.5 and 0.21.6 went dark seconds
+     * after the eMMC came up, as this ran.  Only with qrt.remoteproc on the command line. */
+    int ch = fdt_node("/chosen"), al;
+    const char *args = ch >= 0 ? fdt_prop(ch, "bootargs", &al) : NULL;
+    int start = args && strstr(args, "qrt.remoteproc");
+    if (!start) klog("argon: the modem, Wi-Fi and DSP stay off (qrt.remoteproc starts them)");
     long fd = l_open("/sys/class/remoteproc", 0200000);              /* the processors that wait for it */
     if (fd < 0) return;
     static char d[2048];
@@ -589,7 +596,11 @@ static void firmware_from(const struct amnt *m) {
         read_text(sp, fw, sizeof fw);
         fmt(sp, sizeof sp, "/sys/class/remoteproc/%s/state", nm);
         read_text(sp, st, sizeof st);
-        if (!strncmp(st, "offline", 7)) { write_text(sp, "start"); read_text(sp, st, sizeof st); }
+        if (start && !strncmp(st, "offline", 7)) {
+            klog("argon: starting %s (%s)", nm, fw);                 /* in the log kept across a reset */
+            write_text(sp, "start");
+            read_text(sp, st, sizeof st);
+        }
         for (char *c = fw; *c; c++) if (*c == '\n') *c = 0;
         for (char *c = st; *c; c++) if (*c == '\n') *c = 0;
         klog("argon: %s (%s): %s", nm, fw, st);

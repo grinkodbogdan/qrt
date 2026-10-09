@@ -355,7 +355,14 @@ void arm_main(const void *dtb, u64 base) {
         plog_state(PLOG_LINUX_OK);           /* the next boot tries Linux again */
         void plog_clear_fails(void);
         plog_clear_fails();
-    } else linux_start(dtb);
+    } else {
+        int plog_last_boot_unclean(void);
+        if (plog_last_boot_unclean()) {      /* a reset, a crash or the power key held: what came last */
+            klog("plog: the last boot ended without a shutdown; its log is up (volume up x3 closes it)");
+            logview_show_previous();
+        }
+        linux_start(dtb);
+    }
     shell_main();
     panic("the shell returned");
 }

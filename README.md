@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.8: touch is up - the modem stays off; a reset leaves its log on screen
+
+0.21.6 on the Mi A1: `event3 (generic ft5x06) ... (touch)` - with the clock controller
+up (0.21.5) the touch screen's driver binds.  A few seconds later the screen faded to
+black.  The eMMC controller probes now too, so Argon's storage thread mounted the modem
+partition and started the phone's remote processors (modem, Wi-Fi, DSP) - through the
+secure world, which resets the phone when a start goes wrong: the likely end of that
+boot.
+
+- The remote processors stay off unless `qrt.remoteproc` is on the command line
+  (Wi-Fi and the modem have no use in QRT yet); each start is logged before it happens.
+- A boot that ended without QRT shutting down or restarting (a reset, a crash, the
+  power key held) has its log shown at the next boot (`plog.c`): what came last before
+  it ended is on the screen for a photo.
+
 ## 0.21.7: no sleeping without a touch screen
 
 The shell no longer puts the screen to sleep while Linux has found no touch screen

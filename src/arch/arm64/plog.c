@@ -72,4 +72,7 @@ void plog_state(int s) { if (pl) { pl->state = (u32)s; __asm__ volatile("dsb sy"
 int plog_last_boot_failed(void) { return pl && pl->linux_fails >= 2; }
 void plog_clear_fails(void) { if (pl) { pl->linux_fails = 0; __asm__ volatile("dsb sy" ::: "memory"); } }
 int plog_prev_lines(void) { return nprev; }
+/* the last boot ended without QRT shutting down or restarting (a reset, a crash, the power
+ * key held) - its log is worth a look */
+int plog_last_boot_unclean(void) { return nprev && prev_state >= PLOG_BOOT && prev_state < PLOG_CLEAN; }
 const char *plog_prev_line(int i) { return i >= 0 && i < nprev ? prev[i] : NULL; }

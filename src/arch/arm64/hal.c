@@ -161,8 +161,8 @@ static void psci(u64 fn) {
     if (psci_hvc) __asm__ volatile("hvc #0" : "+r"(x0) :: "x1", "x2", "x3", "memory");
     else __asm__ volatile("smc #0" : "+r"(x0) :: "x1", "x2", "x3", "memory");
 }
-void power_off(void) { klog("power: off"); psci(0x84000008); for (;;) __asm__ volatile("wfe"); }
-void power_restart(void) { klog("power: restart"); psci(0x84000009); for (;;) __asm__ volatile("wfe"); }
+void power_off(void) { klog("power: off"); plog_state(PLOG_CLEAN); psci(0x84000008); for (;;) __asm__ volatile("wfe"); }
+void power_restart(void) { klog("power: restart"); plog_state(PLOG_CLEAN); psci(0x84000009); for (;;) __asm__ volatile("wfe"); }
 void hal_shutdown(void) { power_off(); }
 void hal_reboot(void) { power_restart(); }
 int  hal_reboot_to_firmware(void) { return 0; }
