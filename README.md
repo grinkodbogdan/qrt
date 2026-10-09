@@ -189,6 +189,14 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.15: the GPU's IOMMU kept from Linux too
+
+0.21.14 on the Mi A1: Linux stopped while starting - a fault in
+`qcom_iommu_device_probe` -> `qcom_scm_iommu_secure_ptbl_size`.  0.21.14 kept SCM (the
+secure world's call interface) from Linux, but only one of the two IOMMUs: the GPU's
+(`iommu@1c48000`, `qcom,msm-iommu-v2`) still probed and called the SCM that was no longer
+there.  Both IOMMUs are kept from Linux now.
+
 ## 0.21.14: Linux gets what QRT uses - nothing that can reset the phone
 
 0.21.13 on the Mi A1: touch arrives, every driver QRT needs binds - and the phone still

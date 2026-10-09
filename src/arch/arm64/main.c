@@ -406,7 +406,7 @@ void arm_main(const void *dtb, u64 base) {
     if (!(bootargs && strstr(bootargs, "qrt.allhw"))) {
         static const char *const kept[] = {
             /* the secure world */
-            "qcom,msm-iommu-v1", "qcom,adreno", "qcom,msm8953-venus", "qcom,msm8953-mss-pil", "qcom,pronto",
+            "qcom,msm-iommu-v1", "qcom,msm-iommu-v2", "qcom,adreno", "qcom,msm8953-venus", "qcom,msm8953-mss-pil", "qcom,pronto",
             "qcom,msm8953-adsp-pil", "qcom,scm-msm8953", "qcom,smp2p", "qcom,smsm", "qcom,wcnss", "qcom,memshare",
             "qcom,rmtfs-mem", "qcom,apr-v2", "qcom,msm8953-qdsp6-sndcard", "qcom,msm8916-wcd-digital-codec",
             "qcom,pm8916-wcd-analog-codec", "qcom,ipa-lite-v2.6", "qcom,msm8953-camss", "qcom,msm8974-cci",
