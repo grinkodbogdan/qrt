@@ -345,6 +345,7 @@ static void input_loop(void *arg) {
 
 static struct indev indevs[8];
 static int have_keys, have_touch;
+int input_has_touch(void) { return have_touch || !running; }    /* shell.c: no auto-sleep without one */
 int linux_has_keys(void) { return keys_live; }
 static int bit(const u8 *b, int n) { return b[n / 8] >> (n % 8) & 1; }
 static void input_open(const char *name) {

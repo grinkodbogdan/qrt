@@ -189,6 +189,14 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.7: no sleeping without a touch screen
+
+The shell no longer puts the screen to sleep while Linux has found no touch screen
+(`shell.c`, `linux.c`): with nothing to touch, the idle timeout would only hide the log
+that says why.  Also in this build: 0.21.6 (the display stays Tessera's) and 0.21.5
+(the clock controller waits for its power domain - the I2C bus the touch screen is on
+needs it).
+
 ## 0.21.6: the display stays Tessera's; Linux has the rest
 
 0.21.5 on the Mi A1: with the clock controller finally up, Linux's MSM display driver

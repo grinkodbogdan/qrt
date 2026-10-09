@@ -1495,6 +1495,8 @@ void shell_set_volume(int v) {
 }
 
 /* ---- lock screen and sleep --------------------------------------------------------- */
+/* the platform's input says whether a touch screen is there (ARM: Linux's evdev) */
+__attribute__((weak)) int input_has_touch(void) { return 1; }
 int shell_sleep_after(void) { return sh.sleep_after; }
 void shell_set_sleep_after(int seconds) {
     sh.sleep_after = MAX(0, seconds);
@@ -2175,8 +2177,9 @@ void shell_main(void) {
             for (int i = 0; i < 3; i++) hal_wait_frame();
             continue;
         }
-        /* sleep after the configured idle time (sooner on the lock screen) */
-        if (sh.sleep_after) {
+        /* sleep after the configured idle time (sooner on the lock screen) - not while there
+         * is no touch screen: the screen (and the log saying why) stays readable */
+        if (sh.sleep_after && input_has_touch()) {
             u64 limit = (u64)(sh.locked ? MIN(sh.sleep_after, 20) : sh.sleep_after) * 1000;
             if (now - sh.last_input_ms > limit) { go_to_sleep(); continue; }
         }
