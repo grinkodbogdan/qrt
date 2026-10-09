@@ -189,6 +189,14 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.9: the log shows whether touches arrive
+
+The first touch data a touch screen sends and the first five presses are logged
+(`linux: first touch data from ...`, `linux: touch down at x,y`): touching the screen
+with the log up tells whether the controller sends nothing or the presses get lost on
+the way to the shell.  Built on 0.21.8 (the modem, Wi-Fi and DSP stay off - starting
+them reset the phone in 0.21.6).
+
 ## 0.21.8: touch is up - the modem stays off; a reset leaves its log on screen
 
 0.21.6 on the Mi A1: `event3 (generic ft5x06) ... (touch)` - with the clock controller

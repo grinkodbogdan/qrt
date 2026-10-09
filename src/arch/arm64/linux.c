@@ -321,6 +321,8 @@ static void input_loop(void *arg) {
                     if (k.scan || k.ch) { keys_live = 1; inq_put(k); }
                 }
             } else if (e->type == 3 && d->abs) {                        /* EV_ABS */
+                static int said_abs;
+                if (said_abs++ == 0) klog("linux: first touch data from %s (axis %u = %d)", d->name, e->code, e->value);
                 int axis = e->code == 0 ? 0 : e->code == 1 ? 1 : -1;
                 if (e->code == 0x39) fingers += e->value >= 0 ? 1 : -1;  /* ABS_MT_TRACKING_ID */
                 if (axis < 0) continue;
@@ -330,7 +332,12 @@ static void input_loop(void *arg) {
                 moved = 1;
             } else if (e->type == 0 && e->code == 0 && d->abs) {         /* SYN_REPORT */
                 int f = fingers > 0 ? fingers : touch;
-                if (touch && !was) { event_t t = { .type = EV_DOWN, .x = x, .y = y, .fingers = f }; inq_put(t); }
+                if (touch && !was) {
+                    event_t t = { .type = EV_DOWN, .x = x, .y = y, .fingers = f };
+                    inq_put(t);
+                    static int said;                             /* the first touches, for the log */
+                    if (said++ < 5) klog("linux: touch down at %d,%d (%s)", x, y, d->name);
+                }
                 else if (touch && moved) { event_t t = { .type = EV_MOVE, .x = x, .y = y, .fingers = f }; inq_put(t); }
                 else if (!touch && was) { event_t t = { .type = EV_UP, .x = x, .y = y, .fingers = 0 }; inq_put(t); }
                 was = touch; moved = 0;
