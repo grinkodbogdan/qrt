@@ -463,6 +463,7 @@ int fb_take_dirty(int *x, int *y, int *w, int *h);
 void shell_redraw(void);
 static void display_loop(void *a) {
     (void)a;
+    if (fdt_find_compatible(-1, "qrt-,mdss") >= 0) return;          /* the display stays Tessera's (main.c) */
     long fd = -1;
     for (int tries = 0; fd < 0; tries++) {                           /* Linux's display driver probes */
         thr_sleep_us(500000);

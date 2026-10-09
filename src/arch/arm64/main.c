@@ -30,6 +30,15 @@ u64 k_now_ns(void) { u64 d = cntvct() - cnt_boot; return d / cnt_freq * 10000000
 u64 irq_save(void) { u64 f; __asm__ volatile("mrs %0, daif; msr daifset, #2" : "=r"(f) :: "memory"); return f; }
 void irq_restore(u64 f) { __asm__ volatile("msr daif, %0" : : "r"(f) : "memory"); }
 
+/* keep a device tree node from Linux: "qcom,..." compatibles become "qrt-,..." in place
+ * (same length), so no Linux driver matches it - whatever its status property says */
+static void hide_from_linux(int node) {
+    int len;
+    char *c = node >= 0 ? (char *)fdt_prop(node, "compatible", &len) : NULL;
+    for (int i = 0; c && i + 5 <= len; i++)
+        if ((i == 0 || c[i - 1] == 0) && !strncmp(c + i, "qcom,", 5)) memcpy(c + i, "qrt-,", 5);
+}
+
 /* ---- the console: QEMU's PL011, or a Qualcomm phone's UARTDM (the Mi A1's debug UART
  * at 78af000, on test pads), when the tree has one - every line of the log, Linux's too,
  * goes out from the first one.  UARTDM as Linux's msm_serial writes it (its register
@@ -247,9 +256,7 @@ void arm_main(const void *dtb, u64 base) {
                       !(R32(gcc + 0x203c) & (1u << 31)) && !(R32(gcc + 0x1008) & (1u << 31));
         if (u >= 0 && clocked && (!st || !strcmp(st, "okay"))) {
             uartdm = a;
-            /* Tessera's now: Linux's msm_serial would reprogram it under Tessera's writes */
-            char *ws = (char *)fdt_prop(u, "status", &sl);
-            if (ws && sl >= 9) { memset(ws, 0, (usize)sl); memcpy(ws, "disabled", 8); }
+            hide_from_linux(u);              /* Tessera's now: Linux's msm_serial would reprogram it under Tessera's writes */
         }
     }
     int len;
@@ -330,6 +337,15 @@ void arm_main(const void *dtb, u64 base) {
             memcpy(pc, which, strlen(which));
             klog("argon: panel %s (the boot loader's)", which);
         } else klog("argon: panel not named by the boot loader; Linux will not drive the display");
+    }
+    /* the display: Tessera draws into the boot loader's (as 0.17.0 and 0.21.4 did - clean).
+     * Linux's MSM display driver resets the panel when it probes and, on the Mi A1, has not
+     * brought it back yet (0.21.5: the screen faded to black); it is Linux's only with
+     * qrt.linuxdisplay on the command line (fastboot boot -c "... qrt.linuxdisplay") */
+    int mdss = fdt_find_compatible(-1, "qcom,mdss");
+    if (mdss >= 0 && !(bootargs && strstr(bootargs, "qrt.linuxdisplay"))) {
+        hide_from_linux(mdss);
+        klog("argon: the display stays Tessera's (Linux's display driver off; qrt.linuxdisplay turns it on)");
     }
     if (bootargs && strstr(bootargs, "qrt.nolinux")) klog("linux: off (qrt.nolinux)");
     else if (plog_last_boot_failed()) {

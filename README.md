@@ -189,6 +189,20 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.6: the display stays Tessera's; Linux has the rest
+
+0.21.5 on the Mi A1: with the clock controller finally up, Linux's MSM display driver
+probed too - it reset the panel (the picture faded to black within seconds) and did not
+bring it back.  Until it does, the display is Tessera's: it draws into the boot loader's
+display as 0.17.0 and 0.21.4 did (clean), and Linux's display driver does not see the
+display subsystem (`main.c`: its `qcom,` compatibles become `qrt-,`, so no Linux driver
+matches).  Linux keeps everything else - touch, keys, power, storage.  To try Linux's
+display driver anyway: `fastboot boot -c "<the usual command line> qrt.linuxdisplay" ...`.
+
+Also fixed: 0.21.3 meant to keep Linux's `msm_serial` off the UART Tessera logs to by
+writing "disabled" over its "okay" - which does not fit, so it never happened; the UART
+is hidden the same way as the display now.
+
 ## 0.21.5: the clock controller waits for its power domain - I2C, touch and the rest follow
 
 0.21.4 on the Mi A1: a clean screen, fast keys - and no touch.  Its log listed 12
