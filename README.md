@@ -189,6 +189,16 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.22.2: why wlan0 does not come up, in the log
+
+0.22.1 on the Mi A1: the Pronto core starts through the secure world (`remoteproc0
+running` - no reset) and `wlan0` appears; bringing it up then failed ("wlan0 would not
+come up").  That is where `wcn36xx` opens its HAL channel, loads the calibration and
+starts the radio.  Now (`lwifi.c`): any rfkill soft block is cleared first; bringing it
+up is tried six times, 2 s apart (the core may still be booting), with Linux's error
+code; and when it gives up, the log shows the last 32 lines Linux said about the core,
+`wcn36xx`, firmware, the Wi-Fi interface and rfkill.
+
 ## 0.22.1: the Wi-Fi core's memory found; why Wi-Fi does not start, in the log
 
 0.22.0 on the Mi A1: turning Wi-Fi on found the calibration file (persist), then "no

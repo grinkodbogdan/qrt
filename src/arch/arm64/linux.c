@@ -109,21 +109,23 @@ static char probs[NPROB][112];
 static int nprob;
 static int read_text(const char *path, char *out, int cap);
 /* Linux's lines about the Wi-Fi core, kept for lwifi.c to show when it does not start */
-#define NWIFI 24
+#define NWIFI 32                                        /* the last 32: a ring */
 static char wlines[NWIFI][120];
 static int nwl;
 static void keep_wifi(const char *l) {
-    static const char *const w[] = { "wcnss", "pronto", "scm", "PAS", "iris", "remoteproc", "a204000", "wcn36xx", "smsm", "smp2p", NULL };
-    if (nwl == NWIFI || strstr(l, "initcall") || strstr(l, "calling ")) return;
+    static const char *const w[] = { "wcnss", "pronto", "scm", "PAS", "iris", "remoteproc", "a204000", "wcn36xx", "smsm", "smp2p",
+                                     "wlan", "firmware", "nv.bin", "ieee80211", "phy0", "rfkill", NULL };
+    if (strstr(l, "initcall") || strstr(l, "calling ")) return;
     for (int i = 0; w[i]; i++)
         if (strstr(l, w[i])) {
             const char *m = l[0] == '[' && strchr(l, ']') ? strchr(l, ']') + 2 : l;
-            strlcpy(wlines[nwl++], m, sizeof wlines[0]);
+            strlcpy(wlines[nwl++ % NWIFI], m, sizeof wlines[0]);
             return;
         }
 }
 void argon_wifi_report(void) {
-    for (int i = 0; i < nwl; i++) klog("wifi: linux said: %s", wlines[i]);
+    int first = nwl > NWIFI ? nwl - NWIFI : 0;
+    for (int i = first; i < nwl; i++) klog("wifi: linux said: %s", wlines[i % NWIFI]);
     if (!nwl) klog("wifi: Linux said nothing about the Wi-Fi core");
     static const char *const devs[][2] = { { "a204000.remoteproc", "the Pronto core" }, { "a204000.remoteproc:iris", "its RF chip (iris)" },
                                            { "firmware:scm", "the secure world (SCM)" } };

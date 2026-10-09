@@ -585,8 +585,17 @@ static void start_work(void *a) {
             char p[96];
             fmt(p, sizeof p, "/proc/sys/net/ipv6/conf/%s/disable_ipv6", ifname);   /* IP is Tessera's */
             wr(p, "1");
-            if (if_up(1)) LOG("%s would not come up", ifname);
-            else if (pkt_open() == 0) {
+            /* rfkill: unblocked (a soft block refuses the interface) */
+            for (int i = 0; i < 4; i++) { char rp[64]; fmt(rp, sizeof rp, "/sys/class/rfkill/rfkill%d/soft", i); wr(rp, "0"); }
+            int r = -1;
+            for (int t = 0; t < 6 && (r = if_up(1)) != 0; t++) {        /* the core may still be booting */
+                LOG("%s would not come up (error %d)%s", ifname, r, t < 5 ? ", trying again" : "");
+                if (t < 5) thr_sleep_us(2000000);
+            }
+            if (r) {
+                void argon_wifi_report(void);
+                argon_wifi_report();                                       /* wcn36xx's own words */
+            } else if (pkt_open() == 0) {
                 ok = 1;
                 LOG("%s up, address %02x:%02x:%02x:%02x:%02x:%02x", ifname, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
             }
