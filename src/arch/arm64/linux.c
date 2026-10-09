@@ -116,6 +116,9 @@ static void keep_problem(const char *l) {
                                    strstr(l, "mmc") || strstr(l, "1-00")))
         hit = 1;                                                  /* what the touch screen and storage hang on */
     for (int i = 0; words[i] && !hit; i++) hit = strstr(l, words[i]) != NULL;
+    const char *ret = strstr(l, " returned -");                  /* initcall_debug: a probe that gave up quietly */
+    if (ret && strstr(l, "probe of ") && strncmp(ret, " returned -517", 14)) hit = 1;
+    if (strstr(l, "ignoring dependency")) hit = 1;
     if (!hit) return;
     const char *m = l[0] == '[' && strchr(l, ']') ? strchr(l, ']') + 2 : l;  /* without the timestamp */
     strlcpy(probs[nprob++], m, sizeof probs[0]);
@@ -719,7 +722,7 @@ static void linux_summary(void) {
         l_close((int)fd);
     }
     /* the drivers the touch screen and storage need, and how many devices each has */
-    static const char *const drv[] = { "qcom_rpm_smd_regulator", "qcom-clk-smd-rpm", "qcom-rpmpd", "i2c_qup", "sdhci_msm", NULL };
+    static const char *const drv[] = { "qcom_rpm_smd_regulator", "qcom-clk-smd-rpm", "qcom-rpmpd", "gcc-msm8953", "i2c_qup", "sdhci_msm", NULL };
     char line[160] = "", p[96];
     for (int i = 0; drv[i]; i++) {
         fmt(p, sizeof p, "/sys/bus/platform/drivers/%s", drv[i]);

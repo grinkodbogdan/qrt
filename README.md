@@ -189,6 +189,25 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.5: the clock controller waits for its power domain - I2C, touch and the rest follow
+
+0.21.4 on the Mi A1: a clean screen, fast keys - and no touch.  Its log listed 12
+devices waiting (both I2C buses, the DMA engines, USB, the interconnect, SCM, the
+IOMMU, the modem) and no I2C or eMMC controller bound; everything waiting takes its
+clocks from the clock controller (GCC), which was neither bound nor waiting.
+
+The cause: GCC (and the eMMC controller) sit in the RPM's CX power domain, and the
+RPM's power domains register late - once the RPM's channel is up, after Linux's
+initcalls.  A device whose power domain is missing by then is told "assuming no
+driver" (`-ENODEV`, printed only as a debug line) and never probed again.  Real Linux
+does not get there: its device links (`fw_devlink=on`) hold GCC back until the power
+domain exists; QRT boots Linux without them.  Now (LKL `drivers/pmdomain/core.c`) a
+missing power domain means "wait" inside QRT, and GCC probes when the RPM is up - and
+with it the I2C bus the touch screen is on.
+
+The log's summary now also keeps probes that gave up quietly (`probe of ... returned
+-19`, "ignoring dependency") and says whether `gcc-msm8953` bound.
+
 ## 0.21.4: the boot loader's display as 0.17.0 drove it
 
 0.17.0 showed a clean screen on the Mi A1; the scrambling came with the display changes

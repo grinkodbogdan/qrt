@@ -1883,6 +1883,25 @@ index 0e67f1721..6e4357332 100644
  	return &data->iop;
  
  out_free_data:
+diff --git a/drivers/pmdomain/core.c b/drivers/pmdomain/core.c
+index 29ad510e8..492ccda4b 100644
+--- a/drivers/pmdomain/core.c
++++ b/drivers/pmdomain/core.c
+@@ -2923,6 +2923,14 @@ static int __genpd_dev_pm_attach(struct device *dev, struct device *base_dev,
+ 		mutex_unlock(&gpd_list_lock);
+ 		dev_dbg(dev, "%s() failed to find PM domain: %ld\n",
+ 			__func__, PTR_ERR(pd));
++		/*
++		 * QRT: Linux boots without fw_devlink's ordering, and the RPM's
++		 * power domains register late (once the RPM's channel is up),
++		 * after initcalls: giving up then (-ENODEV) left the clock
++		 * controller, the eMMC and everything after them unprobed.  Wait.
++		 */
++		if (IS_ENABLED(CONFIG_LKL_QRT_SOC))
++			return -EPROBE_DEFER;
+ 		return driver_deferred_probe_check_state(base_dev);
+ 	}
+ 
 diff --git a/drivers/pmdomain/qcom/rpmpd.c b/drivers/pmdomain/qcom/rpmpd.c
 index 0be6b3026..23c62afcf 100644
 --- a/drivers/pmdomain/qcom/rpmpd.c
