@@ -107,7 +107,58 @@ static int plen;
 #define NPROB 32
 static char probs[NPROB][112];
 static int nprob;
+static int read_text(const char *path, char *out, int cap);
+/* Linux's lines about the Wi-Fi core, kept for lwifi.c to show when it does not start */
+#define NWIFI 24
+static char wlines[NWIFI][120];
+static int nwl;
+static void keep_wifi(const char *l) {
+    static const char *const w[] = { "wcnss", "pronto", "scm", "PAS", "iris", "remoteproc", "a204000", "wcn36xx", "smsm", "smp2p", NULL };
+    if (nwl == NWIFI || strstr(l, "initcall") || strstr(l, "calling ")) return;
+    for (int i = 0; w[i]; i++)
+        if (strstr(l, w[i])) {
+            const char *m = l[0] == '[' && strchr(l, ']') ? strchr(l, ']') + 2 : l;
+            strlcpy(wlines[nwl++], m, sizeof wlines[0]);
+            return;
+        }
+}
+void argon_wifi_report(void) {
+    for (int i = 0; i < nwl; i++) klog("wifi: linux said: %s", wlines[i]);
+    if (!nwl) klog("wifi: Linux said nothing about the Wi-Fi core");
+    static const char *const devs[][2] = { { "a204000.remoteproc", "the Pronto core" }, { "a204000.remoteproc:iris", "its RF chip (iris)" },
+                                           { "firmware:scm", "the secure world (SCM)" } };
+    for (usize i = 0; i < ARRAY_LEN(devs); i++) {
+        char p[128], t[8];
+        fmt(p, sizeof p, "/sys/bus/platform/devices/%s/uevent", devs[i][0]);
+        int there = read_text(p, (char[256]){ 0 }, 256) > 0;
+        fmt(p, sizeof p, "/sys/bus/platform/devices/%s/driver/uevent", devs[i][0]);
+        long fd = l_open(p, 0);
+        int bound = fd >= 0;
+        if (fd >= 0) l_close((int)fd);
+        (void)t;
+        klog("wifi: %s (%s): %s", devs[i][1], devs[i][0], !there ? "no such device" : bound ? "bound to its driver" : "NOT bound");
+    }
+    long fd = l_open("/sys/class/remoteproc", 0200000);
+    if (fd < 0) { klog("wifi: no remoteproc class in Linux"); return; }
+    static char d[2048];
+    long n = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+    l_close((int)fd);
+    int any = 0;
+    for (long o = 0; o < n; o += *(u16 *)(d + o + 16)) {
+        const char *nm = d + o + 19;
+        if (strncmp(nm, "remoteproc", 10)) continue;
+        char sp[96], f[64] = "", st[32] = "";
+        fmt(sp, sizeof sp, "/sys/class/remoteproc/%s/firmware", nm); read_text(sp, f, sizeof f);
+        fmt(sp, sizeof sp, "/sys/class/remoteproc/%s/state", nm); read_text(sp, st, sizeof st);
+        for (char *c = f; *c; c++) if (*c == '\n') *c = 0;
+        for (char *c = st; *c; c++) if (*c == '\n') *c = 0;
+        klog("wifi: %s: firmware %s, %s", nm, f, st);
+        any = 1;
+    }
+    if (!any) klog("wifi: Linux has no remote processors registered");
+}
 static void keep_problem(const char *l) {
+    keep_wifi(l);
     static const char *const words[] = { "error", "fail", "Fail", "unable", "Unable", "invalid", "not found", "No ", "timed out", "timeout",
                                          "smd:", "smem:", "rpm:", "probe of remoteproc", NULL };
     if (nprob == NPROB || strstr(l, "initcall") || strstr(l, "calling ") || strstr(l, "initial console")) return;
@@ -602,7 +653,7 @@ int argon_remoteproc_start(const char *fw) {
         char sp[96], st[32] = "", f[64] = "";
         fmt(sp, sizeof sp, "/sys/class/remoteproc/%s/firmware", nm);
         read_text(sp, f, sizeof f);
-        if (strncmp(f, fw, strlen(fw))) continue;
+        if (!strstr(f, fw)) continue;                              /* "wcnss.mdt", or a path ending in it */
         fmt(sp, sizeof sp, "/sys/class/remoteproc/%s/state", nm);
         read_text(sp, st, sizeof st);
         if (!strncmp(st, "running", 7)) return 1;

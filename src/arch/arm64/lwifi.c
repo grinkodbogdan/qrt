@@ -265,7 +265,12 @@ static int start_pronto(void) {
     }
     if (got <= 0) LOG("no WCNSS_qcom_wlan_nv.bin found (vendor, persist, system): the radio may not start");
     int r = argon_remoteproc_start("wcnss");
-    if (r <= 0) { LOG("%s", r ? "the Wi-Fi core did not start" : "no Wi-Fi core (remoteproc) in Linux"); return -1; }
+    if (r <= 0) {
+        LOG("%s", r ? "the Wi-Fi core did not start" : "no Wi-Fi core (remoteproc) in Linux");
+        void argon_wifi_report(void);
+        argon_wifi_report();                                           /* why: Linux's lines, the devices, the processors */
+        return -1;
+    }
     return 0;
 }
 

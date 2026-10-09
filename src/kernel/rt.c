@@ -14,12 +14,17 @@ void native_panic(const char *what, void *frame);
 
 #if defined(__aarch64__)
 /* ARM64: word loops (-ffreestanding keeps the compiler from making them calls to themselves) */
+/* only aligned words and bytes, never vector loads or stores: these also copy into device
+ * memory (Linux's firmware loader writing a remote processor's region), where an unaligned
+ * access faults */
 void *memset(void *d, int c, usize n) {
     u8 *p = d;
     u64 w = (u8)c * 0x0101010101010101ull;
+#pragma clang loop vectorize(disable)
     while (n && ((usize)p & 7)) { *p++ = (u8)c; n--; }
     for (; n >= 8; n -= 8, p += 8) *(volatile u64 *)p = w;
-    while (n--) *p++ = (u8)c;
+#pragma clang loop vectorize(disable)
+    while (n--) *(volatile u8 *)p++ = (u8)c;
     return d;
 }
 void *memcpy(void *d, const void *s, usize n) {
@@ -27,7 +32,8 @@ void *memcpy(void *d, const void *s, usize n) {
     const u8 *sp = s;
     if ((((usize)dp | (usize)sp) & 7) == 0)
         for (; n >= 8; n -= 8, dp += 8, sp += 8) *(volatile u64 *)dp = *(const u64 *)sp;
-    while (n--) *dp++ = *sp++;
+#pragma clang loop vectorize(disable)
+    while (n--) *(volatile u8 *)dp++ = *sp++;
     return d;
 }
 #else

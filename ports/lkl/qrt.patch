@@ -1893,6 +1893,56 @@ index 0e67f1721..6e4357332 100644
  	return &data->iop;
  
  out_free_data:
+diff --git a/drivers/of/of_reserved_mem.c b/drivers/of/of_reserved_mem.c
+index 46e1c3fbc..5f2e8e3cf 100644
+--- a/drivers/of/of_reserved_mem.c
++++ b/drivers/of/of_reserved_mem.c
+@@ -19,6 +19,7 @@
+ #include <linux/mm.h>
+ #include <linux/sizes.h>
+ #include <linux/of_reserved_mem.h>
++#include <linux/of_address.h>
+ #include <linux/sort.h>
+ #include <linux/slab.h>
+ #include <linux/memblock.h>
+@@ -611,6 +612,37 @@ struct reserved_mem *of_reserved_mem_lookup(struct device_node *np)
+ 		if (!strcmp(reserved_mem[i].name, name))
+ 			return &reserved_mem[i];
+ 
++#ifdef CONFIG_LKL_QRT_SOC
++	/*
++	 * QRT: LKL never scans the flattened tree's reserved memory at boot,
++	 * so the table is empty: a reserved-memory node is what its own reg
++	 * says (the Pronto core's firmware region, the modem's, ...).
++	 */
++	{
++		static struct reserved_mem extra[24];
++		static int nextra;
++		static DEFINE_MUTEX(lock);
++		struct reserved_mem *rm = NULL;
++		struct resource r;
++
++		mutex_lock(&lock);
++		for (i = 0; i < nextra && !rm; i++)
++			if (!strcmp(extra[i].name, name))
++				rm = &extra[i];
++		if (!rm && nextra < ARRAY_SIZE(extra) &&
++		    !of_address_to_resource(np, 0, &r)) {
++			rm = &extra[nextra++];
++			rm->name = name;
++			rm->base = r.start;
++			rm->size = resource_size(&r);
++			pr_info("qrt: reserved memory %s: %pa+%pa (from its reg)\n",
++				name, &rm->base, &rm->size);
++		}
++		mutex_unlock(&lock);
++		if (rm)
++			return rm;
++	}
++#endif
+ 	return NULL;
+ }
+ EXPORT_SYMBOL_GPL(of_reserved_mem_lookup);
 diff --git a/drivers/pmdomain/core.c b/drivers/pmdomain/core.c
 index 29ad510e8..492ccda4b 100644
 --- a/drivers/pmdomain/core.c

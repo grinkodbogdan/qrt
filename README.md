@@ -189,6 +189,24 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.22.1: the Wi-Fi core's memory found; why Wi-Fi does not start, in the log
+
+0.22.0 on the Mi A1: turning Wi-Fi on found the calibration file (persist), then "no
+Wi-Fi core (remoteproc) in Linux" - and Wi-Fi went off again.  Linux's Pronto driver
+looks its firmware region (`8e800000`, 7 MB) up in the reserved-memory table, which a
+normal Linux fills from the device tree at boot - and LKL never does: "unable to resolve
+memory-region", no remote processor.  (SMEM had the same, patched on its own in 0.18.)
+
+- **Reserved memory found by its own `reg`** (LKL `drivers/of/of_reserved_mem.c`): a
+  reserved-memory node missing from the table is looked up in the tree - for the Pronto
+  core and whatever else asks.
+- **When Wi-Fi does not start, the log says why**: every line Linux said about wcnss,
+  Pronto, SCM, PAS, iris, SMSM/smp2p and remote processors; whether the Pronto core,
+  its RF chip and SCM are bound to their drivers; every remote processor and its state.
+- Tessera's `memcpy`/`memset` stay word-or-byte (never vector) loops: Linux's firmware
+  loader copies into the Pronto core's region through them, and that region is device
+  memory, where an unaligned access faults.
+
 ## 0.22.0: Wi-Fi on the Mi A1 - Linux's wcn36xx, QRT's WPA2
 
 The Mi A1's Wi-Fi (WCN3680 behind the Pronto core) runs on Linux's own driver,
