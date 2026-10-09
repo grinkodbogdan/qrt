@@ -1703,7 +1703,7 @@ index 000000000..1b19445bf
 +MODULE_DESCRIPTION("DRM driver for otm1911 fhd video mode dsi panel");
 +MODULE_LICENSE("GPL");
 diff --git a/drivers/i2c/busses/i2c-qup.c b/drivers/i2c/busses/i2c-qup.c
-index d480162a4..22437e4e4 100644
+index d480162a4..943a81123 100644
 --- a/drivers/i2c/busses/i2c-qup.c
 +++ b/drivers/i2c/busses/i2c-qup.c
 @@ -393,6 +393,7 @@ static int qup_i2c_poll_state_mask(struct qup_i2c_dev *qup,
@@ -1726,22 +1726,30 @@ index d480162a4..22437e4e4 100644
  
  	if (ret || qup->bus_err || qup->qup_err) {
  		reinit_completion(&qup->xfer);
-@@ -900,8 +903,35 @@ static int qup_i2c_wait_for_complete(struct qup_i2c_dev *qup,
+@@ -900,8 +903,45 @@ static int qup_i2c_wait_for_complete(struct qup_i2c_dev *qup,
  	unsigned long left;
  	int ret = 0;
  
 +#ifdef CONFIG_LKL_QRT_SOC
 +	/*
 +	 * QRT: the interrupt reaches Linux through the host's poller and has
-+	 * been seen to go missing: look at the controller every 10 ms too.
++	 * been seen to go missing: look at the controller every 250-500 us
++	 * too, on hrtimers (a jiffy here is 10 ms, and a touch report is
++	 * several waits - with 10 ms polls touches arrived late).
 +	 */
 +	{
-+		unsigned long end = jiffies + qup->xfer_timeout;
++		ktime_t end = ktime_add_ms(ktime_get(), jiffies_to_msecs(qup->xfer_timeout));
 +
 +		for (;;) {
-+			left = wait_for_completion_timeout(&qup->xfer, msecs_to_jiffies(10));
-+			if (left)
++			if (try_wait_for_completion(&qup->xfer)) {
++				left = 1;
 +				break;
++			}
++			usleep_range(250, 500);
++			if (try_wait_for_completion(&qup->xfer)) {
++				left = 1;
++				break;
++			}
 +			disable_irq(qup->irq);
 +			qup_i2c_interrupt(qup->irq, qup);
 +			enable_irq(qup->irq);
@@ -1749,8 +1757,10 @@ index d480162a4..22437e4e4 100644
 +				left = 1;
 +				break;
 +			}
-+			if (time_after(jiffies, end))
++			if (ktime_after(ktime_get(), end)) {
++				left = 0;
 +				break;
++			}
 +		}
 +	}
 +#else
@@ -1762,7 +1772,7 @@ index d480162a4..22437e4e4 100644
  		writel(1, qup->base + QUP_SW_RESET);
  		ret = -ETIMEDOUT;
  	}
-@@ -1691,7 +1721,8 @@ static int qup_i2c_probe(struct platform_device *pdev)
+@@ -1691,7 +1731,8 @@ static int qup_i2c_probe(struct platform_device *pdev)
  		qup->adap.algo = &qup_i2c_algo_v2;
  		qup->adap.quirks = &qup_i2c_quirks_v2;
  		is_qup_v1 = false;

@@ -57,11 +57,24 @@ static void reap(void) {
 }
 
 /* switch to t; we come back here when something switches to us again */
+static u64 slice_from, long_us;
+static const char *long_name;
+/* the longest a thread ran without a switch since the last call (interrupts masked, or
+ * a tick that found nothing else ready): what held the shell up */
+void thr_longest(const char **name, u64 *us) {
+    u64 f = irq_save();
+    *name = long_name ? long_name : "-"; *us = long_us;
+    long_us = 0; long_name = NULL;
+    irq_restore(f);
+}
 static void sw(thr_t *t) {
     thr_t *prev = cur;
     u64 daif;
     __asm__ volatile("mrs %0, daif" : "=r"(daif));
     account();
+    u64 now = k_now_us();                                       /* the longest run without a switch */
+    if (prev != &main_thr && now - slice_from > long_us) { long_us = now - slice_from; long_name = prev->name; }
+    slice_from = now;
     cur = t;
     switches++;
     arm_switch(&prev->sp, t->sp);

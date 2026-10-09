@@ -55,6 +55,16 @@ static int serial_keys(event_t *out, int max) {
 }
 
 int hal_poll(event_t *out, int max) {
+    static u64 last_poll;                                     /* the shell's loop came back late */
+    u64 nowp = k_now_ms();
+    void thr_longest(const char **name, u64 *us);
+    const char *nm; u64 us;
+    thr_longest(&nm, &us);                                    /* since the last poll */
+    if (last_poll && nowp - last_poll > 250) {
+        static int said;
+        if (said++ < 20) klog("shell: stalled %llu ms (longest run without a switch: %s, %llu ms)", nowp - last_poll, nm, us / 1000);
+    }
+    last_poll = nowp;
     static u64 report_at;
     if (k_now_ms() >= report_at) { thr_report(); report_at = k_now_ms() + 10000; }
     int n = virtio_input_poll(out, max);

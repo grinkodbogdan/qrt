@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.13: quicker touch; the serial console no longer stalls the shell
+
+0.21.12 on the Mi A1: touch works - slowly, and the shell freezes now and then.
+
+- **I2C waits in 250-500 us steps** (LKL `i2c-qup.c`): the touch screen's driver reads
+  each report over I2C in several waits, and QRT's I2C patch looked at the controller
+  every 10 ms (a jiffy at Linux's 100 Hz) when its interrupt was late.  It now polls on
+  hrtimers.
+- **The serial console writes from a thread** (`main.c`): at 115200 baud a log line
+  takes ~7 ms, which every `klog` spent with interrupts masked since 0.21.3 sent the log
+  to the UART.  Lines now go into a 64 KB ring a low-priority thread drains, yielding
+  while the UART's FIFO is full; a panic still flushes it at once.
+- **Stalls are logged**: when the shell's loop comes back more than 250 ms late, the log
+  says `shell: stalled N ms` and which thread ran longest without a switch meanwhile.
+
 ## 0.21.12: the last boot's log survives a watchdog reset
 
 The log kept across a reset lived in the device tree's ramoops region (`9ff00000` on

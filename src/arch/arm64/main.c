@@ -66,16 +66,42 @@ void uart_putc(char c) {
     while (R32(pl011 + 0x18) & (1 << 5)) {}                    /* TX FIFO full */
     W32(pl011, (u8)c);
 }
-void uart_write(const char *s) {
-    if (uartdm) {                                                     /* a line at a time, with \r */
-        char b[256];
+/* the Qualcomm UART runs at 115200 baud - ~7 ms a line, which klog spent with interrupts
+ * masked: the shell stalled on every line.  Lines go into a ring that a thread drains,
+ * yielding while the FIFO is full; before that thread (and in a panic) they go straight out */
+#define SRING 65536
+static char sring[SRING];
+static u32 shead, stail, sdropped;
+static volatile int serial_thread;
+void uart_flush_now(void) {
+    while (stail != shead) {
+        char b[64];
         u32 n = 0;
+        while (n < sizeof b && stail + n != shead) { b[n] = sring[(stail + n) % SRING]; n++; }
+        dm_send(b, n);
+        stail += n;
+    }
+}
+static void serial_loop(void *a) {
+    (void)a;
+    for (;;) {
+        if (stail == shead) { thr_sleep_us(20000); continue; }
+        char b[64];
+        u32 n = 0;
+        while (n < sizeof b && stail + n != shead) { b[n] = sring[(stail + n) % SRING]; n++; }
+        for (int t = 0; t < 1000 && !(R32(uartdm + 0x08) & 8) && !(R32(uartdm + 0x14) & 0x80); t++) thr_sleep_us(200);
+        dm_send(b, n);                                                /* 64 bytes: the FIFO takes them */
+        stail += n;
+    }
+}
+void serial_start(void) { if (uartdm && !serial_thread) { serial_thread = 1; thr_create("serial", serial_loop, NULL, 16 << 10); } }
+void uart_write(const char *s) {
+    if (uartdm) {                                                     /* into the ring, with \r */
         for (; *s; s++) {
-            if (n > sizeof b - 2) { dm_send(b, n); n = 0; }
-            if (*s == '\n') b[n++] = '\r';
-            b[n++] = *s;
+            if (*s == '\n') { if (shead - stail < SRING) sring[shead++ % SRING] = '\r'; else sdropped++; }
+            if (shead - stail < SRING) sring[shead++ % SRING] = *s; else sdropped++;
         }
-        if (n) dm_send(b, n);
+        if (!serial_thread) uart_flush_now();                        /* early boot: no threads yet */
         return;
     }
     for (; *s; s++) { if (*s == '\n') uart_putc('\r'); uart_putc(*s); }
@@ -103,6 +129,7 @@ void native_panic(const char *what, void *frame) {
              r[30] >= b0 && r[30] < b1 ? r[30] - b0 : 0, QRT_VERSION);
         for (int i = 0; i < 30; i += 3) klog("x%-2d %016llx  x%-2d %016llx  x%-2d %016llx", i, r[i], i + 1, r[i + 1], i + 2, r[i + 2]);
     }
+    if (uartdm) uart_flush_now();                                 /* the panic's lines out on the UART */
     if (k.fb_base) { void logview_panic(void); logview_panic(); }   /* the panic's lines on the screen */
     if (k.fb_base) {                                              /* a red band across the top */
         static u32 red[2048 * 32];
@@ -327,6 +354,7 @@ void arm_main(const void *dtb, u64 base) {
     hal_arm_init();
     time_init();
     if (gic_init()) __asm__ volatile("msr daifclr, #2");          /* preemption from here on */
+    serial_start();                                               /* the UART's lines from a thread now */
     void fb_start_watch(void);
     fb_start_watch();
     /* Linux's drivers, on threads - unless the last boot reset the phone while they were
