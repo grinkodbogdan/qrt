@@ -189,6 +189,23 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.11: a panic stays on the screen; touch positions kept on the panel
+
+0.21.8 on the Mi A1 mounted every eMMC partition and kept the modem off - and still
+reset, in the shell but not while the log was up.  The log was up when a thin red band
+appeared: a Tessera panic.  While the log is up, input goes nowhere; in the shell, the
+touch screen's events arrive - the panic came with them.
+
+- **Touch positions are clamped to the panel** and the finger count to 0..5
+  (`linux.c`): a controller reporting past the panel's edge, or a tracking count gone
+  astray, reached the shell as it was.
+- **A panic shows the log** (`main.c`, `logview.c`): its message, the registers and the
+  program counter as an offset into the image (`in the image: pc +...`) are drawn on the
+  screen, under a thin red band.
+- **A panic no longer resets the phone**: it masked FIQs too, and Qualcomm's secure
+  world services its watchdog on FIQs - so the phone reset seconds later (the "random
+  reboots") and took the panic screen with it.  Now only IRQs are masked.
+
 ## 0.21.10: Linux keeps away from what needs the secure world
 
 0.21.6's last log on the Mi A1 stopped right after the touch screen came up - not even

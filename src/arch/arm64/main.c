@@ -89,18 +89,25 @@ extern char _start[], __bss_end[];   /* the image: _start .. __bss_end (both rel
 static const char *const kinds[] = { "EL1t sync", "EL1t IRQ", "EL1t FIQ", "EL1t SError", "synchronous exception", "IRQ", "FIQ",
                                      "SError (asynchronous abort)", "EL0 sync", "EL0 IRQ", "EL0 FIQ", "EL0 SError" };
 void native_panic(const char *what, void *frame) {
-    __asm__ volatile("msr daifset, #0xf");
+    /* IRQs off, FIQs left on: Qualcomm's secure world services its watchdog on FIQs -
+     * with them masked too the phone reset seconds after a panic and took the screen
+     * with the panic on it */
+    __asm__ volatile("msr daifset, #0x2");
     klog("*** QRT kernel panic: %s", what);
     if (frame) {
         u64 *r = frame;
         klog("pc %llx  lr %llx  sp %llx  esr %llx  far %llx", r[31], r[30], (u64)(usize)frame + 34 * 8,
              SYSREG_R(esr_el1), SYSREG_R(far_el1));
+        u64 b0 = (u64)(usize)_start, b1 = (u64)(usize)__bss_end;
+        klog("in the image: pc +%llx  lr +%llx  (version %s)", r[31] >= b0 && r[31] < b1 ? r[31] - b0 : 0,
+             r[30] >= b0 && r[30] < b1 ? r[30] - b0 : 0, QRT_VERSION);
         for (int i = 0; i < 30; i += 3) klog("x%-2d %016llx  x%-2d %016llx  x%-2d %016llx", i, r[i], i + 1, r[i + 1], i + 2, r[i + 2]);
     }
+    if (k.fb_base) { void logview_panic(void); logview_panic(); }   /* the panic's lines on the screen */
     if (k.fb_base) {                                              /* a red band across the top */
         static u32 red[2048 * 32];
         for (int i = 0; i < 2048 * 32; i++) red[i] = 0xc01c28;
-        for (int y = 0; y < 64; y += 32) fb_present(red - (usize)y * 2048, 2048, 0, y, (int)MIN(k.fb_w, 2048u), 32);
+        fb_present(red, 2048, 0, 0, (int)MIN(k.fb_w, 2048u), 8);    /* a thin one: the log under it stays readable */
         void fb_flush(void);
         fb_flush();
     }

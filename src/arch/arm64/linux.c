@@ -328,10 +328,14 @@ static void input_loop(void *arg) {
                 if (axis < 0) continue;
                 int span = d->max[axis] - d->min[axis];
                 int px = span > 0 ? (int)((i64)(e->value - d->min[axis]) * ((axis ? (int)k.fb_h : (int)k.fb_w) - 1) / span) : 0;
+                if (px < 0) px = 0;                                      /* a controller reporting past the panel */
+                if (axis && px >= (int)k.fb_h) px = (int)k.fb_h - 1;
+                if (!axis && px >= (int)k.fb_w) px = (int)k.fb_w - 1;
                 if (axis) y = px; else x = px;
                 moved = 1;
             } else if (e->type == 0 && e->code == 0 && d->abs) {         /* SYN_REPORT */
                 int f = fingers > 0 ? fingers : touch;
+                if (f > 5) f = 5;                                        /* a count gone astray */
                 if (touch && !was) {
                     event_t t = { .type = EV_DOWN, .x = x, .y = y, .fingers = f };
                     inq_put(t);
@@ -341,7 +345,7 @@ static void input_loop(void *arg) {
                 else if (touch && moved) { event_t t = { .type = EV_MOVE, .x = x, .y = y, .fingers = f }; inq_put(t); }
                 else if (!touch && was) { event_t t = { .type = EV_UP, .x = x, .y = y, .fingers = 0 }; inq_put(t); }
                 was = touch; moved = 0;
-                if (fingers < 0) fingers = 0;
+                if (fingers < 0 || fingers > 10) fingers = touch;
             }
         }
     }

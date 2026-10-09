@@ -49,11 +49,17 @@ int logview_key(void) {
 }
 
 /* draw it (hal_present while active: the shell's frames are not shown) */
+static void draw(void);
 void logview_draw(void) {
     static u64 last;
     u64 now = k_now_ms();
     if (now - last < 500) return;
     last = now;
+    draw();
+}
+void logview_draw_now(void) { draw(); }
+static void draw(void) {
+    u64 now = k_now_ms();
     if (!cv.px) cv = canvas_new((int)k.fb_w, (int)k.fb_h);
     const font_t *f = font_pick(F_MONO, k.fb_w >= 1000 ? 26 : 15);
     int lh = k.fb_w >= 1000 ? 32 : 19, rows = ((int)k.fb_h - lh * 2) / lh;
@@ -77,4 +83,11 @@ void logview_draw(void) {
         gfx_text_fit(&cv, f, 8, y, (int)k.fb_w - 16, l, col);
     }
     fb_present(cv.px, cv.stride, 0, 0, cv.w, cv.h);
+}
+
+/* a panic (main.c): the log, with the panic's lines, drawn once more before everything
+ * stops - the screen otherwise keeps whatever it showed before */
+void logview_panic(void) {
+    on = 1; previous = 0; until = 0; back = 0;
+    logview_draw_now();
 }
