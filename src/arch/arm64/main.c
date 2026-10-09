@@ -285,6 +285,20 @@ void arm_main(const void *dtb, u64 base) {
     extern u64 fb_other[4][2];
     extern int fb_nother;
     for (int i = 0; i < fb_nother; i++) add_hole(fb_other[i][0], fb_other[i][1]);   /* in case a layer stays on */
+    /* the log kept across a reset: the last MB of RAM below 4 GB, clear of every reserved
+     * region - not the tree's ramoops region, which Qualcomm's firmware fills with its own
+     * debug data ("DBGC") after a watchdog reset, so the last boot's log was gone */
+    u64 keep = 0;
+    for (int r = 0; r < nram; r++) {
+        u64 e = ram[r][0] + ram[r][1];
+        if (e > (4ull << 30)) e = 4ull << 30;
+        if (e < ram[r][0] + (2ull << 20)) continue;
+        u64 a = e - (1ull << 20);
+        int clear = 1;
+        for (int h = 0; h < nhole; h++) if (a < hole[h][0] + hole[h][1] && hole[h][0] < e) clear = 0;
+        if (clear && a > keep) keep = a;
+    }
+    if (keep) { add_hole(keep, 1ull << 20); ramoops[0] = keep; ramoops[1] = 1ull << 20; }
     u64 lo, hi;
     free_span(img_lo, img_hi, &lo, &hi);
     if (hi - lo < (64ull << 20)) panic("less than 64 MB of free RAM");

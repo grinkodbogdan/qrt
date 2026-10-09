@@ -189,6 +189,15 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.12: the last boot's log survives a watchdog reset
+
+The log kept across a reset lived in the device tree's ramoops region (`9ff00000` on
+the Mi A1) - and after a watchdog reset Qualcomm's firmware writes its own debug data
+there (the logs showed its magic, `43474244`, "DBGC"), so the reset boot's log was gone
+and could not be shown.  It now lives in the last MB of RAM below 4 GB, clear of every
+reserved region (`main.c`); the tree's ramoops region is only the fallback.  Checked in
+QEMU: after a reset the next boot opens the previous boot's log.
+
 ## 0.21.11: a panic stays on the screen; touch positions kept on the panel
 
 0.21.8 on the Mi A1 mounted every eMMC partition and kept the modem off - and still
