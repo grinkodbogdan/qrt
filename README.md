@@ -189,6 +189,16 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.10: Linux keeps away from what needs the secure world
+
+0.21.6's last log on the Mi A1 stopped right after the touch screen came up - not even
+the 10-second CPU report followed - and the phone reset.  Besides the modem, Wi-Fi and
+DSP (off since 0.21.8), the clock controller (0.21.5) let more of Linux's drivers start
+that hand requests to Qualcomm's secure world, which resets the phone when one does not
+suit it.  QRT has no use for them yet, so Linux does not see them (`main.c`, the same
+way as the display): the IOMMU, the GPU, the video codec, the modem, Wi-Fi and the audio
+DSP.  `qrt.allhw` on the command line gives them back.
+
 ## 0.21.9: the log shows whether touches arrive
 
 The first touch data a touch screen sends and the first five presses are logged

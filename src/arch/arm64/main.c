@@ -347,6 +347,18 @@ void arm_main(const void *dtb, u64 base) {
         hide_from_linux(mdss);
         klog("argon: the display stays Tessera's (Linux's display driver off; qrt.linuxdisplay turns it on)");
     }
+    /* hardware that needs Qualcomm's secure world to start (it resets the phone when a
+     * request does not suit it) and that QRT has no use for yet: the IOMMU, the GPU, the
+     * video codec, the modem, Wi-Fi and the audio DSP.  0.21.5 and 0.21.6 froze and reset
+     * seconds after Linux started with all of it; qrt.allhw gives it to Linux anyway */
+    if (!(bootargs && strstr(bootargs, "qrt.allhw"))) {
+        static const char *const secure[] = { "qcom,msm-iommu-v1", "qcom,adreno", "qcom,msm8916-venus", "qcom,msm8953-venus",
+                                              "qcom,msm8953-mss-pil", "qcom,pronto", "qcom,msm8953-adsp-pil", NULL };
+        int hidden = 0;
+        for (int i = 0; secure[i]; i++)
+            for (int n = fdt_find_compatible(-1, secure[i]); n >= 0; n = fdt_find_compatible(n, secure[i])) { hide_from_linux(n); hidden++; }
+        klog("argon: %d device(s) needing the secure world kept from Linux (IOMMU, GPU, video, modem, Wi-Fi, DSP; qrt.allhw gives them)", hidden);
+    }
     if (bootargs && strstr(bootargs, "qrt.nolinux")) klog("linux: off (qrt.nolinux)");
     else if (plog_last_boot_failed()) {
         klog("safe boot: the last two boots reset while Linux's drivers were starting (%d lines kept); Linux stays off this once",
