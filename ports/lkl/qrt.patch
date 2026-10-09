@@ -60,7 +60,7 @@ index ffb706aa7..1be93208a 100644
 +	depends on LKL_QRT_SOC
 +	default n
 diff --git a/arch/lkl/Makefile b/arch/lkl/Makefile
-index 003ca5a75..9d29dce1f 100644
+index 003ca5a75..e6b3b141c 100644
 --- a/arch/lkl/Makefile
 +++ b/arch/lkl/Makefile
 @@ -50,7 +50,7 @@ endif
@@ -68,7 +68,7 @@ index 003ca5a75..9d29dce1f 100644
  
  LDFLAGS_vmlinux += -r
 -LKL_ENTRY_POINTS := lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
-+LKL_ENTRY_POINTS := lkl_qrt_idle lkl_qrt_ram_phys lkl_qrt_fdt lkl_qrt_dma_base lkl_qrt_dma_size qrt_gic_cpu_base qrt_gic_lines lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
++LKL_ENTRY_POINTS := lkl_qrt_idle lkl_qrt_irq_tail lkl_qrt_ram_phys lkl_qrt_fdt lkl_qrt_dma_base lkl_qrt_dma_size qrt_gic_cpu_base qrt_gic_lines lkl_start_kernel lkl_sys_halt lkl_syscall lkl_trigger_irq \
  	lkl_get_free_irq lkl_put_irq lkl_is_running lkl_bug lkl_printf \
  	lkl_init lkl_cleanup
  
@@ -469,10 +469,27 @@ index 80a557a92..8e6cf0208 100644
  	syscalls_32.o cpu.o init.o stacktrace.o
 +obj-$(CONFIG_LKL_QRT_SOC) += qrt_soc.o
 diff --git a/arch/lkl/kernel/cpu.c b/arch/lkl/kernel/cpu.c
-index 4afab4817..57bc7b49c 100644
+index 4afab4817..cc90ec121 100644
 --- a/arch/lkl/kernel/cpu.c
 +++ b/arch/lkl/kernel/cpu.c
-@@ -189,6 +189,14 @@ static void lkl_cpu_cleanup(bool shutdown)
+@@ -92,6 +92,16 @@ void lkl_cpu_change_owner(lkl_thread_t owner)
+ 	lkl_ops->mutex_unlock(cpu.lock);
+ }
+ 
++#ifdef CONFIG_LKL_QRT_SOC
++/* QRT: this thread holds the LKL CPU (irq.c: lkl_qrt_irq_tail) */
++int lkl_cpu_mine(void)
++{
++	lkl_thread_t o = READ_ONCE(cpu.owner);
++
++	return o && cpu.count && lkl_ops->thread_equal(o, lkl_ops->thread_self());
++}
++#endif
++
+ int lkl_cpu_get(void)
+ {
+ 	int ret;
+@@ -189,6 +199,14 @@ static void lkl_cpu_cleanup(bool shutdown)
  		lkl_ops->mutex_free(cpu.lock);
  }
  
@@ -487,7 +504,7 @@ index 4afab4817..57bc7b49c 100644
  void arch_cpu_idle(void)
  {
  	if (cpu.shutdown_gate >= MAX_THREADS) {
-@@ -202,6 +210,8 @@ void arch_cpu_idle(void)
+@@ -202,6 +220,8 @@ void arch_cpu_idle(void)
  
  		lkl_ops->thread_exit();
  	}
@@ -497,7 +514,7 @@ index 4afab4817..57bc7b49c 100644
  	local_irq_enable();
  
 diff --git a/arch/lkl/kernel/irq.c b/arch/lkl/kernel/irq.c
-index fdbabc3e6..f415f1736 100644
+index fdbabc3e6..e2e7581d5 100644
 --- a/arch/lkl/kernel/irq.c
 +++ b/arch/lkl/kernel/irq.c
 @@ -11,6 +11,7 @@
@@ -519,7 +536,36 @@ index fdbabc3e6..f415f1736 100644
  		if (!irqs[i].user) {
  			irqs[i].user = user;
  			if (lkl_is_running())
-@@ -218,8 +223,21 @@ void init_IRQ(void)
+@@ -214,12 +219,50 @@ void arch_local_irq_restore(unsigned long flags)
+ 	irqs_enabled = flags;
+ }
+ 
++#ifdef CONFIG_LKL_QRT_SOC
++int lkl_cpu_mine(void);
++/*
++ * QRT: the host's own timer interrupt found this thread running Linux code.  With
++ * Linux's interrupts on, run what is pending now, as a real CPU would - a driver
++ * that spins on jiffies (or on a flag an interrupt sets) without cpu_relax() would
++ * otherwise wait for an interrupt that cannot arrive while it holds the CPU.
++ */
++int lkl_qrt_irq_tail(void)
++{
++	if (irqs_enabled != ARCH_IRQ_ENABLED)
++		return -1;
++	if (in_interrupt())
++		return -2;
++	if (!READ_ONCE(irq_index_status))
++		return -3;
++	if (!lkl_cpu_mine())
++		return -4;
++	irqs_enabled = ARCH_IRQ_DISABLED;
++	run_irqs();
++	irqs_enabled = ARCH_IRQ_ENABLED;
++	return 1;
++}
++#endif
++
+ void init_IRQ(void)
  {
  	int i;
  

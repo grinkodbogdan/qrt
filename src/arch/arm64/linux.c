@@ -75,6 +75,28 @@ void lkl_qrt_idle(void) { thr_yield(); }
 
 static int running, dead;
 int linux_running(void) { return running && !dead; }
+
+/* Argon's interrupts.  LKL takes an interrupt only when the thread holding Linux's CPU
+ * lets it (cpu_relax, local_irq_restore, giving the CPU up); a driver that spins on
+ * jiffies, or on a flag its interrupt sets, without doing so waits forever - the timer
+ * tick and the touch screen's interrupt sit pending behind it.  A real CPU takes the
+ * interrupt on top of whatever runs; so does this: Tessera's tick, returning into
+ * Linux's own code (not into a host operation it called), runs what Linux has pending
+ * when Linux's interrupts are on.  IRQs stay unmasked meanwhile (the frame and the
+ * FP/SIMD registers are saved on entry), so the shell keeps its tick. */
+int lkl_qrt_irq_tail(void);
+extern char __lkl_text_start[], __lkl_text_end[];
+static u64 tail_runs, tail_why[8];
+static thr_t *timer_thr;
+static int lkl_up;                                   /* from lkl_start_kernel() on */
+void argon_irq_tail(u64 pc) {
+    if (!lkl_up || dead || pc < (u64)(usize)__lkl_text_start || pc >= (u64)(usize)__lkl_text_end) return;
+    __asm__ volatile("msr daifclr, #2" ::: "memory");
+    int r = lkl_qrt_irq_tail();
+    if (r > 0) tail_runs++;
+    else tail_why[-r & 7]++;
+    __asm__ volatile("msr daifset, #2" ::: "memory");
+}
 void linux_failed(const char *why) { dead = 1; klog("linux: stopped (%s); the shell goes on - this log is in System", why); }
 
 /* ---- the host operations ---- */
@@ -181,7 +203,6 @@ static void *h_memmove(void *d, const void *s, unsigned long n) { return memmove
 /* one-shot timers: a list the timer thread runs */
 struct qtimer { void (*fn)(void); u64 due; int armed; struct qtimer *next; };
 static struct qtimer *timers;
-static thr_t *timer_thr;
 static void *h_timer_alloc(void (*fn)(void)) {
     struct qtimer *t = kalloc(sizeof *t);
     t->fn = fn;
@@ -444,7 +465,7 @@ static void display_loop(void *a) {
         thr_sleep_us(500000);
         if (dead) return;
         fd = l_open("/dev/fb0", 2);                                   /* O_RDWR */
-        if (tries == 120 && fd < 0) { klog("argon: no Linux display (/dev/fb0) after 60 s; the boot loader's stays"); return; }
+        if (tries == 120 && fd < 0) klog("argon: no Linux display (/dev/fb0) after 60 s; still waiting - the boot loader's stays meanwhile");
     }
     u8 var[160] = { 0 }, fix[80] = { 0 };
     l_ioctl((int)fd, 0x4600, var);                                    /* FBIOGET_VSCREENINFO */
@@ -736,6 +757,7 @@ static void linux_summary(void) {
             if (l && (!strncmp(l, "display:", 8) || !strncmp(l, "gic:", 4))) { char c[160]; strlcpy(c, l, sizeof c); klog("%s", c); shown++; }
         }
     }
+    klog("linux: %llu interrupt run(s) on top of spinning Linux code (not: %llu off, %llu nested, %llu none, %llu not owner)", tail_runs, tail_why[1], tail_why[2], tail_why[3], tail_why[4]);
     klog("linux: %d regulator(s); %d device(s) waiting; %d line(s) to note:", nreg, n, nprob);
     for (int i = 0; i < nprob; i++) klog("linux: ! %s", probs[i]);
 }
@@ -747,6 +769,7 @@ static void linux_main(void *a) {
     lkl_qrt_dma_size = arm_dma_pool_size;
     plog_state(PLOG_LINUX_STARTING);                                /* a reset from here on: the next boot is safe */
     if (lkl_init(&ops) < 0) { klog("linux: lkl_init failed"); return; }
+    lkl_up = 1;
     int r = lkl_start_kernel("mem=160M loglevel=8 initcall_debug clk_ignore_unused pd_ignore_unused "
                              "regulator_ignore_unused fw_devlink=permissive");
     if (r < 0) { klog("linux: did not start (%d)", r); return; }
@@ -775,6 +798,8 @@ static void linux_main(void *a) {
 
 int linux_start(const void *fdt) {
     dtb = fdt;
+    void fb_linux_owns_mdp(void);
+    fb_linux_owns_mdp();
     timer_thr = thr_create("linux timers", timer_loop, NULL, 64 << 10);
     thr_create("linux irqs", irq_loop, NULL, 64 << 10);
     thr_create("linux", linux_main, NULL, 128 << 10);
@@ -785,6 +810,7 @@ const char *linux_status(char *buf, int cap) {
     return buf;
 }
 #else
+void argon_irq_tail(u64 pc) { (void)pc; }
 int linux_has_keys(void) { return 0; }
 #include "../../drivers/battery.h"
 const battery_t *linux_battery(void) { return NULL; }

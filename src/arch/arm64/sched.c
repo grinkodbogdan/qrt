@@ -70,12 +70,21 @@ static void sw(thr_t *t) {
 }
 
 /* the next ready thread after the current one, waking sleepers that are due */
+static thr_t *rr_from;
 static thr_t *pick(u64 *soonest) {
     u64 now = k_now_us();
     *soonest = ~0ull;
     if (main_thr.state == T_SLEEP && main_thr.wake_at <= now) { main_thr.state = T_READY; main_boost = 1; }
-    if (main_boost && main_thr.state == T_READY) { main_boost = 0; return &main_thr; }
-    thr_t *t = cur->next;
+    if (main_boost && main_thr.state == T_READY) {
+        main_boost = 0;
+        if (cur != &main_thr) rr_from = cur;                      /* the turn the shell interrupted */
+        return &main_thr;
+    }
+    /* round robin goes on from the thread the shell's boost interrupted, not from the
+     * shell: otherwise whatever follows the shell in the ring always comes first and the
+     * threads between (Linux's timer thread, behind a busy Linux thread) never run */
+    thr_t *t = (cur == &main_thr && rr_from) ? rr_from->next : cur->next;
+    rr_from = NULL;
     for (int i = 0; i < nthreads; i++, t = t->next) {
         if (t->state == T_SLEEP) {
             if (t->wake_at <= now) t->state = T_READY;

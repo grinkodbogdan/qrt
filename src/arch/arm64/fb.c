@@ -291,6 +291,14 @@ void fb_stats(u64 *frames, u64 *us) { *frames = fb_frames; *us = fb_us; fb_frame
 u32 fb_underruns(void) { u32 n = underruns; underruns = 0; return n; }
 /* the underrun watch: a thread looking every 5 ms (a frame is 16 ms) */
 static void underrun_watch(void *a) { (void)a; for (;;) { count_underruns(); thr_sleep_us(5000); } }
+/* Linux's display driver is about to probe: the MDP's interrupts are its own from here
+ * (an underrun interrupt Tessera turned on would reach Linux's handler unasked) */
+void fb_linux_owns_mdp(void) {
+    u64 f = irq_save();
+    if (mdp_top) { W32(mdp_top + 0x10, R32(mdp_top + 0x10) & ~0x55000000u); W32(mdp_top + 0x18, 0x55000000u); }
+    mdp_top = 0;
+    irq_restore(f);
+}
 void fb_start_watch(void) { if (mdp_top) { W32(mdp_top + 0x10, R32(mdp_top + 0x10) | 0x55000000u); thr_create("display watch", underrun_watch, NULL, 16 << 10); } }
 /* px is the whole frame (stride pixels a row); the rectangle (x, y, w, h) of it goes to
  * the same place on the screen - as GOP's Blt and the x86-64 kernel's native_present */

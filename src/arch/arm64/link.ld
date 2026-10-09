@@ -3,7 +3,9 @@
 ENTRY(_start)
 SECTIONS {
     . = 0;
-    .text : { KEEP(*(.text.head)) *(.text .text.*) }
+    /* Linux's code (Argon) in one range: the timer interrupt runs Linux's pending
+     * interrupts only on top of Linux's own code (linux.c: argon_irq_tail) */
+    .text : { KEEP(*(.text.head)) __lkl_text_start = .; *lkl.o(.text .text.*) __lkl_text_end = .; *(.text .text.*) }
     . = ALIGN(16);
     .rodata : { *(.rodata .rodata.*) }
     . = ALIGN(16);

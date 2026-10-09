@@ -69,8 +69,13 @@ void native_panic(const char *what, void *frame) {
 void linux_failed(const char *why);
 void gic_irq(void);
 int  gic_init(void);
+void argon_irq_tail(u64 pc);
 void arm_exception(u64 kind, u64 *frame) {
-    if (kind == 5) { gic_irq(); return; }                         /* EL1h IRQ: the scheduler's tick */
+    if (kind == 5) {                                              /* EL1h IRQ: the scheduler's tick */
+        gic_irq();
+        argon_irq_tail(frame[31]);                                /* Linux's own interrupts, as a CPU takes them */
+        return;
+    }
     char m[96];
     fmt(m, sizeof m, "%s at %llx (ESR %llx, address %llx)", kind < 12 ? kinds[kind] : "exception", frame[31],
         SYSREG_R(esr_el1), SYSREG_R(far_el1));

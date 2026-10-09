@@ -189,6 +189,32 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.1: three bugs under Linux's drivers - starved timers, lost interrupts, clobbered registers
+
+0.21.0 on the Mi A1: the screen stayed scrambled and touch did nothing.  Three bugs in
+Tessera itself, under every driver Argon runs, found in QEMU:
+
+- **The scheduler starved threads** (`sched.c`): each tick the shell, woken, ran first;
+  when it slept again the round robin went on from the shell's place in the ring - so a
+  busy Linux thread, which follows it, always came next, and the threads between (Linux's
+  timer thread, its interrupt poller) waited seconds for a turn.  Linux's clock, its
+  timeouts, the touch screen's interrupt: all late or never.  The round robin now goes on
+  from the thread the shell interrupted.
+- **Linux's interrupts waited for a busy Linux thread** (`linux.c`, LKL `irq.c`): LKL
+  takes an interrupt only when the thread holding Linux's CPU lets it.  A driver that
+  waits on `jiffies` without `cpu_relax()` (RAID6's speed test was one) waited forever.
+  Tessera's tick now runs Linux's pending interrupts on top of Linux code, as a CPU would
+  (only in Linux's own code, only with Linux's interrupts on).  The RAID6 test that hung
+  0.21.0 in QEMU now finishes in under a second.
+- **A preempted thread lost its FP/SIMD registers** (`boot.S`): the interrupt entry saved
+  only the integer registers; the compiler uses q0-q31 in copies and pixel loops, and the
+  next thread to run could change them under the preempted one - in Linux's drivers or in
+  the shell's drawing.  All 32, FPSR and FPCR are saved now.
+
+Also: Tessera no longer turns on the display engine's underrun interrupts once Linux's
+display driver is starting (they would reach Linux's handler unasked), and it keeps
+waiting for Linux's display (`/dev/fb0`) past 60 s instead of giving up.
+
 ## 0.21.0: Argon - Linux's drivers for the whole Mi A1
 
 Tessera stays the kernel; **Argon** is a layer inside it that runs the Linux kernel (as a
