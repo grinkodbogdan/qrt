@@ -14,9 +14,8 @@
 #include "sched.h"
 
 char fb_what[128] = "none";
-static u64 mdp_top;                         /* MDP5: its interrupt status counts underruns */
 u64 fb_other[4][2]; int fb_nother;                 /* other layers' memory: kept out of the heap (main.c) */
-u64 fb_reserve_base, fb_reserve_size;      /* mapped cacheable by mmu.c: fb_present cleans what it writes */
+u64 fb_reserve_base, fb_reserve_size;      /* mapped uncached by mmu.c (as in 0.17.0) */
 static u8 *fb;
 static int bpp = 4, byte_of[4];            /* byte_of[c]: where channel c (0 R, 1 G, 2 B) goes */
 static u64 kick;                           /* a command-mode panel's CTL START register */
@@ -86,38 +85,27 @@ static int pipe_stage(u32 lay, u32 ext, int j) {
     if (mdp_pipes[j].sh < 0) return (int)(ext >> 20 & 0xf);                         /* the cursor: 4 bits in EXT */
     return (int)(lay >> mdp_pipes[j].sh & 7) | (int)(ext >> mdp_pipes[j].ext & 1) << 3;
 }
-/* the boot loader may leave more than one layer on (a logo, a warning over the splash);
- * Tessera's heap later takes their memory, and the screen shows old frames through
- * them.  Only Tessera's pipe stays staged in its mixer. */
-static void mdp5_only_ours(u64 mdp, u32 ours) {
-    int me = -1;
-    for (int j = 0; j < 5; j++) if (mdp_pipes[j].off == ours) me = j;
+/* the boot loader may leave more than one layer on (a logo, a warning over the splash).
+ * Their memory stays out of Tessera's heap (main.c), so they keep showing what the boot
+ * loader drew - as in 0.17.0.  Tessera never writes the MDP's layer registers: switching
+ * layers off by hand (0.19.x) was one of the changes the scrambled screen came with. */
+static void mdp5_note_others(u64 mdp, u32 ours) {
     for (int c = 0; c < 3; c++) {
         u64 cb = mdp + 0x1000 + 0x200 * (u64)c;
         for (int lm = 0; lm < 2; lm++) {
             u32 lay = R32(cb + 4 * (u64)lm), ext = R32(cb + 0x40 + 4 * (u64)lm);
             if (!lay && !ext) continue;
             klog("display: CTL%d mixer %d: layers %08x %08x", c, lm, lay, ext);
-            if (me < 0 || !pipe_stage(lay, ext, me)) continue;
-            u32 flush = 0;
             for (int j = 0; j < 5; j++) {
-                if (j == me || !pipe_stage(lay, ext, j)) continue;
+                if (mdp_pipes[j].off == ours || !pipe_stage(lay, ext, j)) continue;
                 u64 pb = mdp + mdp_pipes[j].off;
-                u32 out = R32(pb + 0x0c), oxy = R32(pb + 0x10);
                 u32 sz = R32(pb), ys = R32(pb + 0x24) & 0xffff, a = R32(pb + 0x14);
                 if (fb_nother < 4 && a && ys && arm_is_ram(a, (u64)ys * (sz >> 16))) {
                     fb_other[fb_nother][0] = a; fb_other[fb_nother][1] = (u64)ys * (sz >> 16); fb_nother++;
                 }
-                klog("display: the boot loader's layer %x (stage %d, %ux%u at %u,%u, memory %x) switched off",
-                     mdp_pipes[j].off, pipe_stage(lay, ext, j), out & 0xffff, out >> 16, oxy & 0xffff, oxy >> 16, R32(pb + 0x14));
-                if (mdp_pipes[j].sh < 0) ext &= ~(0xfu << 20);
-                else { lay &= ~(7u << mdp_pipes[j].sh); ext &= ~(1u << mdp_pipes[j].ext); }
-                flush |= 1u << mdp_pipes[j].flush;
+                klog("display: the boot loader's layer %x (stage %d, memory %x) stays; its memory is kept", mdp_pipes[j].off,
+                     pipe_stage(lay, ext, j), a);
             }
-            if (!flush) continue;
-            W32(cb + 4 * (u64)lm, lay);
-            W32(cb + 0x40 + 4 * (u64)lm, ext);
-            W32(cb + 0x18, flush | 1u << (6 + lm) | 1u << 17);           /* the pipes, the mixer, the CTL */
         }
     }
 }
@@ -173,8 +161,7 @@ static int mdp5_init(void) {
             u32 out = R32(p + 0x0c), oxy = R32(p + 0x10);
             klog("display: pipe %x: %ux%u from %x, out %ux%u at %u,%u, format %x", pipes[pi], w, h, addr, out & 0xffff, out >> 16,
                  oxy & 0xffff, oxy >> 16, format);
-            mdp5_only_ours(bases[bi], pipes[pi]);
-            mdp_top = bases[bi];
+            mdp5_note_others(bases[bi], pipes[pi]);
             return 1;
         }
     return 0;
@@ -205,12 +192,7 @@ static int splash_init(void) {
 int fb_init(void) { return ramfb_init() || mdp5_init() || splash_init(); }
 
 /* Tessera's pixels are 0x00RRGGBB */
-/* the framebuffer is cached: each written row goes out to memory (dc cvac) for the
- * display engine, which reads memory directly */
-static void clean(const u8 *p, usize n) {
-    for (u64 a = (u64)(usize)p & ~63ull, e = (u64)(usize)p + n; a < e; a += 64) __asm__ volatile("dc cvac, %0" : : "r"(a) : "memory");
-}
-/* formerly uncached: a row is converted in cached memory first and stored with
+/* the framebuffer is uncached: a row is converted in cached memory first and stored with
  * 8-byte writes (byte stores to uncached memory are each a bus write) */
 static void row_store(u8 *d, const u8 *s, usize n) {
     while (n && ((usize)d & 7)) { *d++ = *s++; n--; }
@@ -218,12 +200,6 @@ static void row_store(u8 *d, const u8 *s, usize n) {
     while (n--) *d++ = *s++;
 }
 static u64 fb_us, fb_frames;
-static u32 underruns;
-static void count_underruns(void) {
-    if (!mdp_top) return;
-    u32 st = R32(mdp_top + 0x14) & 0x55000000u;                        /* INTF0..3 UNDER_RUN */
-    if (st) { underruns++; W32(mdp_top + 0x18, st); }
-}
 /* a command-mode panel shows memory only when told (CTL START).  A frame takes ~15 ms to
  * go out, and a START during it cuts it short (the lower part of the screen kept an older
  * frame), while a START that is lost leaves the newest frame unseen.  So: START at most
@@ -254,8 +230,7 @@ static volatile int dx0 = 1 << 30, dy0 = 1 << 30, dx1, dy1, redirected;
 int fb_redirect(u8 *shadow, u32 w, u32 h, u32 stride_px, int r, int g, int b) {
     if (w != k.fb_w || h != k.fb_h) return -1;                       /* the shell is laid out for this size */
     u64 f = irq_save();
-    kick = 0;
-    mdp_top = 0;                                                      /* Linux's display driver has the MDP */
+    kick = 0;                                                         /* Linux's display driver has the MDP */
     fb = shadow;
     bpp = 4;
     byte_of[0] = r; byte_of[1] = g; byte_of[2] = b;
@@ -288,18 +263,9 @@ static void note_dirty(int x, int y, int w, int h) {
 /* now, without the thread (the panic screen: no other thread runs again) */
 void fb_flush(void) { if (kick) W32(kick, 1); }
 void fb_stats(u64 *frames, u64 *us) { *frames = fb_frames; *us = fb_us; fb_frames = fb_us = 0; }
-u32 fb_underruns(void) { u32 n = underruns; underruns = 0; return n; }
-/* the underrun watch: a thread looking every 5 ms (a frame is 16 ms) */
-static void underrun_watch(void *a) { (void)a; for (;;) { count_underruns(); thr_sleep_us(5000); } }
-/* Linux's display driver is about to probe: the MDP's interrupts are its own from here
- * (an underrun interrupt Tessera turned on would reach Linux's handler unasked) */
-void fb_linux_owns_mdp(void) {
-    u64 f = irq_save();
-    if (mdp_top) { W32(mdp_top + 0x10, R32(mdp_top + 0x10) & ~0x55000000u); W32(mdp_top + 0x18, 0x55000000u); }
-    mdp_top = 0;
-    irq_restore(f);
-}
-void fb_start_watch(void) { if (mdp_top) { W32(mdp_top + 0x10, R32(mdp_top + 0x10) | 0x55000000u); thr_create("display watch", underrun_watch, NULL, 16 << 10); } }
+u32 fb_underruns(void) { return 0; }
+void fb_linux_owns_mdp(void) { }
+void fb_start_watch(void) { }
 /* px is the whole frame (stride pixels a row); the rectangle (x, y, w, h) of it goes to
  * the same place on the screen - as GOP's Blt and the x86-64 kernel's native_present */
 void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
@@ -316,7 +282,6 @@ void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
         for (int r = 0; r < h; r++) {
             u8 *d = fb + (usize)(y + r) * line + (usize)x * 4;
             memcpy(d, px + (usize)r * stride, (usize)w * 4);
-            clean(d, (usize)w * 4);
         }
     } else {
         static u8 rowbuf[4096 * 4 + 16] __attribute__((aligned(16)));
@@ -331,7 +296,6 @@ void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
                 o[r0] = (u8)(v >> 16); o[g0] = (u8)(v >> 8); o[b0] = (u8)v;
             }
             row_store(d, b, (usize)n * (usize)bpp);
-            clean(d, (usize)n * (usize)bpp);
         }
     }
     note_dirty(x, y, w, h);

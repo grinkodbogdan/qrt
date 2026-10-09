@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.21.4: the boot loader's display as 0.17.0 drove it
+
+0.17.0 showed a clean screen on the Mi A1; the scrambling came with the display changes
+of 0.19.x.  Until Linux's display driver takes the panel (and in a safe boot), Tessera
+now drives the boot loader's display the way 0.17.0 did (`fb.c`, `main.c`):
+
+- **No MDP register writes.**  Tessera no longer switches the boot loader's other layers
+  off (0.19.6) nor turns on underrun interrupts (0.19.8): it only draws into the buffer
+  the splash pipe scans out.  The other layers' memory stays out of Tessera's heap, so
+  they keep what the boot loader drew.  (A command-mode panel still gets its START.)
+- **The framebuffer is uncached again**, as in 0.17.0 (it was write-back with cache
+  cleaning since 0.19.8); rows still go out as 8-byte stores, built in cached memory.
+
+Checked in QEMU with a 3-byte-pixel framebuffer like the Mi A1's, with Linux off.
+
 ## 0.21.3: a serial console on the Mi A1; booting through lk2nd
 
 - **Serial console** (`main.c`): Tessera writes its whole log - Linux's lines too, from

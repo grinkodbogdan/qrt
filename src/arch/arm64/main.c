@@ -278,11 +278,10 @@ void arm_main(const void *dtb, u64 base) {
     arm_dma_pool_size = 16ull << 20;
     hi -= arm_dma_pool_size;
     arm_dma_pool_base = hi;
-    void mmu_cached(u64 base, u64 size);
-    mmu_cached(fb_reserve_base, fb_reserve_size);                   /* fb.c cleans what it writes */
     u64 nc[10][2] = { { arm_dma_pool_base, arm_dma_pool_size } };
     int nnc = 1;
     for (int i = 0; i < nshared; i++) { nc[nnc][0] = shared[i][0]; nc[nnc][1] = shared[i][1]; nnc++; }
+    if (fb_reserve_size) { nc[nnc][0] = fb_reserve_base; nc[nnc][1] = fb_reserve_size; nnc++; }   /* the framebuffer: uncached, as in 0.17.0 */
     mmu_init((const u64 (*)[2])ram, nram, (const u64 (*)[2])nc, nnc, (const u64 (*)[2])hole, nhole);
     pmm_init(lo, hi);
     if (ramoops[1]) {                                               /* the log across resets */
