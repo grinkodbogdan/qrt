@@ -644,9 +644,18 @@ static void start_work(void *a) {
         if (testing) test_ap_setup();
         if (!find_wlan()) {
             LOG("starting the Wi-Fi core");
+            /* wcn36xx comes up over SMD once the core has booted: up to a minute when Linux is
+             * still busy with other drivers (0.22.7: 20 s was not always enough) */
             if (start_pronto() == 0)
-                for (int t = 0; t < 100 && !find_wlan(); t++) thr_sleep_us(200000);   /* wcn36xx comes up over SMD */
-            if (!ifindex) LOG("no Wi-Fi interface appeared in Linux");
+                for (int t = 0; t < 300 && !find_wlan(); t++) {
+                    if (t == 100) LOG("the Wi-Fi interface is slow to appear - still waiting");
+                    thr_sleep_us(200000);
+                }
+            if (!ifindex) {
+                LOG("no Wi-Fi interface appeared in Linux");
+                void argon_wifi_report(void);
+                argon_wifi_report();                                       /* wcn36xx's and SMD's own words */
+            }
         }
         if (ifindex) {
             char p[96];

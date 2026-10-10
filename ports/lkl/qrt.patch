@@ -2012,10 +2012,10 @@ index 8dcb41545..59d3bc43c 100644
 +obj-$(CONFIG_BATTERY_QCOM_FG)	+= qcom_fg.o
 diff --git a/drivers/power/supply/qcom_fg.c b/drivers/power/supply/qcom_fg.c
 new file mode 100644
-index 000000000..3f842a54d
+index 000000000..d50c9e2b1
 --- /dev/null
 +++ b/drivers/power/supply/qcom_fg.c
-@@ -0,0 +1,1359 @@
+@@ -0,0 +1,1364 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* Copyright (c) 2020, The Linux Foundation. All rights reserved. */
 +
@@ -2074,7 +2074,8 @@ index 000000000..3f842a54d
 +#define MEM_INTF_CTL_WR_EN		BIT(6)
 +#define RIF_MEM_ACCESS_REQ		BIT(7)
 +
-+#define MEM_IF_TIMEOUT_MS		5000
++/* QRT: a gauge whose SRAM never answers costs a second, once (then it is left alone) */
++#define MEM_IF_TIMEOUT_MS		(IS_ENABLED(CONFIG_LKL_QRT_SOC) ? 1000 : 5000)
 +#define SRAM_ACCESS_RELEASE_DELAY_MS	500
 +
 +struct qcom_fg_sram_regs {
@@ -2282,6 +2283,10 @@ index 000000000..3f842a54d
 +		spin_lock(&chip->sram_request_lock);
 +		chip->sram_requests--;
 +		spin_unlock(&chip->sram_request_lock);
++		/* QRT: no access ever came - take the request back, the gauge runs on */
++		if (IS_ENABLED(CONFIG_LKL_QRT_SOC))
++			qcom_fg_masked_write(chip, chip->sram_regs->cfg,
++					     RIF_MEM_ACCESS_REQ, 0);
 +	} else {
 +		ret = 0;
 +

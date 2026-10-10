@@ -189,6 +189,18 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.22.8: Wi-Fi waits for Linux; the gauge waits less
+
+0.22.7 on the Mi A1: **the battery shows** - but Wi-Fi's interface did not appear.
+The gauge driver now runs, and each read of its SRAM (voltage, current) waited up to
+5 s for an answer, slowing the rest of Linux's start; QRT gave `wlan0` only 20 s after
+starting the Wi-Fi core.
+
+- **Wi-Fi waits up to a minute** for its interface (a line after 20 s says it is still
+  waiting), and if it never comes, logs wcn36xx's and SMD's own lines.
+- **The gauge's SRAM** is waited for 1 s, once; with no answer the access request is
+  taken back and SRAM is not tried again - the charge level (a plain register) stays.
+
 ## 0.22.7: the battery's last link
 
 0.22.6's log on the Mi A1: `the gauge device exists`, `the gauge driver said nothing -
