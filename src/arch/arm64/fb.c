@@ -357,8 +357,10 @@ static void present_band(void *arg, int i, int n) {
         row_store(d, b, (usize)nn * (usize)bpp);
     }
 }
+void gpu_screen_sync(void);
 void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     if (!fb) return;
+    gpu_screen_sync();                   /* a GPU job still writing the screen (lgpu.c) finishes first */
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > (int)k.fb_w) w = (int)k.fb_w - x;

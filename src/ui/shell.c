@@ -118,9 +118,11 @@ static void trans_end(void) {
     sh.dirty = 1;
 }
 
+static u32 trans_gen;                    /* the pictures a transition blends changed (the GPU's copy of them) */
 static void trans_snapshot(void) {
     if (!tr.from.px || tr.from.w != ui.W || tr.from.h != ui.H) { if (tr.from.px) canvas_free(&tr.from); tr.from = canvas_new_pitched(ui.W, ui.H); }
     memcpy(tr.from.px, sh.scene.px, (usize)sh.scene.stride * ui.H * 4);
+    trans_gen++;
 }
 
 static void trans_start(int kind, int ms) {
@@ -212,6 +214,28 @@ static void trans_rows(int y0, int y1) {
 }
 static void trans_job(void *arg, int i, int n) { (void)arg; trans_rows(ui.H * i / n, ui.H * (i + 1) / n); }
 
+/* the frame on the GPU (the Mi A1's Adreno, lgpu.c): the same rows as trans_rows, written
+ * straight into the screen; 0 when there is none (weak: the PCs) */
+__attribute__((weak)) int gpu_transition(const u32 *from, const u32 *to, int stride, int w, int h, int kind, int t, int shift,
+                                         int cax, int cay, int caw, int cah, u32 gen) {
+    (void)from; (void)to; (void)stride; (void)w; (void)h; (void)kind; (void)t; (void)shift;
+    (void)cax; (void)cay; (void)caw; (void)cah; (void)gen;
+    return 0;
+}
+static int trans_gpu(void) {
+    float p = tr.cur;
+    if (sh.rot || sh.desk || tr.from.stride != sh.scene.stride) return 0;
+    rect_t ca = tr.kind == TR_UNLOCK ? full_rect() : content_rect();
+    int t, shift;
+    switch (tr.kind) {
+    case TR_RISE:   shift = (int)((1 - p) * dp(56)); t = (int)(p * 256); break;
+    case TR_SINK:   shift = (int)(p * dp(56)); t = (int)(p * 256); break;
+    case TR_UNLOCK: shift = (int)(p * ui.H); t = (int)(p * 160); break;
+    default:        shift = 0; t = (int)(p * 256); break;
+    }
+    return gpu_transition(tr.from.px, sh.scene.px, sh.scene.stride, ui.W, ui.H, tr.kind, t, shift, ca.x, ca.y, ca.w, ca.h, trans_gen);
+}
+
 static void present(const canvas_t *src, rect_t d);
 
 /* one animation frame; returns 0 once the transition is over */
@@ -225,6 +249,7 @@ static int trans_frame(void) {
         p = tr.p0 + ((float)tr.target - tr.p0) * e;
     }
     tr.cur = p;
+    if (trans_gpu()) return 1;
     int n = smp_workers();
     if (n) smp_run(trans_job, NULL, MIN(4 * (n + 1), 32)); else trans_rows(0, ui.H);
     present(&sh.frame, full_rect());
@@ -1221,6 +1246,7 @@ static void compose_job(void *arg, int i, int n) { compose_rect(band(compose_are
 static int force_single_core;
 
 static void compose(rect_t d) {
+    trans_gen++;
     k_walltime(&frame_time);
     if (d.w >= ui.W && d.h >= ui.H) sh.last_minute = frame_time.Minute;
     d = rect_intersect(d, full_rect());

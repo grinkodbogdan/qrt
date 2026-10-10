@@ -1,0 +1,9 @@
+#version 450
+// QRT's GPU self-test: each invocation writes id * k + 7 (lgpu.c checks every word)
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) buffer Out { uint d[]; };
+layout(push_constant) uniform P { uint k; uint n; } p;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < p.n) d[i] = i * p.k + 7u;
+}

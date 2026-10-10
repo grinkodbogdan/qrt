@@ -27,6 +27,7 @@
 #include "arm.h"
 #include "sched.h"
 #include "../../kernel/smp.h"
+#include "adreno/adreno.h"
 
 #ifdef QRT_LKL
 long argon_sys(long nr, long a, long b, long c, long d, long e);
@@ -285,7 +286,8 @@ static u32 g_frames, g_us;               /* since the last gpu_stats() */
 #define SLOT_BYTES 8192                  /* NSLOT of them fill cmd (64 KB) */
 static u32 slot_fence[NSLOT], nsub;
 static u64 st_t0, st_clean, st_submit, st_block;
-static u32 st_n, st_behind, last_fence;
+static u32 st_n, st_behind, last_fence, st_tn;
+static u64 st_tus;
 static int behind;
 
 static long info(u32 handle, u32 what, u64 *value, u32 len) {
@@ -320,8 +322,6 @@ static u64 map_phys(u64 pa, u64 len) {
 static u32 par(u32 v) { v ^= v >> 16; v ^= v >> 8; v ^= v >> 4; return (0x9669u >> (v & 15)) & 1; }
 static u32 pkt4(u32 reg, u32 cnt) { return 0x40000000u | cnt | par(cnt) << 7 | (reg & 0x3ffff) << 8 | par(reg) << 27; }
 static u32 pkt7(u32 op, u32 cnt) { return 0x70000000u | cnt | par(cnt) << 15 | (op & 0x7f) << 16 | par(op) << 23; }
-enum { CP_WAIT_FOR_IDLE = 0x26, CP_MEM_WRITE = 0x3d, CP_EVENT_WRITE = 0x46, CP_SET_RENDER_MODE = 0x6c, CP_BLIT = 0x2c,
-       CP_SKIP_IB2_ENABLE_GLOBAL = 0x1d, CP_SKIP_IB2_ENABLE_LOCAL = 0x23 };
 enum { EV_CACHE_FLUSH_TS = 4, EV_PC_CCU_FLUSH_COLOR_TS = 29, EV_LRZ_FLUSH = 38 };
 enum { RM_BLIT2DSCALE = 7, RM_END2D = 8 };
 
@@ -388,12 +388,11 @@ static void blit(const struct bv *v, u64 src, u32 spitch, u64 dst, u32 dpitch, i
 /* run what is in cmd (from its start to cp) and wait for it: 0, or why not.  Every
  * buffer the stream touches is listed (the driver maps a buffer's pages for the GPU
  * when a submit lists it): cmd, the scratch page, and up to two more */
-static long submit(u32 off, u32 bytes, const struct bo *x1, const struct bo *x2, u32 *fence) {
+static long submitc(const struct bo *cb, u32 off, u32 bytes, const struct bo *const *x, int nx, u32 *fence) {
     __asm__ volatile("dsb sy" ::: "memory");
-    struct { u32 flags, handle; u64 presumed; } bo[4] = { { 1, cmd.handle, 0 }, { 3, scr.handle, 0 } };   /* READ, READ | WRITE */
+    struct { u32 flags, handle; u64 presumed; } bo[8] = { { 1, cb->handle, 0 }, { 3, scr.handle, 0 } };   /* READ, READ | WRITE */
     u32 nb = 2;
-    if (x1) { bo[nb].flags = 3; bo[nb].handle = x1->handle; nb++; }
-    if (x2) { bo[nb].flags = 3; bo[nb].handle = x2->handle; nb++; }
+    for (int i = 0; i < nx && nb < 8; i++) if (x[i]) { bo[nb].flags = 3; bo[nb].handle = x[i]->handle; bo[nb].presumed = 0; nb++; }
     struct { u32 type, idx, off, size, pad, nr_relocs; u64 relocs; } c = { 1, 0, off, bytes, 0, 0, 0 };   /* MSM_SUBMIT_CMD_BUF */
     struct { u32 flags, fence, nr_bos, nr_cmds; u64 bos, cmds; int fence_fd; u32 queueid; u64 in_s, out_s; u32 nin, nout, stride, pad; } sb;
     memset(&sb, 0, sizeof sb);
@@ -404,6 +403,10 @@ static long submit(u32 off, u32 bytes, const struct bo *x1, const struct bo *x2,
     long r = S(NR_IOCTL, gfd, MSM_GEM_SUBMIT, &sb, 0, 0);
     *fence = sb.fence;
     return r;
+}
+static long submit(u32 off, u32 bytes, const struct bo *x1, const struct bo *x2, u32 *fence) {
+    const struct bo *x[2] = { x1, x2 };
+    return submitc(&cmd, off, bytes, x, 2, fence);
 }
 /* wait for a fence (timeout 0: only look - -ETIMEDOUT if not yet) */
 static long wait_fence(u32 fence, u32 timeout_ms) {
@@ -423,6 +426,163 @@ static long run(u32 timeout_ms, const struct bo *x1, const struct bo *x2) {
     u32 f;
     long r = submit(0, (u32)((u8 *)cp - (u8 *)cmd.cpu), x1, x2, &f);
     return r < 0 ? r : wait_fence(f, timeout_ms);
+}
+
+/* ---- compute: QRT's GPU programs (src/arch/arm64/gpu/NAME.comp, compiled by Mesa's ir3
+ * through tools/adreno/qrtcc into gpu_kernels.h).  The sequence follows Mesa's a5xx
+ * driver: fd5_emit_restore and the sysmem setup, cs_program_emit, emit_ssbos, the
+ * constants, fd5_launch_grid. ---- */
+struct gkernel {
+    const char *name;
+    const u32 *bin;
+    u32 sizedw, instrlen, regs, hregs, dts, branchstack, constlen;   /* constlen in vec4 */
+    u32 local[3];
+    u32 lid, wgid;                       /* registers the hardware fills: local invocation id, work-group id */
+    u32 push_off, push_dw;               /* the parameters, in the constant file (dwords) */
+    const u32 *imm;
+    u32 imm_off, imm_dw;                 /* immediates the compiler put in the constant file */
+};
+#include "gpu_kernels.h"
+static const struct gkernel *const kernels[] = { &gk_test, &gk_trans };
+enum { K_TEST, K_TRANS, NKERN };
+static struct bo kbo;                    /* the programs' machine code */
+static u64 kiova[NKERN];
+static u32 seq;                          /* QRT's own completion count: written by each job's last event */
+#define SEQ_DW 32                        /* where, in the scratch page */
+
+static int load_kernels(void) {
+    if (!bo_new(&kbo, 64 << 10)) return 0;
+    u32 off = 0;
+    for (int i = 0; i < NKERN; i++) {
+        const struct gkernel *k = kernels[i];
+        if (off + k->sizedw * 4 > kbo.size) return 0;
+        memcpy((u8 *)kbo.cpu + off, k->bin, k->sizedw * 4);
+        kiova[i] = kbo.iova + off;
+        off = (off + k->sizedw * 4 + 4095) & ~4095u;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    return 1;
+}
+/* the state a job starts from (fd5_emit_restore, the parts not about drawing; the
+ * sysmem setup of fd5_gmem.c): nothing of the shell's earlier jobs or the 2D copies stays */
+static void cs_restore(void) {
+    render_mode(BYPASS, 5);
+    out(pkt4(REG_A5XX_UCHE_CACHE_INVALIDATE_MIN_LO, 5)); out(0); out(0); out(0); out(0); out(0x12);
+    out(pkt7(CP_WAIT_FOR_IDLE, 0));
+    reg1(REG_A5XX_HLSQ_UPDATE_CNTL, 0xfffff);
+    reg1(REG_A5XX_RB_MODE_CNTL, 0x44);
+    reg1(REG_A5XX_RB_DBG_ECO_CNTL, 0x00100000);
+    reg1(REG_A5XX_VFD_MODE_CNTL, 0);
+    reg1(REG_A5XX_PC_MODE_CNTL, 0x1f);
+    reg1(REG_A5XX_SP_MODE_CNTL, 0x1e);
+    reg1(REG_A5XX_SP_DBG_ECO_CNTL, 0x40000800);
+    reg1(REG_A5XX_TPL1_MODE_CNTL, 0x544);
+    out(pkt4(REG_A5XX_HLSQ_TIMEOUT_THRESHOLD_0, 2)); out(0x80); out(0);
+    reg1(REG_A5XX_VPC_DBG_ECO_CNTL, 0x400);
+    reg1(REG_A5XX_HLSQ_MODE_CNTL, 1);
+    reg1(REG_A5XX_VPC_MODE_CNTL, 0);
+    out(pkt7(CP_SET_DRAW_STATE, 3));
+    out(CP_SET_DRAW_STATE__0_COUNT(0) | CP_SET_DRAW_STATE__0_DISABLE_ALL_GROUPS | CP_SET_DRAW_STATE__0_GROUP_ID(0));
+    out(0); out(0);
+    reg1(REG_A5XX_SP_HS_CTRL_REG0, 0);
+    reg1(REG_A5XX_SP_GS_CTRL_REG0, 0);
+    out(pkt4(REG_A5XX_TPL1_VS_TEX_COUNT, 4)); out(0); out(0); out(0); out(0);
+    out(pkt4(REG_A5XX_TPL1_FS_TEX_COUNT, 2)); out(0); out(0);
+    out(pkt7(CP_EVENT_WRITE, 1)); out(LRZ_FLUSH);
+    out(pkt7(CP_SKIP_IB2_ENABLE_GLOBAL, 1)); out(0);
+    out(pkt7(CP_EVENT_WRITE, 1)); out(PC_CCU_INVALIDATE_COLOR);
+    reg1(REG_A5XX_PC_POWER_CNTL, 3);
+    reg1(REG_A5XX_VFD_POWER_CNTL, 3);
+    out(pkt7(CP_WAIT_FOR_IDLE, 0));
+    reg1(REG_A5XX_RB_CCU_CNTL, 0x10000000);
+    reg1(REG_A5XX_RB_CNTL, A5XX_RB_CNTL_WIDTH(0) | A5XX_RB_CNTL_HEIGHT(0) | A5XX_RB_CNTL_BYPASS);
+}
+static void cs_consts(u32 off_dw, const u32 *d, u32 ndw) {
+    if (!ndw) return;
+    u32 nv = (ndw + 3) / 4;
+    out(pkt7(CP_LOAD_STATE4, 3 + nv * 4));
+    out(CP_LOAD_STATE4_0_DST_OFF(off_dw / 4) | CP_LOAD_STATE4_0_STATE_SRC(SS4_DIRECT) |
+        CP_LOAD_STATE4_0_STATE_BLOCK(SB4_CS_SHADER) | CP_LOAD_STATE4_0_NUM_UNIT(nv));
+    out(CP_LOAD_STATE4_1_EXT_SRC_ADDR(0) | CP_LOAD_STATE4_1_STATE_TYPE(ST4_CONSTANTS));
+    out(CP_LOAD_STATE4_2_EXT_SRC_ADDR_HI(0));
+    for (u32 i = 0; i < nv * 4; i++) out(i < ndw ? d[i] : 0);
+}
+/* one dispatch of kernel k over groups[0..2] work groups; buffers by binding (GPU address,
+ * bytes); push: its parameters.  Ends with QRT's sequence number written once all is out */
+static u32 cs_run(int ki, const u64 *buf, const u32 *bytes, int nbuf, const u32 *push, u32 gx, u32 gy) {
+    const struct gkernel *k = kernels[ki];
+    u64 ko = kiova[ki];
+    enum a3xx_threadsize thrsz = k->dts ? FOUR_QUADS : TWO_QUADS;
+    u32 instrlen = k->instrlen > 32 ? 0 : k->instrlen;
+    cs_restore();
+    reg1(REG_A5XX_SP_SP_CNTL, 0);
+    reg1(REG_A5XX_HLSQ_CONTROL_0_REG, A5XX_HLSQ_CONTROL_0_REG_FSTHREADSIZE(TWO_QUADS) |
+         A5XX_HLSQ_CONTROL_0_REG_CSTHREADSIZE(thrsz) | 0x00000880);
+    reg1(REG_A5XX_SP_CS_CTRL_REG0, A5XX_SP_CS_CTRL_REG0_THREADSIZE(thrsz) | A5XX_SP_CS_CTRL_REG0_HALFREGFOOTPRINT(k->hregs) |
+         A5XX_SP_CS_CTRL_REG0_FULLREGFOOTPRINT(k->regs) | A5XX_SP_CS_CTRL_REG0_BRANCHSTACK(k->branchstack) |
+         (instrlen ? A5XX_SP_CS_CTRL_REG0_BUFFER : 0) | 0x2);
+    reg1(REG_A5XX_HLSQ_CS_CONFIG, A5XX_HLSQ_CS_CONFIG_CONSTOBJECTOFFSET(0) | A5XX_HLSQ_CS_CONFIG_SHADEROBJOFFSET(0) | A5XX_HLSQ_CS_CONFIG_ENABLED);
+    reg1(REG_A5XX_HLSQ_CS_CNTL, A5XX_HLSQ_CS_CNTL_INSTRLEN(instrlen) | (nbuf ? A5XX_HLSQ_CS_CNTL_SSBO_ENABLE : 0));
+    reg1(REG_A5XX_SP_CS_CONFIG, A5XX_SP_CS_CONFIG_CONSTOBJECTOFFSET(0) | A5XX_SP_CS_CONFIG_SHADEROBJOFFSET(0) | A5XX_SP_CS_CONFIG_ENABLED);
+    out(pkt4(REG_A5XX_HLSQ_CS_CONSTLEN, 2)); out(k->constlen / 4); out(instrlen);
+    out(pkt4(REG_A5XX_SP_CS_OBJ_START_LO, 6));
+    out((u32)ko); out((u32)(ko >> 32));
+    out(0);                              /* SP_CS_PVT_MEM_PARAM: no private memory */
+    out(0); out(0);                      /* SP_CS_PVT_MEM_ADDR */
+    out(0);                              /* SP_CS_PVT_MEM_SIZE */
+    reg1(REG_A5XX_HLSQ_UPDATE_CNTL, 0x1f00000);
+    out(pkt4(REG_A5XX_HLSQ_CS_CNTL_0, 2));
+    out(A5XX_HLSQ_CS_CNTL_0_WGIDCONSTID(k->wgid) | A5XX_HLSQ_CS_CNTL_0_UNK0(0xfc) | A5XX_HLSQ_CS_CNTL_0_UNK1(0xfc) |
+        A5XX_HLSQ_CS_CNTL_0_LOCALIDREGID(k->lid));
+    out(1);                              /* HLSQ_CS_CNTL_1 */
+    if (instrlen) {
+        out(pkt7(CP_LOAD_STATE4, 3));
+        out(CP_LOAD_STATE4_0_DST_OFF(0) | CP_LOAD_STATE4_0_STATE_SRC(SS4_INDIRECT) |
+            CP_LOAD_STATE4_0_STATE_BLOCK(SB4_CS_SHADER) | CP_LOAD_STATE4_0_NUM_UNIT(k->instrlen));
+        out((u32)ko | CP_LOAD_STATE4_1_STATE_TYPE(ST4_SHADER));
+        out((u32)(ko >> 32));
+    }
+    reg1(REG_A5XX_TPL1_CS_TEX_COUNT, 0);
+    if (nbuf) {                          /* emit_ssbos: sizes (bytes), then addresses */
+        out(pkt7(CP_LOAD_STATE4, 3 + 2 * nbuf));
+        out(CP_LOAD_STATE4_0_DST_OFF(0) | CP_LOAD_STATE4_0_STATE_SRC(SS4_DIRECT) |
+            CP_LOAD_STATE4_0_STATE_BLOCK(SB4_CS_SSBO) | CP_LOAD_STATE4_0_NUM_UNIT(nbuf));
+        out(CP_LOAD_STATE4_1_STATE_TYPE(ST4_CONSTANTS) | CP_LOAD_STATE4_1_EXT_SRC_ADDR(0));
+        out(CP_LOAD_STATE4_2_EXT_SRC_ADDR_HI(0));
+        for (int i = 0; i < nbuf; i++) { out(A5XX_SSBO_1_0_WIDTH(bytes[i] & 0xffff)); out(A5XX_SSBO_1_1_HEIGHT(bytes[i] >> 16)); }
+        out(pkt7(CP_LOAD_STATE4, 3 + 2 * nbuf));
+        out(CP_LOAD_STATE4_0_DST_OFF(0) | CP_LOAD_STATE4_0_STATE_SRC(SS4_DIRECT) |
+            CP_LOAD_STATE4_0_STATE_BLOCK(SB4_CS_SSBO) | CP_LOAD_STATE4_0_NUM_UNIT(nbuf));
+        out(CP_LOAD_STATE4_1_STATE_TYPE(ST4_UBO) | CP_LOAD_STATE4_1_EXT_SRC_ADDR(0));
+        out(CP_LOAD_STATE4_2_EXT_SRC_ADDR_HI(0));
+        for (int i = 0; i < nbuf; i++) { out((u32)buf[i]); out((u32)(buf[i] >> 32)); }
+    }
+    cs_consts(k->push_off, push, k->push_dw);
+    cs_consts(k->imm_off, k->imm, k->imm_dw);
+    out(pkt4(REG_A5XX_HLSQ_CS_NDRANGE_0, 7));
+    out(A5XX_HLSQ_CS_NDRANGE_0_KERNELDIM(3) | A5XX_HLSQ_CS_NDRANGE_0_LOCALSIZEX(k->local[0] - 1) |
+        A5XX_HLSQ_CS_NDRANGE_0_LOCALSIZEY(k->local[1] - 1) | A5XX_HLSQ_CS_NDRANGE_0_LOCALSIZEZ(k->local[2] - 1));
+    out(A5XX_HLSQ_CS_NDRANGE_1_GLOBALSIZE_X(k->local[0] * gx)); out(0);
+    out(A5XX_HLSQ_CS_NDRANGE_3_GLOBALSIZE_Y(k->local[1] * gy)); out(0);
+    out(A5XX_HLSQ_CS_NDRANGE_5_GLOBALSIZE_Z(k->local[2])); out(0);
+    out(pkt4(REG_A5XX_HLSQ_CS_KERNEL_GROUP_X, 3)); out(1); out(1); out(1);
+    out(pkt7(CP_EXEC_CS, 4)); out(0); out(CP_EXEC_CS_1_NGROUPS_X(gx)); out(CP_EXEC_CS_2_NGROUPS_Y(gy)); out(CP_EXEC_CS_3_NGROUPS_Z(1));
+    out(pkt7(CP_WAIT_FOR_IDLE, 0));
+    /* the results out of the GPU's caches, then QRT's count - read by the CPU, no round trip */
+    seq++;
+    out(pkt7(CP_EVENT_WRITE, 4)); out(CACHE_FLUSH_TS);
+    out((u32)(scr.iova + SEQ_DW * 4)); out((u32)((scr.iova + SEQ_DW * 4) >> 32)); out(seq);
+    return seq;
+}
+static int seq_done(u32 s) { return (int)(((volatile u32 *)scr.cpu)[SEQ_DW] - s) >= 0; }
+/* wait for a job by its sequence number: spinning briefly, then yielding (ms at most) */
+static int seq_wait(u32 s, u32 ms) {
+    u64 end = k_now_us() + (u64)ms * 1000;
+    for (int i = 0; !seq_done(s); i++) {
+        if (k_now_us() > end) return 0;
+        if (i > 200) thr_yield();
+    }
+    return 1;
 }
 
 /* check 1: the command processor runs QRT's packets - a value written to memory */
@@ -474,6 +634,82 @@ static int test_copy(void) {
     if (ll && (!use_bv || use_bv != &bvs[0])) LOG("2D tries (good/written):%s", line);
     if (!use_bv) { LOG("the 2D engine copied exactly in none of them"); return 0; }
     LOG("the 2D engine copies: mode %u, op %u, %u-dword render mode, 2184=%u", use_bv->mode, use_bv->op, use_bv->rmlen, use_bv->r2184);
+    return 1;
+}
+
+/* ---- compute jobs: their own command buffer, a ring of slots ---- */
+static struct bo ccmd;
+#define CSLOTS 8
+#define CSLOT_BYTES 4096
+static u32 cslot_seq[CSLOTS], ncjob;
+static volatile int g_compute;           /* the GPU draws transitions */
+static u32 screen_seq;                   /* the last job that wrote the screen */
+/* start a job in the next slot (its last use done first): 0 if the GPU is stuck */
+static int cjob_begin(u32 *slot) {
+    *slot = ncjob % CSLOTS;
+    if (cslot_seq[*slot] && !seq_wait(cslot_seq[*slot], 200)) return 0;
+    cp = ccmd.cpu + *slot * (CSLOT_BYTES / 4);
+    return 1;
+}
+static long cjob_submit(u32 slot, u32 s, const struct bo *const *x, int nx) {
+    u32 f;
+    long r = submitc(&ccmd, slot * CSLOT_BYTES, (u32)((u8 *)cp - (u8 *)(ccmd.cpu + slot * (CSLOT_BYTES / 4))), x, nx, &f);
+    if (r >= 0) { cslot_seq[slot] = s; ncjob++; }
+    return r;
+}
+
+/* check 3: a GPU program runs - every invocation writes id * 3 + 7 */
+static int test_compute(void) {
+    struct bo o;
+    if (!bo_new(&o, 16384)) return 0;
+    for (u32 i = 0; i < 4096; i++) o.cpu[i] = 0;
+    u32 slot;
+    if (!cjob_begin(&slot)) return 0;
+    u64 b = o.iova; u32 n = 16384;
+    u32 push[2] = { 3, 4096 };
+    u32 s = cs_run(K_TEST, &b, &n, 1, push, 4096 / 64, 1);
+    const struct bo *x[1] = { &o };
+    u64 t0 = k_now_us();
+    long r = cjob_submit(slot, s, x, 1);
+    int done = r >= 0 && seq_wait(s, 2000);
+    u64 us = k_now_us() - t0;
+    int bad = 0, first = -1;
+    for (u32 i = 0; i < 4096; i++) if (o.cpu[i] != i * 3 + 7) { if (first < 0) first = (int)i; bad++; }
+    if (r < 0 || !done || bad) {
+        LOG("the test program: submit %ld, %s, %d of 4096 words wrong (first %d: %x)", r, done ? "done" : "never finished", bad, first,
+            first >= 0 ? o.cpu[first] : 0);
+        return 0;
+    }
+    LOG("QRT's GPU programs run: 4096 invocations exact, %llu us from submit to done", us);
+    return 1;
+}
+/* check 4: the transition program blends as the CPU does (a fade at t = 100) */
+static int test_trans(void) {
+    struct bo a, b, o;
+    if (!bo_new(&a, 16384) || !bo_new(&b, 16384) || !bo_new(&o, 16384)) return 0;
+    for (u32 i = 0; i < 64 * 16; i++) { a.cpu[i] = i * 2654435761u; b.cpu[i] = ~(i * 40503u); o.cpu[i] = 0; }
+    u32 slot;
+    if (!cjob_begin(&slot)) return 0;
+    u64 bu[3] = { a.iova, b.iova, o.iova };
+    u32 by[3] = { 4096, 4096, 4096 };
+    u32 push[12] = { 64, 16, 64, 64, 3, 100, 0, 0, 0, 0, 64, 16 };
+    u32 s = cs_run(K_TRANS, bu, by, 3, push, 1, 16);
+    const struct bo *x[3] = { &a, &b, &o };
+    long r = cjob_submit(slot, s, x, 3);
+    int done = r >= 0 && seq_wait(s, 2000);
+    int bad = 0, first = -1;
+    for (u32 i = 0; i < 64 * 16; i++) {
+        u32 pa = a.cpu[i], pb = b.cpu[i], t = 100;
+        u32 rb = (((pa & 0xff00ff) * (256 - t) + (pb & 0xff00ff) * t) >> 8) & 0xff00ff;
+        u32 g = (((pa & 0x00ff00) * (256 - t) + (pb & 0x00ff00) * t) >> 8) & 0x00ff00;
+        if (o.cpu[i] != (0xff000000u | rb | g)) { if (first < 0) first = (int)i; bad++; }
+    }
+    if (r < 0 || !done || bad) {
+        LOG("the transition program: submit %ld, %s, %d of 1024 pixels wrong (first %d: %x)", r, done ? "done" : "never finished", bad, first,
+            first >= 0 ? o.cpu[first] : 0);
+        return 0;
+    }
+    LOG("the transition program blends exactly");
     return 1;
 }
 
@@ -562,6 +798,46 @@ int gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int 
     fb_gpu_presented(x, y, w, h, us);
     return 1;
 }
+/* the CPU is about to write the screen (fb.c): the GPU's last job on it must be done */
+void gpu_screen_sync(void) {
+    if (screen_seq && !seq_done(screen_seq)) seq_wait(screen_seq, 100);
+}
+/* the shell's transition frame (shell.c trans_rows) on the GPU, straight into the screen;
+ * 0: the CPU does it.  from/to stay the same during a transition - written back from the
+ * CPU's cache once, when gen changes */
+int gpu_transition(const u32 *from, const u32 *to, int stride, int w, int h, int kind, int t, int shift,
+                   int cax, int cay, int caw, int cah, u32 gen) {
+    static u32 last_gen = ~0u;
+    if (!g_compute || logview_active() || w != (int)k.fb_w || h != (int)k.fb_h || ((usize)from & 63) || ((usize)to & 63)) return 0;
+    u64 t0 = k_now_us();
+    u64 len = (u64)stride * 4 * (u64)h;
+    u64 fa = frame_iova(from, len), ta = frame_iova(to, len);
+    if (!fa || !ta) return 0;
+    if (gen != last_gen) {
+        const u32 *c[2] = { from, to };
+        for (int i = 0; i < 2; i++) {
+            cj.px = c[i]; cj.stride = (usize)stride; cj.x = 0; cj.y = 0; cj.w = w; cj.h = h;
+            int bands = MIN(16, 2 * (smp_workers() + 1));
+            if (bands > 1) smp_run(clean_band, NULL, bands); else clean_band(NULL, 0, 1);
+        }
+        last_gen = gen;
+    }
+    u32 slot;
+    if (!cjob_begin(&slot)) { g_compute = 0; LOG("off: a transition frame never finished - the CPU draws them"); return 0; }
+    u64 bu[3] = { fa, ta, fb_iova };
+    u32 by[3] = { (u32)len, (u32)len, fb_pitch * (u32)h };
+    u32 push[12] = { (u32)w, (u32)h, (u32)stride, fb_pitch / 4, (u32)kind, (u32)t, (u32)shift, 0, (u32)cax, (u32)cay, (u32)caw, (u32)cah };
+    u32 s = cs_run(K_TRANS, bu, by, 3, push, ((u32)w + 63) / 64, (u32)h);
+    if (cjob_submit(slot, s, NULL, 0) < 0) { g_compute = 0; LOG("off: a transition frame could not be submitted"); return 0; }
+    screen_seq = s;
+    st_tn++; st_tus += k_now_us() - t0;
+    static u64 tlog;
+    if (!tlog) tlog = t0;
+    if (t0 - tlog >= 10000000) { LOG("10 s: %u transition frames drawn by the GPU, %llu us of CPU each", st_tn, st_tus / st_tn); st_tn = 0; st_tus = 0; tlog = t0; }
+    fb_gpu_presented(0, 0, w, h, k_now_us() - t0);
+    return 1;
+}
+
 int gpu_active(void) { return g_on; }
 void gpu_stats(u32 *frames, u32 *avg_us, int *coherent) {
     *frames = g_frames; *avg_us = g_frames ? g_us / g_frames : 0; *coherent = 0;
@@ -578,19 +854,25 @@ static void own_commands(long fd) {
     if (!bo_new(&cmd, 64 << 10) || !bo_new(&scr, 4096)) return;
     plog_state(PLOG_GPU_STARTING);       /* a hang that resets the phone: not again next boot */
     int ok = test_write() && test_copy();
+    int cok = ok && bo_new(&ccmd, CSLOTS * CSLOT_BYTES) && load_kernels() && test_compute() && test_trans();
     plog_state(PLOG_LINUX_OK);
     if (!ok) { fmt(state + strlen(state), sizeof state - strlen(state), "; QRT's commands failed (see the log)"); return; }
     int ch = fdt_node("/chosen"), al;
     const char *args = ch >= 0 ? fdt_prop(ch, "bootargs", &al) : NULL;
+    /* the screen for the GPU's programs: the 32-bit buffer (fb.c) */
+    if (fb32_base && fb_switch_32() && (fb_iova = map_phys(fb32_base, fb32_size))) fb_pitch = fb32_pitch();
+    if (cok && fb_iova && !(args && strstr(args, "qrt.nogpuanim"))) {
+        __asm__ volatile("dmb ish" ::: "memory");
+        g_compute = 1;
+        fmt(state + strlen(state), sizeof state - strlen(state), "; draws the transitions");
+        LOG("the GPU draws the shell's transitions from now on (qrt.nogpuanim: the CPU)");
+    } else if (!cok) fmt(state + strlen(state), sizeof state - strlen(state), "; its programs failed (see the log)");
     /* copying the CPU's frames does not pay (0.27.2 on the Mi A1): the CPU must write its
      * cache back over every changed pixel first - ~12 ms a full frame, the memory traffic
      * of its own copy - and a copy not waited for tears while scrolling.  The GPU earns its
      * keep when it draws; until then its frame copies are there for trying (qrt.gpudraw) */
     if (!(args && strstr(args, "qrt.gpudraw"))) { LOG("ready; the CPU puts the frames on the screen (qrt.gpudraw: the GPU)"); fmt(state + strlen(state), sizeof state - strlen(state), "; ready for QRT's commands"); return; }
-    if (!fb32_base || !fb_switch_32()) { LOG("no 32-bit screen: frames stay the CPU's"); return; }
-    fb_iova = map_phys(fb32_base, fb32_size);
-    if (!fb_iova) return;
-    fb_pitch = fb32_pitch();
+    if (!fb_iova) { LOG("no 32-bit screen: frames stay the CPU's"); return; }
     __asm__ volatile("dmb ish" ::: "memory");
     g_on = 1;
     fmt(state + strlen(state), sizeof state - strlen(state), "; puts the frames on the screen");
@@ -607,6 +889,9 @@ void lgpu_start(void) {
 const char *gpu_status(void) { return "the boot loader's framebuffer"; }
 void lgpu_start(void) {}
 int  gpu_active(void) { return 0; }
+void gpu_screen_sync(void) {}
+int  gpu_transition(const u32 *from, const u32 *to, int stride, int w, int h, int kind, int t, int shift,
+                    int cax, int cay, int caw, int cah, u32 gen) { (void)from; (void)to; (void)stride; (void)w; (void)h; (void)kind; (void)t; (void)shift; (void)cax; (void)cay; (void)caw; (void)cah; (void)gen; return 0; }
 int  gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int y, int w, int h) { (void)src; (void)sw; (void)sh; (void)stride; (void)rot; (void)x; (void)y; (void)w; (void)h; return 0; }
 void gpu_stats(u32 *frames, u32 *avg_us, int *coherent) { *frames = 0; *avg_us = 0; *coherent = 0; }
 #endif

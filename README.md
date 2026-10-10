@@ -189,6 +189,37 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.28.0: QRT's own GPU programs - the transitions drawn by the GPU
+
+0.27.3 measured why copying the CPU's frames does not pay: the pixels leave the CPU's
+cache either way.  The GPU pays when it computes the pixels itself.  So: QRT's own GPU
+programs, written in GLSL and compiled for the Adreno 506 by Mesa's compiler.
+
+- **The compiler** (`tools/adreno/`): `qrtcc` runs a compute shader (GLSL -> SPIR-V by
+  glslang) through Mesa's own front end (`spirv_to_nir`) and Adreno back end (ir3, as
+  Mesa's freedreno driver does) and writes `src/arch/arm64/gpu_kernels.h`: each program's
+  machine code, register footprint, constant layout and local size.  Buffers are SSBOs
+  by binding, parameters push constants.  `tools/adreno/build.sh MESA_SRC MESA_BUILD
+  GLSLANG` rebuilds the header; QRT's own build only uses it.
+- **Running them** (`lgpu.c`): the a5xx compute sequence after Mesa's driver
+  (`fd5_emit_restore`, `cs_program_emit`, `emit_ssbos`, constants through
+  `CP_LOAD_STATE4`, `fd5_launch_grid`); the register and packet definitions are the
+  generated Adreno headers (`src/arch/arm64/adreno/`).  Each job ends with a
+  `CACHE_FLUSH_TS` event writing QRT's own sequence number - the CPU sees a job is done
+  by reading memory, without a 28 ms round trip through Linux.  Jobs go into a ring of
+  command slots.
+- **Two more checks at boot**: a test program (4096 invocations, each writing
+  `id * 3 + 7`, compared word by word) and the transition program against the CPU's own
+  blend.  Only then does the GPU draw.
+- **The shell's transitions on the GPU** (`gpu/trans.comp`, `shell.c`): opening and
+  closing an app, unlocking - every frame was a CPU blend of two full screens and a
+  copy of it; now one GPU program blends the two pictures straight into the screen (the
+  pictures are written back from the CPU's cache once a transition).  The CPU waits for
+  the GPU's last job before it draws on the screen itself.  `qrt.nogpuanim` keeps them
+  the CPU's.
+- Every 10 s the log says how many transition frames the GPU drew and the CPU time
+  each took.
+
 ## 0.27.3: the CPU presents again - to the 32-bit screen; ripples gone
 
 0.27.2 on the Mi A1 measured a GPU frame copy: writing the CPU's cache back over the

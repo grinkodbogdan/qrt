@@ -1,0 +1,44 @@
+#version 450
+// The shell's transitions (shell.c trans_rows), on the GPU: the old picture (a) and the
+// new one (b) blended straight into the screen (o).  One invocation a pixel; the grid is
+// (W / 64, H).  Kinds: 1 rise, 2 sink, 3 fade, 4 unlock.
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, set = 0, binding = 1) readonly buffer B { uint b[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer O { uint o[]; };
+layout(push_constant) uniform P {
+    uint w, h, stride, ostride;        // pixels; source and screen rows in pixels
+    uint kind, t, shift, pad;          // t 0..256 (a -> b); shift: the rows moved
+    int cax, cay, caw, cah;            // the content area
+} p;
+
+uint lerp_px(uint x, uint y, uint t) {
+    uint rb = (((x & 0xff00ffu) * (256u - t) + (y & 0xff00ffu) * t) >> 8) & 0xff00ffu;
+    uint g = (((x & 0x00ff00u) * (256u - t) + (y & 0x00ff00u) * t) >> 8) & 0x00ff00u;
+    return 0xff000000u | rb | g;
+}
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    if (x >= int(p.w) || y >= int(p.h)) return;
+    uint s = p.stride, k = p.kind;
+    uint oi = uint(y) * p.ostride + uint(x);
+    bool rows = y >= p.cay && y < p.cay + p.cah;
+    if (k != 3u && k != 4u && !rows) { o[oi] = b[uint(y) * s + uint(x)]; return; }
+    if ((k == 1u || k == 2u) && (x < p.cax || x >= p.cax + p.caw)) { o[oi] = b[uint(y) * s + uint(x)]; return; }
+    uint pa, pb;
+    if (k == 1u) {                                        // the new view rises in
+        int sy = min(y + int(p.shift), p.cay + p.cah - 1);
+        pa = a[uint(y) * s + uint(x)]; pb = b[uint(sy) * s + uint(x)];
+    } else if (k == 2u) {                                 // the old view sinks
+        int sy = max(y - int(p.shift), p.cay);
+        pb = b[uint(y) * s + uint(x)]; pa = a[uint(sy) * s + uint(x)];
+    } else if (k == 4u) {                                 // the lock screen slides up
+        int sy = y + int(p.shift);
+        pb = b[uint(y) * s + uint(x)];
+        pa = sy < int(p.h) ? a[uint(sy) * s + uint(x)] : pb;
+    } else {
+        pa = a[uint(y) * s + uint(x)]; pb = b[uint(y) * s + uint(x)];
+    }
+    o[oi] = p.t >= 256u ? pb : p.t == 0u ? pa : lerp_px(pa, pb, p.t);
+}
