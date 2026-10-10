@@ -189,6 +189,18 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.23.1: why there is no sound card
+
+0.23.0 on the Mi A1: the audio DSP started, but no sound card appeared within 30 s.
+The card binds only when every part it names has come up (the DSP's APR services over
+SMD, the codecs, the MAX98927 amplifier), so the reason is one of those.
+
+- **What Linux has, in the log** (`sound:` lines), when there is no card 30 s after
+  the DSP started, and again at 2 minutes: Linux's own lines about the DSP, APR, the q6
+  services, the card and codecs; the SMD channels the DSP opened; the APR services; the
+  sound devices; every device still waiting, and why.
+- **QRT keeps waiting** for the card up to 3 minutes and plays once it comes.
+
 ## 0.23.0: Wi-Fi on from the start, settings that stay, sound
 
 On the Mi A1, 0.22.8: Wi-Fi works, the battery shows.  Two things asked for next: Wi-Fi

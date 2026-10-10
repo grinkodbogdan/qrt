@@ -123,6 +123,62 @@ static void keep_wifi(const char *l) {
             return;
         }
 }
+/* the same for sound: the audio DSP, APR and its services, the card, the codecs */
+#define NSND 40
+static char slines[NSND][120];
+static int nsl;
+static void keep_sound(const char *l) {
+    static const char *const w[] = { "adsp", "c200000", "lpass", "apr", "q6", "snd", "sound", "asoc", "ASoC", "wcd", "max98927",
+                                     "MI2S", "amplifier", "audio", "dai", NULL };
+    if (strstr(l, "initcall") || strstr(l, "calling ")) return;
+    for (int i = 0; w[i]; i++)
+        if (strstr(l, w[i])) {
+            const char *m = l[0] == '[' && strchr(l, ']') ? strchr(l, ']') + 2 : l;
+            strlcpy(slines[nsl++ % NSND], m, sizeof slines[0]);
+            return;
+        }
+}
+static void list_dir(const char *what, const char *dir) {
+    char line[200] = "";
+    long fd = l_open(dir, 0200000);
+    if (fd >= 0) {
+        static char d[2048];
+        long n = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+        l_close((int)fd);
+        for (long o = 0; o < n; o += *(u16 *)(d + o + 16)) {
+            const char *nm = d + o + 19;
+            if (nm[0] == '.') continue;
+            usize l = strlen(line);
+            fmt(line + l, sizeof line - l, " %s", nm);
+        }
+    }
+    klog("sound: %s:%s", what, line[0] ? line : fd < 0 ? " (none - no such bus)" : " none");
+}
+void argon_sound_report(void) {
+    int first = nsl > NSND ? nsl - NSND : 0;
+    for (int i = first; i < nsl; i++) klog("sound: linux said: %s", slines[i % NSND]);
+    if (!nsl) klog("sound: Linux said nothing about the audio DSP or the card");
+    list_dir("SMD channels (rpmsg)", "/sys/bus/rpmsg/devices");
+    list_dir("DSP services (APR)", "/sys/bus/aprbus/devices");
+    list_dir("sound devices", "/sys/class/sound");
+    long fd = l_open("/sys/kernel/debug/devices_deferred", 0);       /* who waits, and for what */
+    if (fd >= 0) {
+        static char buf[4096];
+        long len = l_read((int)fd, buf, sizeof buf - 1);
+        l_close((int)fd);
+        buf[len > 0 ? len : 0] = 0;
+        int n = 0;
+        for (char *l = buf; *l; ) {
+            char *e = strchr(l, '\n');
+            if (e) *e = 0;
+            for (char *t = l; *t; t++) if (*t == '\t') *t = ' ';
+            if (*l) { klog("sound: waiting: %s", l); n++; }
+            if (!e) break;
+            l = e + 1;
+        }
+        if (!n) klog("sound: no device waiting");
+    }
+}
 void argon_wifi_report(void) {
     int first = nwl > NWIFI ? nwl - NWIFI : 0;
     for (int i = first; i < nwl; i++) klog("wifi: linux said: %s", wlines[i % NWIFI]);
@@ -161,6 +217,7 @@ void argon_wifi_report(void) {
 }
 static void keep_problem(const char *l) {
     keep_wifi(l);
+    keep_sound(l);
     static const char *const words[] = { "error", "fail", "Fail", "unable", "Unable", "invalid", "not found", "No ", "timed out", "timeout",
                                          "smd:", "smem:", "rpm:", "probe of remoteproc", NULL };
     if (nprob == NPROB || strstr(l, "initcall") || strstr(l, "calling ") || strstr(l, "initial console")) return;

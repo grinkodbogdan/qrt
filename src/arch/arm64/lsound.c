@@ -158,9 +158,21 @@ card:;
     int i = 0;
     for (; i < 150 && rd(sp, t, sizeof t) <= 0; i++) thr_sleep_us(200000);
     if (i == 150) {
-        fmt(state, sizeof state, "off: no sound card 30 s after the DSP started");
-        LOG("%s", state);
-        goto silent;
+        /* say why, then keep waiting: a card can bind late (its parts probe in any order) */
+        void argon_sound_report(void);
+        fmt(state, sizeof state, "waiting: no sound card 30 s after the DSP started (see the log)");
+        LOG("no sound card 30 s after the DSP started - what Linux has:");
+        argon_sound_report();
+        for (i = 0; i < 900 && rd(sp, t, sizeof t) <= 0; i++) {
+            thr_sleep_us(200000);
+            if (i == 450) { LOG("still no sound card at 2 minutes:"); argon_sound_report(); }
+        }
+        if (i == 900) {
+            fmt(state, sizeof state, "off: no sound card (see the log's sound: lines)");
+            LOG("%s", state);
+            goto silent;
+        }
+        LOG("the sound card came late");
     }
     S(34, AT_FDCWD, "/proc", 0555, 0, 0);                            /* mkdirat; mount proc */
     S(40, "proc", "/proc", "proc", 0, 0);
