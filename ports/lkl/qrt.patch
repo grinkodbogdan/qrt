@@ -443,11 +443,38 @@ index e2fbe1a5c..64a5dadd0 100644
 +#define irq_canonicalize(irq) (irq)
 +
  #endif
+diff --git a/arch/lkl/include/asm/pgtable-mmu-3level.h b/arch/lkl/include/asm/pgtable-mmu-3level.h
+index 232b6cee1..8873a809b 100644
+--- a/arch/lkl/include/asm/pgtable-mmu-3level.h
++++ b/arch/lkl/include/asm/pgtable-mmu-3level.h
+@@ -20,6 +20,14 @@
+ #define _PAGE_USER	0x040
+ #define _PAGE_ACCESSED	0x080
+ #define _PAGE_DIRTY	0x100
++/*
++ * QRT: an uncached mapping (pgprot_noncached/writecombine) - the host maps the
++ * page non-cacheable; device-shared buffers (the GPU's rings, its microcode)
++ * would otherwise sit in the CPU's cache, unseen by a non-coherent device.
++ */
++#define _PAGE_NOCACHE	0x200
++#define pgprot_noncached(prot)	__pgprot(pgprot_val(prot) | _PAGE_NOCACHE)
++#define pgprot_writecombine	pgprot_noncached
+ /* If _PAGE_PRESENT is clear, we use these: */
+ #define _PAGE_PROTNONE	0x010	/* if the user mapped it with PROT_NONE; pte_present gives true */
+ #define _PAGE_SWP_EXCLUSIVE	0x400
 diff --git a/arch/lkl/include/uapi/asm/host_ops.h b/arch/lkl/include/uapi/asm/host_ops.h
-index 673a05951..481f76ac2 100644
+index 673a05951..9d4e389e2 100644
 --- a/arch/lkl/include/uapi/asm/host_ops.h
 +++ b/arch/lkl/include/uapi/asm/host_ops.h
-@@ -142,6 +142,11 @@ enum lkl_prot {
+@@ -61,6 +61,7 @@ enum lkl_prot {
+ 	LKL_PROT_READ = 1,
+ 	LKL_PROT_WRITE = 2,
+ 	LKL_PROT_EXEC = 4,
++	LKL_PROT_NOCACHE = 8,	/* QRT: map the pages non-cacheable */
+ };
+ 
+ /**
+@@ -142,6 +143,11 @@ enum lkl_prot {
   *
   * @pci_ops - pointer to PCI host operations
   */
@@ -771,6 +798,27 @@ index 57b075200..dbb80f472 100644
  }
  
  static void __init lkl_run_kernel(void *arg)
+diff --git a/arch/lkl/mm/mmu_mem.c b/arch/lkl/mm/mmu_mem.c
+index a11358669..dde66c61f 100644
+--- a/arch/lkl/mm/mmu_mem.c
++++ b/arch/lkl/mm/mmu_mem.c
+@@ -42,11 +42,14 @@ void mmap_pages_for_ptes(unsigned long va, unsigned int nr, pte_t pte)
+ {
+ 	// TODO: At the moment we mmap memory as RWX. However, we should mmap pages
+ 	// with proper access flags (read-only, read-write, etc)
+-	enum lkl_prot prot = LKL_PROT_READ | LKL_PROT_WRITE | LKL_PROT_EXEC;
++	int prot = LKL_PROT_READ | LKL_PROT_WRITE | LKL_PROT_EXEC;
+ 	unsigned long pa = pte.pte & PAGE_MASK;
++
++	if (pte.pte & _PAGE_NOCACHE)
++		prot |= LKL_PROT_NOCACHE;
+ 	unsigned long pg_off = pa - (ARCH_PFN_OFFSET << PAGE_SHIFT);
+ 
+-	void *res = lkl_ops->shmem_mmap((void *)va, pg_off, PAGE_SIZE * nr, prot);
++	void *res = lkl_ops->shmem_mmap((void *)va, pg_off, PAGE_SIZE * nr, (enum lkl_prot)prot);
+ 
+ 	BUG_ON(res != (void *)va);
+ }
 diff --git a/drivers/base/dd.c b/drivers/base/dd.c
 index f0e4b4aba..5cbb275e3 100644
 --- a/drivers/base/dd.c
@@ -807,6 +855,33 @@ index 45c5255bc..943fc1718 100644
  	struct clk_smd_rpm_req req = {
  		.key = cpu_to_le32(QCOM_RPM_SMD_KEY_ENABLE),
  		.nbytes = cpu_to_le32(sizeof(u32)),
+diff --git a/drivers/gpu/drm/msm/adreno/a5xx_gpu.c b/drivers/gpu/drm/msm/adreno/a5xx_gpu.c
+index e09044930..a844e5531 100644
+--- a/drivers/gpu/drm/msm/adreno/a5xx_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/a5xx_gpu.c
+@@ -1076,6 +1076,8 @@ static inline bool _a5xx_check_idle(struct msm_gpu *gpu)
+ 		A5XX_RBBM_INT_0_MASK_MISC_HANG_DETECT);
+ }
+ 
++static void a5xx_cp_err_irq(struct msm_gpu *gpu);
++
+ bool a5xx_idle(struct msm_gpu *gpu, struct msm_ringbuffer *ring)
+ {
+ 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
+@@ -1097,6 +1099,13 @@ bool a5xx_idle(struct msm_gpu *gpu, struct msm_ringbuffer *ring)
+ 			gpu_read(gpu, REG_A5XX_RBBM_INT_0_STATUS),
+ 			gpu_read(gpu, REG_A5XX_CP_RB_RPTR),
+ 			gpu_read(gpu, REG_A5XX_CP_RB_WPTR));
++		/* QRT: why the CP stopped, in the log next to it */
++		DRM_ERROR("%s: CP interrupt status %8.8X, HW fault %8.8X, protect %8.8X, AHB fault %8.8X\n",
++			gpu->name, gpu_read(gpu, REG_A5XX_CP_INTERRUPT_STATUS),
++			gpu_read(gpu, REG_A5XX_CP_HW_FAULT),
++			gpu_read(gpu, REG_A5XX_CP_PROTECT_STATUS),
++			gpu_read(gpu, REG_A5XX_CP_AHB_FAULT));
++		a5xx_cp_err_irq(gpu);
+ 		return false;
+ 	}
+ 
 diff --git a/drivers/gpu/drm/msm/adreno/adreno_device.c b/drivers/gpu/drm/msm/adreno/adreno_device.c
 index cfc74a9e2..9b2054499 100644
 --- a/drivers/gpu/drm/msm/adreno/adreno_device.c

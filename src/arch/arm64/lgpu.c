@@ -147,20 +147,20 @@ static void report(void) {
     static char kb[65536];
     long n = S(116, 3, kb, sizeof kb - 1, 0, 0);                     /* syslog: SYSLOG_ACTION_READ_ALL */
     kb[n > 0 ? n : 0] = 0;
-    static const char *lines[30];
+    static const char *lines[40];                                  /* backtrace frames left out */
     int nl = 0;
     for (char *l = kb; *l; ) {
         char *e = strchr(l, '\n');
         if (e) *e = 0;
         static const char *const w[] = { "msm", "adreno", "a5xx", "iommu", "zap", "gpu", "a530", "1c00000", "1c48000", "drm", "VRAM", "gdsc", "opp", NULL };
         int hit = 0;
-        if (!strstr(l, "initcall") && !strstr(l, "calling ")) for (int i = 0; w[i] && !hit; i++) hit = strstr(l, w[i]) != NULL;
-        if (hit) lines[nl++ % 30] = l;
+        if (!strstr(l, "initcall") && !strstr(l, "calling ") && !strstr(l, "[<0x") && !strstr(l, "Got CD GPIO")) for (int i = 0; w[i] && !hit; i++) hit = strstr(l, w[i]) != NULL;
+        if (hit) lines[nl++ % 40] = l;
         if (!e) break;
         l = e + 1;
     }
-    for (int i = nl > 30 ? nl - 30 : 0; i < nl; i++) {
-        const char *m = lines[i % 30];
+    for (int i = nl > 40 ? nl - 40 : 0; i < nl; i++) {
+        const char *m = lines[i % 40];
         if (*m == '<' && strchr(m, '>')) m = strchr(m, '>') + 1;
         if (*m == '[' && strchr(m, ']')) m = strchr(m, ']') + 2;
         LOG("linux said: %s", m);

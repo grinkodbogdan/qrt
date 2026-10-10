@@ -151,6 +151,22 @@ int argon_map(u64 va, u64 pa, u64 size) {
     irq_restore(f);
     return 0;
 }
+/* Linux's uncached mappings (the GPU's rings and microcode): write back and drop any
+ * cached copy of the pages first - a dirty line written back later would overwrite what
+ * the device wrote */
+int argon_map_nc(u64 va, u64 pa, u64 size) {
+    if (!argon_window(va) || !argon_window(va + size - 1) || (va | pa | size) & 4095) return -1;
+    for (u64 a = pa; a < pa + size; a += 64) __asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
+    u64 f = irq_save();
+    for (u64 o = 0; o < size; o += 4096) {
+        *argon_pte(va + o) = desc(pa + o, MAIR_NC, 3);
+        __asm__ volatile("dsb ishst; tlbi vaae1is, %0" : : "r"((va + o) >> 12) : "memory");
+    }
+    __asm__ volatile("dsb ish; isb" ::: "memory");
+    irq_restore(f);
+    return 0;
+}
 int argon_unmap(u64 va, u64 size) {
     if (!argon_window(va) || (va | size) & 4095) return -1;
     u64 f = irq_save();

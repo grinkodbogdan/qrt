@@ -189,6 +189,23 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.26.4: the GPU's buffers uncached
+
+0.26.3 on the Mi A1: the GPU became a DRM device, Linux loaded its microcode (a530_pm4,
+a530_pfp) and started the command processor - which read its first packet (CP_ME_INIT)
+and stopped with a hardware error and a hang (`status 800001C1 irq 00800200`).
+
+- **Uncached mappings for Linux** (LKL patch + `mmu.c`): LKL had no uncached memory type
+  - `pgprot_writecombine` did nothing and every page Linux mapped was cached.  The msm
+  driver writes the GPU's microcode and ring buffers through write-combined mappings and
+  never flushes them, as the GPU is not coherent with the CPU: what the CPU wrote stayed
+  in its cache and the GPU read old memory.  Linux's uncached and write-combined
+  mappings now carry a page bit (`_PAGE_NOCACHE`) that QRT maps Normal non-cacheable,
+  after writing back and dropping any cached copy of the pages.
+- **The command processor's own error**: a timeout waiting for the GPU now prints its
+  interrupt status, hardware-fault, protection and AHB-fault registers; the GPU report
+  leaves out stack frames (one backtrace pushed the useful lines out) and keeps 40.
+
 ## 0.26.3: the GPU's DRM device; the last boot's log named plainly
 
 0.26.2 on the Mi A1: the GPU's IOMMU came up and Linux's adreno driver took the GPU,

@@ -356,9 +356,10 @@ static void h_shmem_init(unsigned long size) {
     if (&lkl_qrt_ram_phys) lkl_qrt_ram_phys = shm_phys;
     klog("argon: Linux's memory: %llu MB at %llx", (u64)shm_size >> 20, shm_phys);
 }
+int argon_map_nc(u64 va, u64 pa, u64 size);
 static void *h_shmem_mmap(void *addr, unsigned long off, unsigned long size, enum lkl_prot prot) {
-    (void)prot;
-    if (!shm_phys || off + size > shm_size || argon_map((u64)(usize)addr, shm_phys + off, size) < 0) return (void *)-1;
+    int (*map)(u64, u64, u64) = (prot & 8) ? argon_map_nc : argon_map;   /* 8: LKL_PROT_NOCACHE (QRT patch) */
+    if (!shm_phys || off + size > shm_size || map((u64)(usize)addr, shm_phys + off, size) < 0) return (void *)-1;
     return addr;
 }
 static int h_munmap(void *addr, unsigned long size) { return argon_unmap((u64)(usize)addr, size); }
