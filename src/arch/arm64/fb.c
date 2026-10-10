@@ -110,6 +110,11 @@ static void mdp5_note_others(u64 mdp, u32 ours) {
         }
     }
 }
+static volatile int fb_dirty;
+static void note_dirty(int x, int y, int w, int h);
+static u64 fb_us, fb_frames;
+static u64 mdp_pipe, mdp_flush_reg;       /* our pipe; its CTL's FLUSH register */
+static u32 mdp_flush_bit;
 static int mdp5_init(void) {
     if (fdt_find_compatible(-1, "qcom,mdp5") < 0) return 0;
     static const u32 pipes[] = { 0x04000, 0x14000, 0x16000, 0x24000, 0x34000 };
@@ -163,6 +168,14 @@ static int mdp5_init(void) {
             klog("display: pipe %x: %ux%u from %x, out %ux%u at %u,%u, format %x", pipes[pi], w, h, addr, out & 0xffff, out >> 16,
                  oxy & 0xffff, oxy >> 16, format);
             mdp5_note_others(bases[bi], pipes[pi]);
+            mdp_pipe = p;
+            for (int c = 0; c < 3 && !mdp_flush_reg; c++)
+                for (int lm = 0; lm < 2; lm++) {
+                    u64 cb = bases[bi] + 0x1000 + 0x200 * (u64)c;
+                    u32 lay = R32(cb + 4 * (u64)lm), ext = R32(cb + 0x40 + 4 * (u64)lm);
+                    for (int j = 0; j < 5; j++)
+                        if (mdp_pipes[j].off == pipes[pi] && pipe_stage(lay, ext, j)) { mdp_flush_reg = cb + 0x18; mdp_flush_bit = 1u << mdp_pipes[j].flush; }
+                }
             return 1;
         }
     return 0;
@@ -192,6 +205,54 @@ static int splash_init(void) {
 
 int fb_init(void) { return ramfb_init() || mdp5_init() || splash_init(); }
 
+/* ---- a 32-bit screen (0.27.0): the Adreno's copy engine takes rows in 64-byte units,
+ * and the splash buffer's 24-bit rows are 3240 bytes - so once the GPU copies frames, the
+ * pipe scans a buffer of its own: XRGB8888, rows of 4352 bytes, reserved uncached at
+ * boot (main.c, under 4 GB: the pipe's address register is 32 bits) ---- */
+u64 fb32_base, fb32_size;
+int fb_wants_32(void) { return mdp_pipe && mdp_flush_reg && bpp == 3; }
+u32 fb32_pitch(void) { return ((u32)k.fb_w * 4 + 63) & ~63u; }
+int fb_switch_32(void) {
+    if (!fb_wants_32() || !fb32_base) return 0;
+    u32 w = k.fb_w, h = k.fb_h, pitch = fb32_pitch();
+    if ((u64)pitch * h > fb32_size || fb32_base + fb32_size > (4ull << 30)) return 0;
+    /* what is on the screen now, so the switch shows nothing new */
+    usize line = (usize)k.fb_stride * 3;
+    for (u32 y = 0; y < h; y++) {
+        const u8 *s3 = fb + (usize)y * line;
+        u32 *d = (u32 *)(usize)(fb32_base + (u64)y * pitch);
+        for (u32 x = 0; x < w; x++, s3 += 3) d[x] = (u32)s3[byte_of[0]] << 16 | (u32)s3[byte_of[1]] << 8 | s3[byte_of[2]];
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    u64 p = mdp_pipe;
+    u32 f = R32(p + 0x30);
+    f = (f & ~(0xc0u | 0x100u | 0x600u | 0x3000u)) | 3u << 6 | 3u << 9 | 3u << 12;   /* A_BPC 8, no alpha, 4 bytes, 4 elements */
+    u64 fl = irq_save();
+    W32(p + 0x24, (R32(p + 0x24) & 0xffff0000u) | pitch);            /* SRC_YSTRIDE0 */
+    W32(p + 0x30, f);                                                 /* SRC_FORMAT */
+    W32(p + 0x34, 0x03020001);                                        /* SRC_UNPACK: B, G, R, X (XRGB8888) */
+    W32(p + 0x14, (u32)fb32_base);                                    /* SRC0_ADDR */
+    __asm__ volatile("dsb sy" ::: "memory");
+    W32(mdp_flush_reg, mdp_flush_bit);                                /* taken at the next frame */
+    fb = (u8 *)(usize)fb32_base;
+    bpp = 4; byte_of[0] = 2; byte_of[1] = 1; byte_of[2] = 0;
+    k.fb_stride = pitch / 4; k.fb_base = fb32_base;
+    irq_restore(fl);
+    if (kick) fb_dirty = 1;
+    usize l = strlen(fb_what);
+    fmt(fb_what + l, sizeof fb_what - l, ", 32-bit since the GPU started");
+    klog("display: the pipe now scans a 32-bit buffer at %llx (rows of %u bytes)", fb32_base, pitch);
+    return 1;
+}
+/* the GPU copies straight into the screen: the present path only notes the time and
+ * kicks a command-mode panel */
+void fb_gpu_presented(int x, int y, int w, int h, u64 us) {
+    note_dirty(x, y, w, h);
+    fb_us += us;
+    fb_frames++;
+    if (kick) fb_dirty = 1;
+}
+
 /* Tessera's pixels are 0x00RRGGBB */
 /* the framebuffer is uncached: a row is converted in cached memory first and stored with
  * 8-byte writes (byte stores to uncached memory are each a bus write) */
@@ -200,12 +261,10 @@ static void row_store(u8 *d, const u8 *s, usize n) {
     for (; n >= 8; n -= 8, d += 8, s += 8) *(volatile u64 *)d = *(const u64 *)s;   /* s aligned like d */
     while (n--) *d++ = *s++;
 }
-static u64 fb_us, fb_frames;
 /* a command-mode panel shows memory only when told (CTL START).  A frame takes ~15 ms to
  * go out, and a START during it cuts it short (the lower part of the screen kept an older
  * frame), while a START that is lost leaves the newest frame unseen.  So: START at most
  * every 40 ms while frames come, and once more 80 ms after the last one */
-static volatile int fb_dirty;
 static void refresher(void *a) {
     (void)a;
     u64 last_kick = 0, confirm_at = 0;

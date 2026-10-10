@@ -189,6 +189,33 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.27.0: the GPU runs QRT's commands and puts the frames on the screen
+
+0.26.4 on the Mi A1: "Adreno 506 running".  Now QRT drives it, as it drives the tablets'
+Intel GPU (`lgpu.c`).
+
+- **QRT's own command streams**: buffers come from Linux's msm driver (`GEM_NEW`); QRT
+  writes PM4 packets into them directly and submits them (`GEM_SUBMIT`, `WAIT_FENCE`).
+  Two QRT additions to the driver's `GEM_INFO` (LKL patch): `QRT_VADDR` gives a buffer's
+  kernel address (QRT shares Linux's address space), `QRT_MAP_PHYS` maps a range of QRT's
+  own memory - the screen, the shell's frame - into the GPU's address space.
+- **Two checks before the GPU touches the screen**: a `CP_MEM_WRITE` the CPU reads back,
+  then a 64 x 64 copy by the 2D engine compared pixel by pixel.  The log says how each
+  went; a failure leaves the frames to the CPU.  A reset during them skips the GPU at the
+  next boot, as before.
+- **Frames by the GPU**: the 2D engine's pitches are 64-byte units and the splash
+  buffer's 24-bit rows are 3240 bytes, so the display pipe moves to a 32-bit (XRGB8888)
+  buffer of its own with rows of 4352 bytes, reserved uncached at boot (`fb.c`,
+  `main.c`).  Each changed rectangle of the shell's frame is then one `CP_BLIT` (setup
+  after Mesa's freedreno `fd5_blitter.c`); the CPU only writes its cache back over the
+  rectangle.  The 24-to-32-bit conversion per pixel is gone either way: when the CPU
+  presents (a rotated screen, the log), it is a plain copy now.
+- **Rows padded to 64 bytes**: the shell's scene, frame and wallpaper canvases
+  (`canvas_new_pitched`) - 1088 pixels a row at 1080 wide; the few whole-canvas copies
+  use the stride.
+- If the GPU stops answering, the CPU draws again; `qrt.nogpudraw` keeps the frames the
+  CPU's.
+
 ## 0.26.4: the GPU's buffers uncached
 
 0.26.3 on the Mi A1: the GPU became a DRM device, Linux loaded its microcode (a530_pm4,

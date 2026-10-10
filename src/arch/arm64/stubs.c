@@ -91,12 +91,9 @@ void wifi_set_rx(iwm_rx_fn fn) { (void)fn; }
 int  wifi_tx(const u8 *frame, usize len, int mgmt) { (void)frame; (void)len; (void)mgmt; return -1; }
 
 
-int  gpu_active(void) { return 0; }
 void gpu_autostart(void) {}
 int  gpu_enabled(void) { return 0; }
-int  gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int y, int w, int h) { (void)src; (void)sw; (void)sh; (void)stride; (void)rot; (void)x; (void)y; (void)w; (void)h; return 0; }
 void gpu_set_enabled(int on) { (void)on; }
-void gpu_stats(u32 *frames, u32 *avg_us, int *coherent) { *frames = 0; *avg_us = 0; *coherent = 0; }
 int  gpu_supported(void) { return 0; }
 int  display_connected(void) { return 0; }
 int  display_enabled(void) { return 0; }

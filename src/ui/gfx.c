@@ -6,7 +6,28 @@ canvas_t canvas_new(int w, int h) {
     return c;
 }
 
-void canvas_free(canvas_t *c) { kfree(c->px); c->px = NULL; }
+/* rows a multiple of 16 pixels (64 bytes), the buffer 4 KB aligned: what a GPU's copy
+ * engine takes as source */
+canvas_t canvas_new_pitched(int w, int h) {
+    int st = (w + 15) & ~15;
+    u8 *raw = kalloc((usize)st * h * 4 + 4096);
+    if (!raw) return (canvas_t){ 0 };
+    u32 *px = (u32 *)(((usize)raw + 4095) & ~(usize)4095);
+    if ((u8 *)px == raw) px = (u32 *)(raw + 4096);                  /* room for the offset below */
+    ((usize *)px)[-1] = (usize)raw;
+    ((u32 *)px)[-3] = 0x51525050;                                    /* "pitched": canvas_free gives raw back */
+    canvas_t c = { px, w, h, st, { 0, 0, w, h }, { 0, 0, w, h } };
+    return c;
+}
+
+void canvas_free(canvas_t *c) {
+    if (!c->px) return;
+    if (!((usize)c->px & 4095) && ((u32 *)c->px)[-3] == 0x51525050) {
+        ((u32 *)c->px)[-3] = 0;
+        kfree((void *)((usize *)c->px)[-1]);
+    } else kfree(c->px);
+    c->px = NULL;
+}
 
 static rect_t intersect(rect_t a, rect_t b) {
     int x0 = MAX(a.x, b.x), y0 = MAX(a.y, b.y);

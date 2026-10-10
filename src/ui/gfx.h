@@ -20,6 +20,7 @@ typedef struct {
 typedef enum { F_REGULAR, F_SEMIBOLD, F_LIGHT, F_MONO } face_t;
 
 canvas_t canvas_new(int w, int h);
+canvas_t canvas_new_pitched(int w, int h);
 void     canvas_free(canvas_t *c);
 void     gfx_clip(canvas_t *c, rect_t r);
 void     gfx_unclip(canvas_t *c);

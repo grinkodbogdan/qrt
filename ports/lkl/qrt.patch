@@ -919,10 +919,26 @@ index cfc74a9e2..9b2054499 100644
  
  	return 0;
 diff --git a/drivers/gpu/drm/msm/msm_drv.c b/drivers/gpu/drm/msm/msm_drv.c
-index 8c13b0870..4e535adb3 100644
+index 8c13b0870..f640f7d4b 100644
 --- a/drivers/gpu/drm/msm/msm_drv.c
 +++ b/drivers/gpu/drm/msm/msm_drv.c
-@@ -117,6 +117,14 @@ bool msm_use_mmu(struct drm_device *dev)
+@@ -10,6 +10,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/of_address.h>
+ #include <linux/uaccess.h>
++#include <linux/iommu.h>
+ 
+ #include <drm/drm_drv.h>
+ #include <drm/drm_file.h>
+@@ -17,6 +18,7 @@
+ #include <drm/drm_of.h>
+ 
+ #include "msm_drv.h"
++#include "msm_mmu.h"
+ #include "msm_debugfs.h"
+ #include "msm_gem.h"
+ #include "msm_gpu.h"
+@@ -117,6 +119,14 @@ bool msm_use_mmu(struct drm_device *dev)
  	 * On other platforms IOMMU can be declared specified either for the
  	 * MDP/DPU device or for its parent, MDSS device.
  	 */
@@ -937,7 +953,7 @@ index 8c13b0870..4e535adb3 100644
  	return priv->is_a2xx ||
  		device_iommu_mapped(dev->dev) ||
  		device_iommu_mapped(dev->dev->parent);
-@@ -263,8 +271,10 @@ static int msm_drm_init(struct device *dev, const struct drm_driver *drv)
+@@ -263,8 +273,10 @@ static int msm_drm_init(struct device *dev, const struct drm_driver *drv)
  
  	/* Bind all our sub-components: */
  	ret = component_bind_all(dev, ddev);
@@ -949,6 +965,127 @@ index 8c13b0870..4e535adb3 100644
  
  	ret = msm_gem_shrinker_init(ddev);
  	if (ret)
+@@ -624,6 +636,60 @@ static int msm_ioctl_gem_info_get_metadata(struct drm_gem_object *obj,
+ 	return 0;
+ }
+ 
++/*
++ * QRT: the host (QRT's kernel) drives the GPU itself through these, on any
++ * buffer handle:
++ *   QRT_VADDR     the buffer's kernel address - the host shares Linux's address
++ *                 space, so it writes command streams there directly;
++ *   QRT_MAP_PHYS  value = a host physical address, len = bytes: that range is
++ *                 mapped for the GPU (read/write, for good); value = its address.
++ */
++#define MSM_INFO_QRT_VADDR	0x5100
++#define MSM_INFO_QRT_MAP_PHYS	0x5101
++
++static int msm_ioctl_gem_info_qrt(struct drm_device *dev, struct drm_file *file,
++		struct drm_gem_object *obj, struct drm_msm_gem_info *args)
++{
++	struct msm_drm_private *priv = dev->dev_private;
++	struct msm_file_private *ctx = file->driver_priv;
++	struct msm_gem_vma *vma;
++	phys_addr_t pa;
++	size_t len;
++	void *v;
++	int ret;
++
++	if (!priv->gpu)
++		return -EINVAL;
++	if (args->info == MSM_INFO_QRT_VADDR) {
++		v = msm_gem_get_vaddr(obj);
++		if (IS_ERR(v))
++			return PTR_ERR(v);
++		args->value = (u64)(uintptr_t)v;
++		return 0;
++	}
++	pa = args->value & PAGE_MASK;
++	len = PAGE_ALIGN(args->len + offset_in_page(args->value));
++	if (!args->len || len > SZ_64M)
++		return -EINVAL;
++	vma = msm_gem_vma_new(ctx->aspace);
++	if (!vma)
++		return -ENOMEM;
++	ret = msm_gem_vma_init(vma, len, 0, U64_MAX);
++	if (ret) {
++		kfree(vma);
++		return ret;
++	}
++	ret = msm_iommu_qrt_map_phys(ctx->aspace->mmu, vma->iova, pa, len,
++				     IOMMU_READ | IOMMU_WRITE);
++	if (ret) {
++		dev_err(dev->dev, "qrt: mapping %pa (%zu bytes) failed: %d\n", &pa, len, ret);
++		return ret;
++	}
++	vma->mapped = true;
++	args->value = vma->iova + offset_in_page(args->value);
++	return 0;
++}
++
+ static int msm_ioctl_gem_info(struct drm_device *dev, void *data,
+ 		struct drm_file *file)
+ {
+@@ -648,6 +714,8 @@ static int msm_ioctl_gem_info(struct drm_device *dev, void *data,
+ 	case MSM_INFO_GET_NAME:
+ 	case MSM_INFO_SET_METADATA:
+ 	case MSM_INFO_GET_METADATA:
++	case MSM_INFO_QRT_VADDR:
++	case MSM_INFO_QRT_MAP_PHYS:
+ 		break;
+ 	default:
+ 		return -EINVAL;
+@@ -660,6 +728,10 @@ static int msm_ioctl_gem_info(struct drm_device *dev, void *data,
+ 	msm_obj = to_msm_bo(obj);
+ 
+ 	switch (args->info) {
++	case MSM_INFO_QRT_VADDR:
++	case MSM_INFO_QRT_MAP_PHYS:
++		ret = msm_ioctl_gem_info_qrt(dev, file, obj, args);
++		break;
+ 	case MSM_INFO_GET_OFFSET:
+ 		args->value = msm_gem_mmap_offset(obj);
+ 		break;
+diff --git a/drivers/gpu/drm/msm/msm_iommu.c b/drivers/gpu/drm/msm/msm_iommu.c
+index 2a94e8231..9dc151bb0 100644
+--- a/drivers/gpu/drm/msm/msm_iommu.c
++++ b/drivers/gpu/drm/msm/msm_iommu.c
+@@ -374,6 +374,22 @@ static int msm_iommu_map(struct msm_mmu *mmu, uint64_t iova,
+ 	return (ret == len) ? 0 : -EINVAL;
+ }
+ 
++/*
++ * QRT: a physically contiguous range of the host's own memory (its screen, the
++ * shell's frame) mapped for the GPU at an address taken from the GPU's space.
++ */
++int msm_iommu_qrt_map_phys(struct msm_mmu *mmu, uint64_t iova, phys_addr_t pa,
++			   size_t len, int prot)
++{
++	struct msm_iommu *iommu = to_msm_iommu(mmu);
++
++	if (mmu->type != MSM_MMU_IOMMU)
++		return -EOPNOTSUPP;
++	if (iova & BIT_ULL(48))
++		iova |= GENMASK_ULL(63, 49);
++	return iommu_map(iommu->domain, iova, pa, len, prot, GFP_KERNEL);
++}
++
+ static int msm_iommu_unmap(struct msm_mmu *mmu, uint64_t iova, size_t len)
+ {
+ 	struct msm_iommu *iommu = to_msm_iommu(mmu);
+diff --git a/drivers/gpu/drm/msm/msm_mmu.h b/drivers/gpu/drm/msm/msm_mmu.h
+index 88af4f490..091b6bd9e 100644
+--- a/drivers/gpu/drm/msm/msm_mmu.h
++++ b/drivers/gpu/drm/msm/msm_mmu.h
+@@ -41,6 +41,8 @@ static inline void msm_mmu_init(struct msm_mmu *mmu, struct device *dev,
+ }
+ 
+ struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks);
++int msm_iommu_qrt_map_phys(struct msm_mmu *mmu, uint64_t iova, phys_addr_t pa,
++			   size_t len, int prot);
+ struct msm_mmu *msm_iommu_gpu_new(struct device *dev, struct msm_gpu *gpu, unsigned long quirks);
+ 
+ static inline void msm_mmu_set_fault_handler(struct msm_mmu *mmu, void *arg,
 diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
 index d3a9a9faf..778f5e1ed 100644
 --- a/drivers/gpu/drm/panel/Kconfig

@@ -12,11 +12,21 @@
  *     command processor must run its init packets (CP_ME_INIT) and go idle,
  *   - reads the GPU's ID and its always-on timestamp twice: counting means it runs.
  * A reset while doing this leaves the GPU alone at the next boot (as the audio DSP).
- * Drawing with it - command streams of QRT's own, as on the tablets' Intel GPU - is the
- * next step.
+ *
+ * Then QRT's own command streams (0.27.0), as on the tablets' Intel GPU: buffers come
+ * from Linux's driver (GEM_NEW), QRT writes packets into them directly (a QRT patch hands
+ * out their kernel address - QRT shares Linux's address space) and submits them
+ * (GEM_SUBMIT, WAIT_FENCE).  Two checks first - a CP_MEM_WRITE the CPU reads back, then a
+ * 64 x 64 copy by the 2D engine compared pixel by pixel - and only then does the GPU put
+ * frames on the screen: the display pipe moves to a 32-bit buffer (fb.c; the engine's
+ * pitches are 64-byte units, the splash buffer's 24-bit rows 3240 bytes), the shell's
+ * frame and that buffer are mapped for the GPU (QRT patch: QRT_MAP_PHYS) and each changed
+ * rectangle is one CP_BLIT - the CPU only writes back its cache over the rectangle.
+ * The 2D engine's setup follows Mesa's freedreno (fd5_blitter.c: emit_setup, emit_blit).
  */
 #include "arm.h"
 #include "sched.h"
+#include "../../kernel/smp.h"
 
 #ifdef QRT_LKL
 long argon_sys(long nr, long a, long b, long c, long d, long e);
@@ -200,6 +210,7 @@ static long param(long fd, u32 p, u64 *v) {
     return r;
 }
 
+static void own_commands(long fd);
 static void gpu_loop(void *a) {
     (void)a;
     for (int t = 0; t < 240 && !linux_running(); t++) thr_sleep_us(500000);
@@ -250,6 +261,256 @@ static void gpu_loop(void *a) {
     }
     fmt(state, sizeof state, "Adreno %llu running (chip %llx, %llu KB GMEM)", id, chip, gmem >> 10);
     LOG("%s; its always-on counter moved %llu in 100 ms", state, t1 - t0);
+    own_commands(fd);
+}
+
+/* ---- QRT's command streams ---- */
+#define MSM_GEM_NEW    0xc0106442u
+#define MSM_GEM_INFO   0xc0186443u
+#define MSM_GEM_SUBMIT 0xc0486446u
+#define MSM_WAIT_FENCE 0x40206447u
+#define BO_WC          0x00020000u
+#define INFO_IOVA      1
+#define INFO_VADDR     0x5100u           /* QRT patch */
+#define INFO_MAP_PHYS  0x5101u           /* QRT patch */
+
+struct bo { u32 handle; u64 iova; u32 *cpu; u32 size; };
+static long gfd = -1;
+static struct bo cmd, scr;
+static volatile int g_on;                /* the GPU puts frames on the screen */
+static u64 fb_iova;
+static u32 fb_pitch;
+static u32 g_frames, g_us;               /* since the last gpu_stats() */
+
+static long info(u32 handle, u32 what, u64 *value, u32 len) {
+    struct { u32 handle, info; u64 value; u32 len, pad; } a = { handle, what, *value, len, 0 };
+    long r = S(NR_IOCTL, gfd, MSM_GEM_INFO, &a, 0, 0);
+    *value = a.value;
+    return r;
+}
+static int bo_new(struct bo *b, u32 size) {
+    struct { u64 size; u32 flags, handle; } a = { size, BO_WC, 0 };
+    long r = S(NR_IOCTL, gfd, MSM_GEM_NEW, &a, 0, 0);
+    if (r < 0) { LOG("GEM_NEW (%u bytes): %ld", size, r); return 0; }
+    u64 v = 0;
+    if ((r = info(a.handle, INFO_IOVA, &v, 0)) < 0) { LOG("its GPU address: %ld", r); return 0; }
+    b->iova = v;
+    v = 0;
+    if ((r = info(a.handle, INFO_VADDR, &v, 0)) < 0) { LOG("its CPU address: %ld", r); return 0; }
+    b->cpu = (u32 *)(usize)v;
+    b->handle = a.handle;
+    b->size = size;
+    return 1;
+}
+/* host memory (identity mapped: virtual == physical) for the GPU; 0 if it failed */
+static u64 map_phys(u64 pa, u64 len) {
+    u64 v = pa;
+    long r = info(cmd.handle, INFO_MAP_PHYS, &v, (u32)len);
+    if (r < 0) { LOG("mapping %llx (%llu KB) for the GPU: %ld", pa, len >> 10, r); return 0; }
+    return v;
+}
+
+/* PM4: type-4 (registers) and type-7 (opcodes) packet headers with their parity bits */
+static u32 par(u32 v) { v ^= v >> 16; v ^= v >> 8; v ^= v >> 4; return (0x9669u >> (v & 15)) & 1; }
+static u32 pkt4(u32 reg, u32 cnt) { return 0x40000000u | cnt | par(cnt) << 7 | (reg & 0x3ffff) << 8 | par(reg) << 27; }
+static u32 pkt7(u32 op, u32 cnt) { return 0x70000000u | cnt | par(cnt) << 15 | (op & 0x7f) << 16 | par(op) << 23; }
+enum { CP_WAIT_FOR_IDLE = 0x26, CP_MEM_WRITE = 0x3d, CP_EVENT_WRITE = 0x46, CP_SET_RENDER_MODE = 0x6c, CP_BLIT = 0x2c,
+       CP_SKIP_IB2_ENABLE_GLOBAL = 0x1d, CP_SKIP_IB2_ENABLE_LOCAL = 0x23 };
+enum { EV_CACHE_FLUSH_TS = 4, EV_PC_CCU_FLUSH_COLOR_TS = 29, EV_LRZ_FLUSH = 38 };
+enum { RM_BLIT2DSCALE = 7, RM_END2D = 8 };
+
+static u32 *cp;                          /* where the next dword of the stream goes */
+static void out(u32 v) { *cp++ = v; }
+static void reg1(u32 reg, u32 v) { out(pkt4(reg, 1)); out(v); }
+static void render_mode(u32 m) {         /* fd5_set_render_mode */
+    out(pkt7(CP_SET_RENDER_MODE, 5)); out(m); out(0); out(0); out(0); out(0);
+}
+static void event_ts(u32 ev) {
+    out(pkt7(CP_EVENT_WRITE, 4)); out(ev); out((u32)(scr.iova + 64)); out((u32)((scr.iova + 64) >> 32)); out(0);
+}
+/* a rectangle from one 32-bit surface to another, by the 2D engine: format R8G8B8A8,
+ * linear, the same byte order on both sides - a plain copy */
+static void blit(u64 src, u32 spitch, u64 dst, u32 dpitch, int sx, int sy, int dx, int dy, int w, int h) {
+    out(pkt7(CP_EVENT_WRITE, 1)); out(EV_LRZ_FLUSH);
+    out(pkt7(CP_SKIP_IB2_ENABLE_GLOBAL, 1)); out(0);
+    out(pkt7(CP_SKIP_IB2_ENABLE_LOCAL, 1)); out(0);
+    reg1(0xe3b0, 3);                     /* PC_POWER_CNTL */
+    reg1(0xe4f0, 3);                     /* VFD_POWER_CNTL */
+    out(pkt7(CP_WAIT_FOR_IDLE, 0));
+    reg1(0x0cc7, 0x10000000);            /* RB_CCU_CNTL: bypass */
+    reg1(0xe141, 0x00000008);            /* RB_RENDER_CNTL */
+    reg1(0x2100, 0x86000000);            /* RB_2D_BLIT_CNTL: copy */
+    reg1(0x2180, 0x86000000);            /* GRAS_2D_BLIT_CNTL */
+    reg1(0x2184, 0x00000009);
+    reg1(0xe140, 1u << 17);              /* RB_CNTL: BYPASS */
+    reg1(0x0cc6, 0x00000004);            /* RB_MODE_CNTL */
+    reg1(0x0ec2, 0x0000000c);            /* SP_MODE_CNTL */
+    reg1(0x0f02, 0x00000344);            /* TPL1_MODE_CNTL */
+    reg1(0x0e06, 0x00000002);            /* HLSQ_MODE_CNTL */
+    reg1(0xe000, 0x00000181);            /* GRAS_CL_CNTL */
+    render_mode(RM_BLIT2DSCALE);
+    const u32 fmt = 0x30;                /* RB5_R8G8B8A8_UNORM, TILE5_LINEAR, swap WZYX */
+    out(pkt4(0x2107, 9));                /* RB_2D_SRC_INFO, _LO, _HI, _SIZE, 5 more */
+    out(fmt); out((u32)src); out((u32)(src >> 32)); out(spitch >> 6);
+    out(0); out(0); out(0); out(0); out(0);
+    out(pkt4(0x2110, 9));                /* RB_2D_DST_INFO ... */
+    out(fmt); out((u32)dst); out((u32)(dst >> 32)); out(dpitch >> 6);
+    out(0); out(0); out(0); out(0); out(0);
+    out(pkt4(0x2181, 2)); out(fmt); out(fmt);   /* GRAS_2D_SRC_INFO, GRAS_2D_DST_INFO */
+    out(pkt7(CP_BLIT, 5));
+    out(3);                              /* BLIT_OP_SCALE */
+    out((u32)sx | (u32)sy << 16);
+    out((u32)(sx + w - 1) | (u32)(sy + h - 1) << 16);
+    out((u32)dx | (u32)dy << 16);
+    out((u32)(dx + w - 1) | (u32)(dy + h - 1) << 16);
+    render_mode(RM_END2D);
+    out(pkt7(CP_WAIT_FOR_IDLE, 0));
+    event_ts(EV_PC_CCU_FLUSH_COLOR_TS);
+    event_ts(EV_CACHE_FLUSH_TS);
+}
+/* run what is in cmd (from its start to cp) and wait for it: 0, or why not.  Every
+ * buffer the stream touches is listed (the driver maps a buffer's pages for the GPU
+ * when a submit lists it): cmd, the scratch page, and up to two more */
+static long run(u32 timeout_ms, const struct bo *x1, const struct bo *x2) {
+    u32 bytes = (u32)((u8 *)cp - (u8 *)cmd.cpu);
+    __asm__ volatile("dsb sy" ::: "memory");
+    struct { u32 flags, handle; u64 presumed; } bo[4] = { { 1, cmd.handle, 0 }, { 3, scr.handle, 0 } };   /* READ, READ | WRITE */
+    u32 nb = 2;
+    if (x1) { bo[nb].flags = 3; bo[nb].handle = x1->handle; nb++; }
+    if (x2) { bo[nb].flags = 3; bo[nb].handle = x2->handle; nb++; }
+    struct { u32 type, idx, off, size, pad, nr_relocs; u64 relocs; } c = { 1, 0, 0, bytes, 0, 0, 0 };   /* MSM_SUBMIT_CMD_BUF */
+    struct { u32 flags, fence, nr_bos, nr_cmds; u64 bos, cmds; int fence_fd; u32 queueid; u64 in_s, out_s; u32 nin, nout, stride, pad; } sb;
+    memset(&sb, 0, sizeof sb);
+    sb.flags = 0x10 | 0x80000000u;       /* MSM_PIPE_3D0 | MSM_SUBMIT_NO_IMPLICIT */
+    sb.nr_bos = nb; sb.nr_cmds = 1;
+    sb.bos = (u64)(usize)bo; sb.cmds = (u64)(usize)&c;
+    sb.fence_fd = -1;
+    long r = S(NR_IOCTL, gfd, MSM_GEM_SUBMIT, &sb, 0, 0);
+    if (r < 0) return r;
+    struct { long long s, ns; } now = { 0, 0 };
+    S(113, 1, &now, 0, 0, 0);            /* clock_gettime(CLOCK_MONOTONIC): the wait's end is absolute */
+    now.ns += (long long)timeout_ms * 1000000;
+    now.s += now.ns / 1000000000; now.ns %= 1000000000;
+    struct { u32 fence, flags; long long s, ns; u32 queueid, pad; } w = { sb.fence, 0, now.s, now.ns, 0, 0 };
+    return S(NR_IOCTL, gfd, MSM_WAIT_FENCE, &w, 0, 0);
+}
+
+/* check 1: the command processor runs QRT's packets - a value written to memory */
+static int test_write(void) {
+    cp = cmd.cpu;
+    scr.cpu[0] = 0;
+    out(pkt7(CP_MEM_WRITE, 3)); out((u32)scr.iova); out((u32)(scr.iova >> 32)); out(0x51525427);
+    u64 t0 = k_now_us();
+    long r = run(1000, NULL, NULL);
+    u32 got = scr.cpu[0];
+    if (r < 0 || got != 0x51525427) { LOG("QRT's first command stream: %ld, read back %x", r, got); return 0; }
+    LOG("QRT's commands run: a CP_MEM_WRITE came back in %llu us", k_now_us() - t0);
+    return 1;
+}
+/* check 2: the 2D engine copies a 64 x 64 picture exactly */
+static int test_copy(void) {
+    struct bo a, b;
+    if (!bo_new(&a, 64 << 10) || !bo_new(&b, 64 << 10)) return 0;
+    for (u32 i = 0; i < 64 * 64; i++) { a.cpu[i] = i * 2654435761u; b.cpu[i] = 0; }
+    cp = cmd.cpu;
+    blit(a.iova, 256, b.iova, 256, 0, 0, 0, 0, 64, 64);
+    u64 t0 = k_now_us();
+    long r = run(1000, &a, &b);
+    int bad = 0, first = -1;
+    for (u32 i = 0; i < 64 * 64; i++) if (b.cpu[i] != a.cpu[i]) { if (first < 0) first = (int)i; bad++; }
+    if (r < 0 || bad) {
+        LOG("the 2D engine's test copy: %ld, %d of 4096 pixels wrong (first %d: %x, not %x)", r, bad, first,
+            first >= 0 ? b.cpu[first] : 0, first >= 0 ? a.cpu[first] : 0);
+        return 0;
+    }
+    LOG("the 2D engine copies: 64 x 64 pixels exact, in %llu us", k_now_us() - t0);
+    return 1;
+}
+
+/* the shell's frames, mapped for the GPU as they are first seen (they live as long as the
+ * shell's layout: a rotation makes new ones) */
+static struct { u64 pa, len, iova; } maps[12];
+static int nmaps;
+static u64 frame_iova(const u32 *px, u64 len) {
+    u64 pa = (u64)(usize)px;
+    for (int i = 0; i < nmaps; i++) if (pa >= maps[i].pa && pa + len <= maps[i].pa + maps[i].len) return maps[i].iova + (pa - maps[i].pa);
+    if (nmaps == (int)(sizeof maps / sizeof maps[0]) || !arm_is_ram(pa, len)) return 0;
+    u64 a = pa & ~4095ull, l = ((pa + len + 4095) & ~4095ull) - a;
+    u64 v = map_phys(a, l);
+    if (!v) return 0;
+    maps[nmaps].pa = a; maps[nmaps].len = l; maps[nmaps].iova = v; nmaps++;
+    return v + (pa - a);
+}
+/* the CPU drew the frame in cached memory: written back to RAM, where the GPU reads */
+static struct { const u32 *px; usize stride; int x, y, w, h; } cj;
+static void clean_band(void *arg, int i, int n) {
+    (void)arg;
+    for (int r = cj.h * i / n; r < cj.h * (i + 1) / n; r++) {
+        u64 a = (u64)(usize)(cj.px + (usize)(cj.y + r) * cj.stride + cj.x), e = a + (u64)cj.w * 4;
+        for (a &= ~63ull; a < e; a += 64) __asm__ volatile("dc cvac, %0" : : "r"(a) : "memory");
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+void fb_gpu_presented(int x, int y, int w, int h, u64 us);
+int logview_active(void);
+int gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int y, int w, int h) {
+    if (!g_on || logview_active() || rot || sw != (int)k.fb_w || sh != (int)k.fb_h || ((usize)src & 63) || ((u32)stride * 4) & 63) return 0;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > sw) w = sw - x;
+    if (y + h > sh) h = sh - y;
+    if (w <= 0 || h <= 0) return 1;
+    u64 t0 = k_now_us();
+    u64 s = frame_iova(src, (u64)stride * 4 * (u64)sh);
+    if (!s) return 0;
+    cj.px = src; cj.stride = (usize)stride; cj.x = x; cj.y = y; cj.w = w; cj.h = h;
+    int bands = (u64)w * (u64)h >= 40000 ? MIN(16, MIN(h, 2 * (smp_workers() + 1))) : 1;
+    if (bands > 1) smp_run(clean_band, NULL, bands);
+    else clean_band(NULL, 0, 1);
+    cp = cmd.cpu;
+    blit(s, (u32)stride * 4, fb_iova, fb_pitch, x, y, x, y, w, h);
+    long r = run(500, NULL, NULL);
+    if (r < 0) {                         /* the GPU hung or went away: the CPU draws from now on */
+        g_on = 0;
+        fmt(state, sizeof state, "off: a frame copy failed (%ld) - the CPU draws", r);
+        LOG("%s", state);
+        return 0;
+    }
+    u64 us = k_now_us() - t0;
+    g_frames++; g_us += (u32)us;
+    fb_gpu_presented(x, y, w, h, us);
+    return 1;
+}
+int gpu_active(void) { return g_on; }
+void gpu_stats(u32 *frames, u32 *avg_us, int *coherent) {
+    *frames = g_frames; *avg_us = g_frames ? g_us / g_frames : 0; *coherent = 0;
+    g_frames = g_us = 0;
+}
+
+int fb_wants_32(void);
+int fb_switch_32(void);
+u32 fb32_pitch(void);
+extern u64 fb32_base, fb32_size;
+/* after "running": QRT's own commands, then the screen */
+static void own_commands(long fd) {
+    gfd = fd;
+    if (!bo_new(&cmd, 64 << 10) || !bo_new(&scr, 4096)) return;
+    plog_state(PLOG_GPU_STARTING);       /* a hang that resets the phone: not again next boot */
+    int ok = test_write() && test_copy();
+    plog_state(PLOG_LINUX_OK);
+    if (!ok) { fmt(state + strlen(state), sizeof state - strlen(state), "; QRT's commands failed (see the log)"); return; }
+    int ch = fdt_node("/chosen"), al;
+    const char *args = ch >= 0 ? fdt_prop(ch, "bootargs", &al) : NULL;
+    if (args && strstr(args, "qrt.nogpudraw")) { LOG("frames stay the CPU's (qrt.nogpudraw)"); return; }
+    if (!fb_wants_32() || !fb32_base) { LOG("no 32-bit screen buffer (the display is not the MDP's splash pipe): frames stay the CPU's"); return; }
+    fb_iova = map_phys(fb32_base, fb32_size);
+    if (!fb_iova) return;
+    fb_pitch = fb32_pitch();
+    if (!fb_switch_32()) { LOG("the display stayed 24-bit: frames stay the CPU's"); return; }
+    __asm__ volatile("dmb ish" ::: "memory");
+    g_on = 1;
+    fmt(state + strlen(state), sizeof state - strlen(state), "; puts the frames on the screen");
+    LOG("the GPU copies the shell's frames to the screen from now on");
 }
 
 void lgpu_start(void) {
@@ -261,4 +522,7 @@ void lgpu_start(void) {
 #else
 const char *gpu_status(void) { return "the boot loader's framebuffer"; }
 void lgpu_start(void) {}
+int  gpu_active(void) { return 0; }
+int  gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int y, int w, int h) { (void)src; (void)sw; (void)sh; (void)stride; (void)rot; (void)x; (void)y; (void)w; (void)h; return 0; }
+void gpu_stats(u32 *frames, u32 *avg_us, int *coherent) { *frames = 0; *avg_us = 0; *coherent = 0; }
 #endif

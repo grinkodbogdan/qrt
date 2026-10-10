@@ -119,8 +119,8 @@ static void trans_end(void) {
 }
 
 static void trans_snapshot(void) {
-    if (!tr.from.px || tr.from.w != ui.W || tr.from.h != ui.H) { if (tr.from.px) canvas_free(&tr.from); tr.from = canvas_new(ui.W, ui.H); }
-    memcpy(tr.from.px, sh.scene.px, (usize)ui.W * ui.H * 4);
+    if (!tr.from.px || tr.from.w != ui.W || tr.from.h != ui.H) { if (tr.from.px) canvas_free(&tr.from); tr.from = canvas_new_pitched(ui.W, ui.H); }
+    memcpy(tr.from.px, sh.scene.px, (usize)sh.scene.stride * ui.H * 4);
 }
 
 static void trans_start(int kind, int ms) {
@@ -425,7 +425,7 @@ static void wallpaper_job(void *arg, int i, int n) {
     glow(&w, W * 0.85f, H * 0.10f, m * 0.55f, ALPHA(ui.accent, 120));
     glow(&w, W * 0.05f, H * 0.55f, m * 0.50f, RGBA(0x5b, 0x3c, 0xff, 90));
     glow(&w, W * 0.70f, H * 1.00f, m * 0.45f, RGBA(0x00, 0xb3, 0xc6, 70));
-    memcpy(dim.px + (usize)b.y * ui.W, w.px + (usize)b.y * ui.W, (usize)b.h * ui.W * 4);
+    memcpy(dim.px + (usize)b.y * w.stride, w.px + (usize)b.y * w.stride, (usize)b.h * w.stride * 4);
     gfx_fill(&dim, b, RGBA(4, 3, 10, 120));
 }
 
@@ -433,10 +433,12 @@ static void build_wallpaper(void) { smp_run(wallpaper_job, NULL, MAX(4, smp_work
 
 static void alloc_canvases(void) {
     canvas_free(&sh.scene); canvas_free(&sh.frame); canvas_free(&sh.wall); canvas_free(&sh.wall_dim);
-    sh.scene = canvas_new(ui.W, ui.H);
-    sh.frame = canvas_new(ui.W, ui.H);
-    sh.wall = canvas_new(ui.W, ui.H);
-    sh.wall_dim = canvas_new(ui.W, ui.H);
+    /* rows padded to 64 bytes: a GPU's copy engine takes them as they are (the Mi A1's
+     * Adreno: pitches in 64-byte units); all four share the stride - copied whole */
+    sh.scene = canvas_new_pitched(ui.W, ui.H);
+    sh.frame = canvas_new_pitched(ui.W, ui.H);
+    sh.wall = canvas_new_pitched(ui.W, ui.H);
+    sh.wall_dim = canvas_new_pitched(ui.W, ui.H);
     if (!sh.phys.px) sh.phys = canvas_new((int)k.fb_w, (int)k.fb_h);
     canvas_free(&sh.pad);
     if (sh.desk) sh.pad = canvas_new(sh.pad_ui.W, sh.pad_ui.H);
@@ -1986,7 +1988,7 @@ void shell_set_desk_auto(int on) { sh.desk_auto = on; hal_setting_set(u"QrtDeskA
 /* ---- boot splash ------------------------------------------------------------- */
 static void splash(float t) {
     canvas_t *c = &sh.scene;
-    memcpy(c->px, sh.wall.px, (usize)ui.W * ui.H * 4);
+    memcpy(c->px, sh.wall.px, (usize)sh.wall.stride * ui.H * 4);
     float cx = ui.W / 2.0f, cy = ui.H / 2.0f - dp(40);
     for (int i = 0; i < 3; i++) {
         float r = dp(34 + i * 20) * (0.6f + 0.4f * t);
@@ -2063,7 +2065,7 @@ static void render(void) {
     u64 t1 = k_now_us();
     if (sh.cursor_on) {
         for (int y = pd.y; y < pd.y + pd.h; y++)
-            memcpy(sh.frame.px + (usize)y * ui.W + pd.x, sh.scene.px + (usize)y * ui.W + pd.x, (usize)pd.w * 4);
+            memcpy(sh.frame.px + (usize)y * sh.frame.stride + pd.x, sh.scene.px + (usize)y * sh.scene.stride + pd.x, (usize)pd.w * 4);
         gfx_limit(&sh.frame, pd);
         draw_cursor(&sh.frame, sh.cursor_x, sh.cursor_y);
         gfx_limit(&sh.frame, full_rect());
@@ -2096,7 +2098,7 @@ static void run_benchmark(void) {
     u64 t1 = k_now_us();
     for (int i = 0; i < 64; i++) { compose(small); present(&sh.scene, small); }
     u64 t2 = k_now_us();
-    for (int i = 0; i < 8; i++) memcpy(sh.frame.px, sh.scene.px, (usize)ui.W * ui.H * 4);
+    for (int i = 0; i < 8; i++) memcpy(sh.frame.px, sh.scene.px, (usize)sh.scene.stride * ui.H * 4);
     u64 t3 = k_now_us();
     for (int i = 0; i < 8; i++) present(&sh.scene, full);
     u64 t4 = k_now_us();

@@ -373,6 +373,17 @@ void arm_main(const void *dtb, u64 base) {
     int nnc = 1;
     for (int i = 0; i < nshared; i++) { nc[nnc][0] = shared[i][0]; nc[nnc][1] = shared[i][1]; nnc++; }
     if (fb_reserve_size) { nc[nnc][0] = fb_reserve_base; nc[nnc][1] = fb_reserve_size; nnc++; }   /* the framebuffer: uncached, as in 0.17.0 */
+    {   /* a 32-bit screen for when the GPU copies frames (fb.c): uncached, under the DMA pool */
+        int fb_wants_32(void);
+        u32 fb32_pitch(void);
+        extern u64 fb32_base, fb32_size;
+        u64 need = ((u64)fb32_pitch() * k.fb_h + 0x1fffff) & ~0x1fffffull;
+        u64 b = (hi - need) & ~0x1fffffull;
+        if (fb_wants_32() && b + need <= (4ull << 30) && b > lo + (128ull << 20)) {
+            fb32_base = b; fb32_size = need; hi = b;
+            nc[nnc][0] = b; nc[nnc][1] = need; nnc++;
+        }
+    }
     mmu_init((const u64 (*)[2])ram, nram, (const u64 (*)[2])nc, nnc, (const u64 (*)[2])hole, nhole);
     pmm_init(lo, hi);
     if (ramoops[1]) {                                               /* the log across resets */
