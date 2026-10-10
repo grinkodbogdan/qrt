@@ -39,6 +39,21 @@ static void hide_from_linux(int node) {
         if ((i == 0 || c[i - 1] == 0) && !strncmp(c + i, "qcom,", 5)) memcpy(c + i, "qrt-,", 5);
 }
 
+/* give a kept node back to Linux, after it started: its "qrt-," compatibles become "qcom,"
+ * again - Linux's tree points into this same blob - and a probe is asked for (lgpu.c) */
+int arm_unhide(const char *hidden_compat) {
+    int n = 0;
+    for (int node = fdt_find_compatible(-1, hidden_compat); node >= 0; node = fdt_find_compatible(node, hidden_compat)) {
+        int len;
+        char *c = (char *)fdt_prop(node, "compatible", &len);
+        for (int i = 0; c && i + 5 <= len; i++)
+            if ((i == 0 || c[i - 1] == 0) && !strncmp(c + i, "qrt-,", 5)) memcpy(c + i, "qcom,", 5);
+        n++;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    return n;
+}
+
 /* ---- the console: QEMU's PL011, or a Qualcomm phone's UARTDM (the Mi A1's debug UART
  * at 78af000, on test pads), when the tree has one - every line of the log, Linux's too,
  * goes out from the first one.  UARTDM as Linux's msm_serial writes it (its register

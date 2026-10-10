@@ -97,7 +97,6 @@ int  gpu_enabled(void) { return 0; }
 int  gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int y, int w, int h) { (void)src; (void)sw; (void)sh; (void)stride; (void)rot; (void)x; (void)y; (void)w; (void)h; return 0; }
 void gpu_set_enabled(int on) { (void)on; }
 void gpu_stats(u32 *frames, u32 *avg_us, int *coherent) { *frames = 0; *avg_us = 0; *coherent = 0; }
-const char *gpu_status(void) { return "the boot loader's framebuffer"; }
 int  gpu_supported(void) { return 0; }
 int  display_connected(void) { return 0; }
 int  display_enabled(void) { return 0; }

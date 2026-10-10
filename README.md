@@ -189,6 +189,32 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.26.0: the GPU, first step - up and running under Linux
+
+Asked: the GPU (the Mi A1's Adreno 506; Linux has its driver, msm).  Getting it to draw
+QRT's screen is three steps; this release is the first - bring it up and see it run:
+
+1. **Up and running** (this release, `lgpu.c`): the GPU and its IOMMU are kept from Linux
+   at boot (probing them once faulted on the secure world).  Once Linux and the phone's
+   partitions are up, QRT
+   - copies the GPU's firmware from the vendor partition: the command processor's
+     microcode (`a530_pm4.fw`, `a530_pfp.fw`) and the "zap" shader (`a506_zap.*`) the
+     secure world loads to take the GPU out of secure mode;
+   - gives the IOMMU (msm-iommu-v2 at 1c48000) back to Linux - its "qcom," compatibles
+     restored in the tree Linux reads (`arm_unhide`) - and has it probed, then the GPU;
+   - opens it: Linux loads the firmware, the zap shader goes through the secure world,
+     and the command processor runs its init packets (CP_ME_INIT) and must go idle;
+   - reads the GPU's ID and its always-on timestamp twice - counting means it runs.
+   System Monitor's Hardware tab shows the state ("Acceleration").  A reset while doing
+   it leaves the GPU alone at the next boot; `qrt.nogpu` keeps it off.
+   LKL patches: the GPU is a headless DRM device (the display stays QRT's), and the IOMMU's
+   page tables take real addresses (Linux's memory sits in a window: one check still
+   compared against the window address).
+2. **Commands of QRT's own:** buffers QRT fills (Linux's memory is mapped in QRT) and
+   submits - first a blit.
+3. **Drawing with it:** copying and turning the shell's frames into the 24-bit
+   framebuffer, the per-pixel work the CPU does now.
+
 ## 0.25.2: less asking, more waiting
 
 0.25.1 on the Mi A1 felt slow: 19-55 % CPU all the time (before 0.25.0 the phone sat at

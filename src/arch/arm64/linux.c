@@ -1365,6 +1365,8 @@ static void linux_main(void *a) {
     lsound_start();                                                 /* the audio DSP and the speaker */
     void lbt_start(void);
     lbt_start();                                                    /* Bluetooth: hci0 to QRT's own stack */
+    void lgpu_start(void);
+    lgpu_start();                                                   /* the GPU: brought up, checked */
     thr_create("linux sensors", sensors_loop, NULL, 32 << 10);
     if (fdt_find_compatible(-1, "linux,dummy-virt") < 0) thr_create("motion", motion_loop, NULL, 32 << 10);
     thr_sleep_us(25ull * 1000000);

@@ -807,6 +807,24 @@ index 45c5255bc..943fc1718 100644
  	struct clk_smd_rpm_req req = {
  		.key = cpu_to_le32(QCOM_RPM_SMD_KEY_ENABLE),
  		.nbytes = cpu_to_le32(sizeof(u32)),
+diff --git a/drivers/gpu/drm/msm/adreno/adreno_device.c b/drivers/gpu/drm/msm/adreno/adreno_device.c
+index cfc74a9e2..31332ea34 100644
+--- a/drivers/gpu/drm/msm/adreno/adreno_device.c
++++ b/drivers/gpu/drm/msm/adreno/adreno_device.c
+@@ -264,7 +264,12 @@ static int adreno_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
+-	if (of_device_is_compatible(pdev->dev.of_node, "amd,imageon"))
++	/*
++	 * QRT: the display stays the host's (its MDSS is kept from Linux), so the
++	 * GPU is a DRM device of its own - the headless case, as on imx5.
++	 */
++	if (of_device_is_compatible(pdev->dev.of_node, "amd,imageon") ||
++	    IS_ENABLED(CONFIG_LKL_QRT_SOC))
+ 		adreno_device_register_headless();
+ 
+ 	return 0;
 diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
 index d3a9a9faf..778f5e1ed 100644
 --- a/drivers/gpu/drm/panel/Kconfig
@@ -2895,7 +2913,7 @@ index b3aa1f5d5..93d6ee7d9 100644
  	select IOMMU_API
  	select IOMMU_IO_PGTABLE_LPAE
 diff --git a/drivers/iommu/io-pgtable-arm.c b/drivers/iommu/io-pgtable-arm.c
-index 0e67f1721..6e4357332 100644
+index 0e67f1721..791129c94 100644
 --- a/drivers/iommu/io-pgtable-arm.c
 +++ b/drivers/iommu/io-pgtable-arm.c
 @@ -178,10 +178,23 @@ static inline bool iopte_table(arm_lpae_iopte pte, int lvl)
@@ -2944,6 +2962,15 @@ index 0e67f1721..6e4357332 100644
  }
  
  static void *__arm_lpae_alloc_pages(size_t size, gfp_t gfp,
+@@ -234,7 +247,7 @@ static void *__arm_lpae_alloc_pages(size_t size, gfp_t gfp,
+ 		 * address directly, so if the DMA layer suggests otherwise by
+ 		 * translating or truncating them, that bodes very badly...
+ 		 */
+-		if (dma != virt_to_phys(pages))
++		if (dma != qrt_real(virt_to_phys(pages)))
+ 			goto out_unmap;
+ 	}
+ 
 @@ -1020,7 +1033,7 @@ arm_64_lpae_alloc_pgtable_s1(struct io_pgtable_cfg *cfg, void *cookie)
  	wmb();
  
