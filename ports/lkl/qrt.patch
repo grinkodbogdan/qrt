@@ -2012,10 +2012,10 @@ index 8dcb41545..59d3bc43c 100644
 +obj-$(CONFIG_BATTERY_QCOM_FG)	+= qcom_fg.o
 diff --git a/drivers/power/supply/qcom_fg.c b/drivers/power/supply/qcom_fg.c
 new file mode 100644
-index 000000000..c6bb3dfb0
+index 000000000..3f842a54d
 --- /dev/null
 +++ b/drivers/power/supply/qcom_fg.c
-@@ -0,0 +1,1354 @@
+@@ -0,0 +1,1359 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* Copyright (c) 2020, The Linux Foundation. All rights reserved. */
 +
@@ -3158,6 +3158,7 @@ index 000000000..c6bb3dfb0
 +	chip->ops = data->ops;
 +	chip->sram_regs = data->sram_regs;
 +
++	dev_info(&pdev->dev, "probing\n");
 +	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 +	if (!chip->regmap) {
 +		dev_err(chip->dev, "Failed to locate the regmap\n");
@@ -3183,7 +3184,8 @@ index 000000000..c6bb3dfb0
 +	if (ret) {
 +		dev_err(chip->dev,
 +			"Failed to configure interrupt sourete: %d\n", ret);
-+		return ret;
++		if (!IS_ENABLED(CONFIG_LKL_QRT_SOC))
++			return ret;
 +	}
 +
 +	ret = qcom_fg_clear_ima(chip, true);
@@ -3197,9 +3199,12 @@ index 000000000..c6bb3dfb0
 +	ret = qcom_fg_read(chip, &dma_status, MEM_IF_DMA_STS, 1);
 +	if (ret < 0) {
 +		dev_err(chip->dev, "Failed to read dma_status: %d\n", ret);
-+		return ret;
++		if (!IS_ENABLED(CONFIG_LKL_QRT_SOC))
++			return ret;
 +	}
 +
++	if (ret < 0)
++		dma_status = 0;
 +	error_present = dma_status & (BIT(1) | BIT(2));
 +	ret = qcom_fg_masked_write(chip, MEM_IF_DMA_CTL, BIT(0),
 +			error_present ? BIT(0) : 0);

@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.22.6: web pages open; the battery says where it stops
+
+0.22.5 on the Mi A1: **web pages open** - with 802.11n off, frames addressed to the
+phone arrive.  (The first page can take a while: Wi-Fi comes up after Linux and the
+Wi-Fi core start.)
+
+The battery still did not show: `gauge driver present, 0 device(s)` - the driver is in
+Linux but never took the gauge.
+
+- **The gauge's probe no longer stops on its first register writes** (the interrupt
+  source and DMA status - the PMIC's owner may refuse those to Linux) under QRT.
+- **Why there is no battery, in more detail** a minute after boot: whether the gauge
+  device was made at all, the gauge driver's own last lines (`argon: gauge said: ...`),
+  or what it still waits for (`argon: gauge waits: ...`).
+
 ## 0.22.5: Wi-Fi without 802.11n; the battery driver stays
 
 0.22.4 on the Mi A1 counted what came in: after joining, **3 frames addressed to the

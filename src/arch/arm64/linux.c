@@ -176,11 +176,20 @@ static void keep_problem(const char *l) {
     const char *m = l[0] == '[' && strchr(l, ']') ? strchr(l, ']') + 2 : l;  /* without the timestamp */
     strlcpy(probs[nprob++], m, sizeof probs[0]);
 }
+/* the fuel gauge's own lines, for battery_why */
+static char fgl[3][120];
+static int nfg;
+static void keep_fg(const char *l) {
+    if (!strstr(l, "fuel-gauge") && !strstr(l, "qcom-fg") && !strstr(l, "qcom_fg") && !strstr(l, "qcom-battery")) return;
+    const char *m = l[0] == '[' && strchr(l, ']') ? strchr(l, ']') + 2 : l;
+    strlcpy(fgl[nfg % 3], m, sizeof fgl[0]);
+    nfg++;
+}
 static void h_print(const char *s, int len) {
     for (int i = 0; i < len; i++) {
         if (s[i] == '\n' || plen == (int)sizeof pline - 1) {
             pline[plen] = 0;
-            if (plen) { klog("linux: %s", pline); keep_problem(pline); }
+            if (plen) { klog("linux: %s", pline); keep_problem(pline); keep_fg(pline); }
             plen = 0;
         }
         if (s[i] != '\n') pline[plen++] = s[i];
@@ -822,6 +831,32 @@ static void battery_why(void) {
             fmt(line + l, sizeof line - l, " %s (capacity %s)", nm, cap);
         }
         l_close((int)fd);
+    }
+    int found = 0;                                                    /* is there a gauge device at all */
+    fd = l_open("/sys/bus/platform/devices", 0200000);
+    if (fd >= 0) {
+        static char d[8192];
+        long len;
+        while ((len = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0)) > 0)
+            for (long o = 0; o < len; o += *(u16 *)(d + o + 16)) if (strstr(d + o + 19, "fuel-gauge")) found = 1;
+        l_close((int)fd);
+    }
+    klog("argon: no battery: the gauge device %s", found ? "exists" : "was never made (its PMIC's children not populated)");
+    for (int i = nfg > 3 ? nfg - 3 : 0; i < nfg; i++) klog("argon: gauge said: %s", fgl[i % 3]);
+    if (!nfg) klog("argon: the gauge driver said nothing - its probe never ran");
+    fd = l_open("/sys/kernel/debug/devices_deferred", 0);               /* still waiting for something? */
+    if (fd >= 0) {
+        static char buf[4096];
+        long len = l_read((int)fd, buf, sizeof buf - 1);
+        l_close((int)fd);
+        buf[len > 0 ? len : 0] = 0;
+        for (char *l = buf; *l; ) {
+            char *e = strchr(l, '\n');
+            if (e) *e = 0;
+            if (strstr(l, "fuel")) { for (char *t = l; *t; t++) if (*t == '\t') *t = ' '; klog("argon: gauge waits: %s", l); }
+            if (!e) break;
+            l = e + 1;
+        }
     }
     klog("argon: no battery: gauge driver %s, %d device(s); supplies:%s", bound < 0 ? "missing" : "present", bound < 0 ? 0 : bound, line[0] ? line : " none");
 }
