@@ -189,6 +189,25 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.22.4: Wi-Fi traffic both ways; the battery
+
+0.22.3 on the Mi A1: **Wi-Fi connects** - WPA2 with the router, DHCP gave an address -
+but nothing answered after that: no DNS, no web page.  DHCP's answers are broadcasts
+(QRT asks for them so); DNS's and everything else's come addressed to the phone.
+
+- **Power saving off** (`lwifi.c`): Linux builds with Wi-Fi power saving on, and then
+  the access point holds frames addressed to the phone until the phone wakes and asks
+  - broadcasts still come on the beacon's schedule.  Power saving is now turned off
+  over nl80211 when `wlan0` comes up and again after each association.
+- **What goes in and out is counted** for the first two minutes of a connection
+  (`wifi: frames in: N to us, M broadcast; out: K`), every 20 s: if pages still do not
+  load, the log shows which way frames are lost.
+- **The battery** (LKL `drivers/power/supply/qcom_fg.c`): mainline Linux has no driver
+  for the Mi A1's fuel gauge (PMI8950's FG); postmarketOS's msm8953 tree does - ported.
+  The charger stays kept from Linux (0.21.14), so the gauge alone gives the status:
+  full at 100 %, charging when current flows into the battery, discharging otherwise.
+  The top bar and Settings show it as on the tablets.
+
 ## 0.22.3: wlan0 gets a MAC address
 
 0.22.2 on the Mi A1: bringing `wlan0` up failed with error -99 (`EADDRNOTAVAIL`):

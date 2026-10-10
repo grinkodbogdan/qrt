@@ -344,6 +344,9 @@ static int if_up_name(const char *name, int on) {
 static int if_up(int on) { return if_up_name(ifname, on); }
 
 /* ---- frames: the packet socket, read by a thread, handed over in poll ---- */
+/* what went in and out, while connected: which way frames get lost */
+static volatile u32 rx_uni, rx_multi, tx_n;
+static u64 count_from;
 #define RXQ 64
 static struct { u16 len; u8 f[1600]; } rxq[RXQ];
 static volatile u32 rq_head, rq_tail;
@@ -356,6 +359,7 @@ static void rx_loop(void *a) {
         long n = S6(NR_RECVFROM, pkt, b, sizeof b, 0, sll, &sl);
         if (n <= 0) { thr_sleep_us(20000); continue; }
         if (sll[10] == 4) continue;                                    /* PACKET_OUTGOING: our own */
+        if (b[0] & 1) rx_multi++; else rx_uni++;
         if (n > 1600 || rq_head - rq_tail >= RXQ) continue;
         u64 f = irq_save();
         rxq[rq_head % RXQ].len = (u16)n;
@@ -617,6 +621,17 @@ static void test_ap_setup(void) {
     thr_create("wifi test ap", ap_loop, NULL, 32 << 10);
 }
 
+/* Power saving off: with it, the access point holds frames addressed to us until we wake
+ * and ask - broadcasts (DHCP's answers) still came, unicasts (ARP replies, DNS) did not
+ * (0.22.3 on the Mi A1: an address, then no answer from anything) */
+static void power_save_off(void) {
+    msg((u16)family, 4, 61);                                           /* NL80211_CMD_SET_POWER_SAVE */
+    attr32(A_IFINDEX, (u32)ifindex);
+    attr32(93, 0);                                                      /* NL80211_ATTR_PS_STATE: disabled */
+    int r = nl_call(NULL, NULL);
+    if (r < 0) LOG("could not turn power saving off (%d)", r);
+}
+
 /* starting takes long on the phone (the modem partition mounted, the Pronto core
  * started, wcn36xx up): a thread does it, wlan.c asks again until it is done */
 static volatile int start_state;                      /* 0 idle, 1 running, 2 done, -1 failed */
@@ -650,6 +665,7 @@ static void start_work(void *a) {
                 argon_wifi_report();                                       /* wcn36xx's own words */
             } else if (pkt_open() == 0) {
                 ok = 1;
+                power_save_off();
                 LOG("%s up, address %02x:%02x:%02x:%02x:%02x:%02x", ifname, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
             }
         }
@@ -732,6 +748,7 @@ static void lw_disconnect(void) {
 }
 static int lw_send(const u8 *eth, usize len) {
     if (pkt < 0) return -1;
+    tx_n++;
     return S6(NR_SENDTO, pkt, eth, len, 0, 0, 0) == (long)len ? 0 : -1;
 }
 static int lw_set_keys(const u8 tk[16], int gtk_id, const u8 gtk[16]) {
@@ -787,6 +804,7 @@ static void lw_poll(void) {
             else if (mine && cmd == C_CONNECT) {
                 int st = a.p[A_STATUS_CODE] ? get16(a.p[A_STATUS_CODE]) : (a.p[65] ? -1 : 0);   /* TIMED_OUT */
                 LOG("connect: status %d", st);
+                if (st == 0) { power_save_off(); rx_uni = rx_multi = tx_n = 0; count_from = k_now_ms(); }
                 wlan_sm_assoc(st == 0, st);
             } else if (mine && cmd == C_DISCONNECT) {
                 int rc = a.p[A_REASON_CODE] ? get16(a.p[A_REASON_CODE]) : 0;
@@ -795,6 +813,11 @@ static void lw_poll(void) {
             }
             o += (len + 3) & ~3u;
         }
+    }
+    static u64 next_count;
+    if (count_from && k_now_ms() - count_from < 120000 && k_now_ms() >= next_count) {
+        next_count = k_now_ms() + 20000;
+        LOG("frames in: %u to us, %u broadcast; out: %u", rx_uni, rx_multi, tx_n);
     }
     while (rq_tail != rq_head) {
         const u8 *f = rxq[rq_tail % RXQ].f;
