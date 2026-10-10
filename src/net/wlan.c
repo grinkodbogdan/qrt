@@ -609,8 +609,11 @@ static void powered_on(void) {
 static void power_failed(void) {
     set_state(WL_OFF);
     strlcpy(w.state_text, "the radio did not start (see the log)", sizeof w.state_text);
-    hal_setting_set(u"QrtWifiOn", 0);                  /* do not retry at every boot */
+    /* the setting stays: Wi-Fi is on unless turned off, so the next boot tries again */
 }
+/* settings saved on the device (the Mi A1: a file Linux reads) may come in after the
+ * shell starts; platforms that have them at once say so here */
+__attribute__((weak)) int hal_settings_ready(void) { return 1; }
 int wlan_power(int on) {
     if (on && w.state == WL_OFF) {
         set_state(WL_STARTING);
@@ -738,9 +741,11 @@ void wlan_poll(void) {
         if (!boot_checked && k_now_ms() > k.boot_ms + 1500 && k.boot_ms) {
             /* a backend's card may appear later (Linux starting): wait for it, a minute at most */
             if (!wlan_available() && k_now_ms() < k.boot_ms + 60000) return;
+            if (!hal_settings_ready()) return;
             boot_checked = 1;
-            if (wlan_available() && hal_setting_get(u"QrtWifiOn", 0) == 1) {
-                LOG("Wi-Fi was on: starting");
+            /* on unless turned off: a new device starts with Wi-Fi on */
+            if (wlan_available() && hal_setting_get(u"QrtWifiOn", 1) == 1) {
+                LOG("Wi-Fi on: starting");
                 if (wlan_power(1) == 0) {
                     char s[33];
                     if (wlan_saved(s, sizeof s)) { strlcpy(w.want_ssid, s, sizeof w.want_ssid); wlan_scan(); }

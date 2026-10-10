@@ -752,10 +752,64 @@ static void storage_scan(void) {
         if (!strncmp(m->name, "modem", 5)) firmware_from(m);
     }
 }
+static int scans;
 static void storage_loop(void *a) {
     (void)a;
     vfs_remote_call = argon_vfs;
-    for (;;) { if (linux_running()) storage_scan(); thr_sleep_us(10ull * 1000000); }
+    for (;;) { if (linux_running()) { storage_scan(); scans++; } thr_sleep_us(10ull * 1000000); }
+}
+
+/* ---- settings kept across boots: on the phone, a file on the logdump partition (Xiaomi's
+ * crash-log space, ext4 - nothing of Android's lives there).  That one partition is
+ * remounted writable; the rest stay read-only.  Wi-Fi on/off, the saved network, the
+ * brightness... (hal.c keeps them in RAM and counts the changes) ---- */
+#define NR_WRITE    64
+#define NR_RENAMEAT 38
+#define NR_FSYNC    82
+u32 hal_settings_gen(void);
+usize hal_settings_export(u8 *buf, usize cap);
+int hal_settings_import(const u8 *buf, usize len);
+void hal_settings_mark_ready(void);
+static void settings_loop(void *a) {
+    (void)a;
+    const struct amnt *m = NULL;
+    while (!m) {                                                    /* the partition, once mounted */
+        for (int i = 0; i < namnt && !m; i++) if (!strcmp(amnts[i].name, "logdump")) m = &amnts[i];
+        if (m) break;
+        if (dead || scans >= 2) { klog("settings: no logdump partition - settings last until power-off"); hal_settings_mark_ready(); return; }
+        thr_sleep_us(1000000);
+    }
+    char dir[96], file[112], tmp[112];
+    fmt(dir, sizeof dir, "%s/qrt", m->lpath);
+    fmt(file, sizeof file, "%s/settings", dir);
+    fmt(tmp, sizeof tmp, "%s/settings.new", dir);
+    long r = sys(NR_MOUNT, 0, (long)m->lpath, 0, 32, 0);            /* MS_REMOUNT, writable */
+    if (r < 0) { klog("settings: logdump stays read-only (%ld) - settings last until power-off", r); hal_settings_mark_ready(); return; }
+    sys(NR_MKDIRAT, AT_FDCWD, (long)dir, 0755, 0, 0);
+    static u8 buf[64 * 300];
+    long fd = l_open(file, 0);
+    if (fd >= 0) {
+        long n = l_read((int)fd, buf, sizeof buf);
+        l_close((int)fd);
+        int got = n > 8 && !memcmp(buf, "QRTSET1\n", 8) ? hal_settings_import(buf + 8, (usize)(n - 8)) : 0;
+        klog("settings: %d loaded from the phone (logdump/qrt/settings)", got);
+    } else klog("settings: none saved yet (logdump/qrt/settings)");
+    hal_settings_mark_ready();
+    u32 saved = hal_settings_gen() ? ~0u : 0;                       /* set before the file was read: save them too */
+    for (;;) {
+        thr_sleep_us(2000000);
+        u32 g = hal_settings_gen();
+        if (g == saved) continue;
+        memcpy(buf, "QRTSET1\n", 8);
+        usize n = 8 + hal_settings_export(buf + 8, sizeof buf - 8);
+        fd = sys(NR_OPENAT, AT_FDCWD, (long)tmp, 01101, 0600, 0);    /* O_WRONLY | O_CREAT | O_TRUNC */
+        if (fd < 0) { klog("settings: could not save (%ld)", fd); saved = g; continue; }
+        long w = sys(NR_WRITE, fd, (long)buf, (long)n, 0, 0);
+        sys(NR_FSYNC, fd, 0, 0, 0, 0);
+        l_close((int)fd);
+        if (w == (long)n && sys(NR_RENAMEAT, AT_FDCWD, (long)tmp, AT_FDCWD, (long)file, 0) == 0) saved = g;
+        else { klog("settings: could not save (%ld)", w); saved = g; }
+    }
 }
 
 /* ---- Argon power: Linux's fuel gauge and charger (PMI8950 on the Mi A1) as Tessera's
@@ -961,7 +1015,7 @@ static void linux_main(void *a) {
     int r = lkl_start_kernel(qemu ? "mem=160M loglevel=8 initcall_debug clk_ignore_unused pd_ignore_unused "
                                     "regulator_ignore_unused fw_devlink=permissive"
                                   : "mem=160M loglevel=8 initcall_debug clk_ignore_unused pd_ignore_unused "
-                                    "regulator_ignore_unused fw_devlink=permissive mac80211_hwsim.radios=0");
+                                    "regulator_ignore_unused fw_devlink=permissive mac80211_hwsim.radios=0 snd_dummy.enable=0");
     if (r < 0) { klog("linux: did not start (%d)", r); return; }
     plog_state(PLOG_LINUX_OK);                                      /* up: a later reset is not its start's */
     running = 1;
@@ -974,6 +1028,9 @@ static void linux_main(void *a) {
     thr_create("backlight", bl_loop, NULL, 32 << 10);
     thr_create("linux display", display_loop, NULL, 32 << 10);
     thr_create("linux storage", storage_loop, NULL, 64 << 10);
+    thr_create("settings", settings_loop, NULL, 32 << 10);
+    void lsound_start(void);
+    lsound_start();                                                 /* the audio DSP and the speaker */
     thr_create("linux sensors", sensors_loop, NULL, 32 << 10);
     thr_sleep_us(25ull * 1000000);
     if (!dead) linux_summary();

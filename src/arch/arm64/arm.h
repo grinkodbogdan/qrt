@@ -60,7 +60,8 @@ int   msm_init(void);
 int   msm_poll(event_t *out, int max);
 
 /* plog.c: the log kept across a reset (the ramoops region) */
-enum { PLOG_BOOT = 1, PLOG_LINUX_STARTING = 2, PLOG_LINUX_OK = 3, PLOG_CLEAN = 4 };   /* CLEAN: shut down or restarted from QRT */
+enum { PLOG_BOOT = 1, PLOG_LINUX_STARTING = 2, PLOG_LINUX_OK = 3, PLOG_CLEAN = 4, PLOG_DSP_STARTING = 5 };   /* DSP: the audio DSP being started */
+int plog_prev_state(void);   /* CLEAN: shut down or restarted from QRT */
 void  plog_init(u64 base, u64 size);
 void  plog_line(const char *s);
 void  plog_state(int s);

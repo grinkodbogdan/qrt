@@ -117,7 +117,7 @@ int arm_rtc_get(EFI_TIME *t) {
 }
 int arm_rtc_set(const EFI_TIME *t) { (void)t; return 0; }
 
-/* ---- settings: in RAM for now (the phone's storage comes with Linux's drivers) ---- */
+/* ---- settings: in RAM, saved to the phone's storage by linux.c when it has some ---- */
 #define NSET 64
 static struct { c16 name[32]; u8 data[256]; usize len; int used; } sets[NSET];
 static int set_find(const c16 *name, int create) {
@@ -152,12 +152,53 @@ usize hal_setting_get_blob(const c16 *name, void *buf, usize cap) {
     memcpy(buf, sets[i].data, n);
     return n;
 }
+static u32 set_gen;                                   /* changes since boot: linux.c saves them */
+static int set_ready;
 void hal_setting_set_blob(const c16 *name, const void *buf, usize len) {
     int i = set_find(name, 1);
     if (i < 0) return;
-    sets[i].len = MIN(len, sizeof sets[i].data);
-    memcpy(sets[i].data, buf, sets[i].len);
+    usize n = MIN(len, sizeof sets[i].data);
+    if (sets[i].len == n && !memcmp(sets[i].data, buf, n)) return;
+    sets[i].len = n;
+    memcpy(sets[i].data, buf, n);
+    set_gen++;
 }
+/* kept on the phone (linux.c: a file on the logdump partition) - the format: per setting
+ * a name (32 UTF-16 units), a length (u32) and the bytes */
+u32 hal_settings_gen(void) { return set_gen; }
+usize hal_settings_export(u8 *buf, usize cap) {
+    usize o = 0;
+    for (int i = 0; i < NSET; i++) {
+        if (!sets[i].used) continue;
+        usize need = sizeof sets[i].name + 4 + sets[i].len;
+        if (o + need > cap) break;
+        memcpy(buf + o, sets[i].name, sizeof sets[i].name); o += sizeof sets[i].name;
+        u32 l = (u32)sets[i].len;
+        memcpy(buf + o, &l, 4); o += 4;
+        memcpy(buf + o, sets[i].data, l); o += l;
+    }
+    return o;
+}
+/* what was saved, under what was set since boot */
+int hal_settings_import(const u8 *buf, usize len) {
+    int n = 0;
+    for (usize o = 0; o + sizeof sets[0].name + 4 <= len;) {
+        c16 name[32];
+        memcpy(name, buf + o, sizeof name); o += sizeof name;
+        name[31] = 0;
+        u32 l;
+        memcpy(&l, buf + o, 4); o += 4;
+        if (l > sizeof sets[0].data || o + l > len) break;
+        if (set_find(name, 0) < 0) {
+            int i = set_find(name, 1);
+            if (i >= 0) { sets[i].len = l; memcpy(sets[i].data, buf + o, l); n++; }
+        }
+        o += l;
+    }
+    return n;
+}
+void hal_settings_mark_ready(void) { set_ready = 1; }
+int hal_settings_ready(void) { return set_ready || k_now_ms() > 90000; }
 void hal_settings_prepare(void) {}
 void hal_probe(void) {}
 

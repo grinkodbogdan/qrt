@@ -39,7 +39,8 @@ int  smp_workers(void) { return 0; }
 void smp_set_enabled(int on) { (void)on; }
 void smp_run(smp_job_t job, void *arg, int count) { for (int i = 0; i < count; i++) job(arg, i, count); }
 
-const char *audio_status(void) { return "no sound driver on ARM yet"; }
+const char *lsound_status(void);
+const char *audio_status(void) { return lsound_status(); }
 const char *speaker_status(void) { return "none"; }
 const char *hda_status(void) { return "none"; }
 /* the backlight through Linux's driver (linux.c), once it is up */

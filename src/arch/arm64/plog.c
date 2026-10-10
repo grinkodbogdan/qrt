@@ -74,5 +74,6 @@ void plog_clear_fails(void) { if (pl) { pl->linux_fails = 0; __asm__ volatile("d
 int plog_prev_lines(void) { return nprev; }
 /* the last boot ended without QRT shutting down or restarting (a reset, a crash, the power
  * key held) - its log is worth a look */
-int plog_last_boot_unclean(void) { return nprev && prev_state >= PLOG_BOOT && prev_state < PLOG_CLEAN; }
+int plog_last_boot_unclean(void) { return nprev && ((prev_state >= PLOG_BOOT && prev_state < PLOG_CLEAN) || prev_state == PLOG_DSP_STARTING); }
+int plog_prev_state(void) { return nprev ? prev_state : -1; }
 const char *plog_prev_line(int i) { return i >= 0 && i < nprev ? prev[i] : NULL; }

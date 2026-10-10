@@ -189,6 +189,37 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.23.0: Wi-Fi on from the start, settings that stay, sound
+
+On the Mi A1, 0.22.8: Wi-Fi works, the battery shows.  Two things asked for next: Wi-Fi
+should come up by itself, and sound.
+
+- **Wi-Fi is on unless turned off.**  A new device starts with Wi-Fi on and joins the
+  saved network at boot; a radio that fails to start no longer turns the setting off.
+- **Settings are kept on the phone.**  They lived in RAM - every boot forgot Wi-Fi's
+  state and the saved network.  Now `linux.c` keeps them in a file on the **logdump**
+  partition (Xiaomi's crash-log space, ext4 - nothing of Android's): that one partition
+  is remounted writable, `qrt/settings` read at boot and rewritten (to a new file, then
+  renamed) two seconds after a change.  Wi-Fi waits for the file before deciding.
+  Tested in QEMU with a disk holding a `logdump` partition: the second boot loads what
+  the first saved.
+- **Sound** (`lsound.c`), through Linux's own drivers:
+  - the **audio DSP** (QDSP6, the ADSP) is no longer kept from Linux - nor its SMP2P
+    link, APR services, the sound card and the WCD codecs; QRT starts it through the
+    secure world (as Wi-Fi's core), its firmware from the modem partition;
+  - the **sound card** for the msm8953 comes from postmarketOS's msm8953 tree
+    (`apq8016_sbc.c` with `qcom,msm8953-qdsp6-sndcard`, the q6voice services its card
+    names, the WCD codecs) - added to LKL's tree (`ports/lkl/qrt.patch`);
+  - routing as postmarketOS's UCM for this phone: `QUIN_MI2S_RX Audio Mixer
+    MultiMedia3` - MultiMedia3 to the **speaker amplifier** (MAX98927 on quinary MI2S);
+  - QRT's mix plays on `hw:0,2`, 48 kHz stereo, written with raw ALSA ioctls; after 3 s
+    of silence the stream stops so the DSP and amplifier rest.  Settings' test sound
+    plays on it; System Monitor shows the output.
+  - If starting the DSP ever resets the phone, the next boot leaves sound off and says
+    so (`sound: off this boot: ...`); `qrt.nosound` keeps all of it from Linux.
+  - Tested in QEMU against Linux's dummy card (`qrt.soundtest`): parameters, controls,
+    writing and the stop on silence.  The DSP and the speaker only on the phone.
+
 ## 0.22.8: Wi-Fi waits for Linux; the gauge waits less
 
 0.22.7 on the Mi A1: **the battery shows** - but Wi-Fi's interface did not appear.

@@ -121,6 +121,7 @@ ifneq ($(ARM_LKL),)
 build/arm64/arch/arm64/linux.o: CFLAGS += -DQRT_LKL -Ibuild/arm64/lkl/include
 build/arm64/arch/arm64/hal.o: CFLAGS += -DQRT_LKL
 build/arm64/arch/arm64/lwifi.o: CFLAGS += -DQRT_LKL
+build/arm64/arch/arm64/lsound.o: CFLAGS += -DQRT_LKL
 build/arm64/arch/arm64/linux.o build/arm64/arch/arm64/hal.o: $(ARM_LKL)
 ARM_LIBS := $(ARM_LKL) $(shell aarch64-linux-gnu-gcc -print-libgcc-file-name 2>/dev/null)
 endif
