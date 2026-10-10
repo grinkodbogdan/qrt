@@ -1210,7 +1210,8 @@ static void led_poll(void) {
 static long vib_fd = -1;
 static int vib_id = -1;
 static volatile int vib_ms;
-void hal_vibrate(int ms) { if (vib_fd >= 0) vib_ms = ms; }
+static sem_t *vib_sem;
+void hal_vibrate(int ms) { if (vib_fd >= 0 && vib_sem) { vib_ms = ms; sem_up(vib_sem); } }
 static void find_vibrator(void) {
     for (int i = 0; i < 16; i++) {
         char p[80], nm[48] = "";
@@ -1225,8 +1226,9 @@ static void find_vibrator(void) {
 static void vib_loop(void *a) {
     (void)a;
     for (;;) {
+        sem_down(vib_sem);                                             /* until a buzz is asked for */
         int ms = vib_ms;
-        if (!ms) { thr_sleep_us(15000); continue; }
+        if (!ms) continue;
         vib_ms = 0;
         u8 eff[48];
         memset(eff, 0, sizeof eff);
@@ -1248,12 +1250,13 @@ static void motion_loop(void *a) {
     if (!accel_dir[0]) { strlcpy(sens_status, "none found in Linux", sizeof sens_status); }
     find_light();
     find_vibrator();
-    if (vib_fd >= 0) thr_create("vibration", vib_loop, NULL, 16 << 10);
-    for (u64 n = 0;; n++) {
-        if (accel_dir[0]) accel_poll();
-        if (n % 3 == 0) light_poll();
+    if (vib_fd >= 0) { vib_sem = sem_new(0); thr_create("vibration", vib_loop, NULL, 16 << 10); }
+    int shell_auto_rotate(void);
+    for (u64 n = 0;; n++) {                                           /* every half second */
+        if (accel_dir[0] && shell_auto_rotate()) accel_poll();        /* only what is used */
+        if (n % 6 == 0 && hal_setting_get(u"QrtAutoBright", 1)) light_poll();
         if (n % 10 == 0) led_poll();
-        thr_sleep_us(300000);
+        thr_sleep_us(500000);
     }
 }
 

@@ -189,6 +189,24 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.25.2: less asking, more waiting
+
+0.25.1 on the Mi A1 felt slow: 19-55 % CPU all the time (before 0.25.0 the phone sat at
+85-89 % idle).  Every call into Linux is a hand-over between threads; 0.24-0.25 added
+several threads that asked Linux something many times a second, whether or not anything
+had happened:
+
+- **Bluetooth** polled its HCI socket 50 times a second: a reader thread now waits in
+  Linux for each packet (`lbt.c`).
+- **Wi-Fi** read its netlink events on every frame the shell drew: at most every 100 ms
+  now (frames still come by their own thread).
+- **The vibration motor's** thread woke every 15 ms to look for a request: it sleeps on a
+  semaphore until a buzz is asked for.
+- **Sensors:** the accelerometer is read only while automatic rotation is on, the light
+  sensor only every 3 s while automatic brightness is on (both every half second at most).
+- **Sound** woke 50 times a second while silent: 12 now (85 ms pieces); a sound that
+  starts waits at most that long.
+
 ## 0.25.1: turning right, all the cores, honest numbers
 
 0.25.0 on the Mi A1: turning the phone left turned the picture upside down, and both

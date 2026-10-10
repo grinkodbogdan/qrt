@@ -804,7 +804,10 @@ static const u8 *lw_mac(void) { return mac; }
 /* events (scan done, connected, disconnected) and received frames */
 static void lw_poll(void) {
     if (!up) return;
-    for (int i = 0; i < 8; i++) {
+    static u64 next_events;                                           /* the shell calls this every frame */
+    int events = k_now_ms() >= next_events;
+    if (events) next_events = k_now_ms() + 100;
+    for (int i = 0; i < 8 && events; i++) {
         long n = S6(NR_RECVFROM, nle, rb, sizeof rb, 0x40, 0, 0);       /* MSG_DONTWAIT */
         if (n <= 0) break;
         for (long o = 0; o + 20 <= n;) {

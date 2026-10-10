@@ -58,14 +58,19 @@ static int send_pkt(u8 type, const u8 *p, int len) {
 }
 static int send_cmd(const u8 *p, int len) { return send_pkt(0x01, p, len); }
 static int send_acl(const u8 *p, int len) { return send_pkt(0x02, p, len); }
-static void poll(void) {
-    for (int i = 0; i < 16; i++) {
-        long n = S6(NR_RECVFROM, fd, rx, sizeof rx, 0x40, 0, 0);      /* MSG_DONTWAIT */
-        if (n <= 1) return;
-        if (rx[0] == 0x04 && n >= 3) bt_rx_event(rx + 1, (int)n - 1);
-        else if (rx[0] == 0x02 && n >= 5) bt_rx_acl(rx + 1, (int)n - 1);
+/* packets from the controller: a thread waits in Linux for each (no polling - every call
+ * into Linux costs a hand-over, and the stack's loop runs 50 times a second) */
+static void reader(void *a) {
+    (void)a;
+    static u8 b[1200];
+    for (;;) {
+        long n = S6(NR_RECVFROM, fd, b, sizeof b, 0, 0, 0);
+        if (n <= 1) { if (n < 0) thr_sleep_us(100000); continue; }
+        if (b[0] == 0x04 && n >= 3) bt_rx_event(b + 1, (int)n - 1);
+        else if (b[0] == 0x02 && n >= 5) bt_rx_acl(b + 1, (int)n - 1);
     }
 }
+static void poll(void) {}
 static void sleep_ms(u32 ms) { thr_sleep_us((u64)ms * 1000); }
 static u8 *read_file(const char *path, u64 *len) { (void)path; (void)len; return NULL; }
 static void free_file(u8 *p) { (void)p; }
@@ -118,6 +123,7 @@ static void bt_loop(void *a) {
     nvm[3 + 5] &= 0x3f;                                               /* not a multicast-looking top byte */
     int s = raw_cmd(0xfc0b, nvm, 9);
     if (s) LOG("could not set the Bluetooth address (%d)", s);
+    thr_create("bluetooth rx", reader, NULL, 16 << 10);
     bt_attach(&transport, 0, 0);
     bt_run();
 }

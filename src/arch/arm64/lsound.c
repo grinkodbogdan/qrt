@@ -226,19 +226,22 @@ card:;
             if (playing) { S(NR_IOCTL, fd, PCM_DROP, 0, 0, 0); playing = 0; }
             continue;
         }
-        snd_mix(buf, period, 48000, 2);
+        /* silent and stopped: mix in long pieces (12 wake-ups a second, not 50) - a sound
+         * that starts waits at most 85 ms */
+        int chunk = playing ? period : 4096;
+        snd_mix(buf, chunk, 48000, 2);
         int loud = 0;
-        for (int k = 0; k < 2 * period && !loud; k++) if (buf[k] > 8 || buf[k] < -8) loud = 1;
+        for (int k = 0; k < 2 * chunk && !loud; k++) if (buf[k] > 8 || buf[k] < -8) loud = 1;
         u64 now = k_now_ms();
         if (loud) quiet_since = now;
         if (!playing) {
-            if (!loud) { thr_sleep_us((u64)period * 1000000 / 48000); continue; }   /* real time, into nothing */
+            if (!loud) { thr_sleep_us((u64)chunk * 1000000 / 48000); continue; }    /* real time, into nothing */
             S(NR_IOCTL, fd, PCM_PREPARE, 0, 0, 0);
             playing = 1;
             static int starts;
             if (starts++ < 3) LOG("playing");
         }
-        struct { long result; void *buf; unsigned long frames; } x = { 0, buf, (unsigned long)period };
+        struct { long result; void *buf; unsigned long frames; } x = { 0, buf, (unsigned long)chunk };
         long w = S(NR_IOCTL, fd, PCM_WRITEI, &x, 0, 0);
         if (w == -EPIPE) { S(NR_IOCTL, fd, PCM_PREPARE, 0, 0, 0); S(NR_IOCTL, fd, PCM_WRITEI, &x, 0, 0); }
         else if (w < 0) {
