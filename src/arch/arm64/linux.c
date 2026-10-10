@@ -154,10 +154,72 @@ static void list_dir(const char *what, const char *dir) {
     }
     klog("sound: %s:%s", what, line[0] ? line : fd < 0 ? " (none - no such bus)" : " none");
 }
+/* the audio devices (codecs, the card, the amplifier): which have a driver, and asking
+ * Linux to try again for those without one - a probe that failed while the DSP was not
+ * up yet (its clocks come through it) is not retried by Linux by itself */
+#define NR_SYSLOG 116
+static void write_text(const char *path, const char *text);
+static int sound_dev(const char *nm) {
+    return strstr(nm, "codec") || strstr(nm, "sound") || strstr(nm, "amplifier") || strstr(nm, "max98927") || strstr(nm, "-003a");
+}
+int argon_sound_reprobe(int report) {
+    static const char *const dirs[] = { "/sys/bus/platform/devices", "/sys/bus/i2c/devices", NULL };
+    int unbound = 0;
+    for (int b = 0; dirs[b]; b++) {
+        long fd = l_open(dirs[b], 0200000);
+        if (fd < 0) continue;
+        static char d[8192];
+        long n;
+        while ((n = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0)) > 0)
+            for (long o = 0; o < n; o += *(u16 *)(d + o + 16)) {
+                const char *nm = d + o + 19;
+                if (nm[0] == '.' || !sound_dev(nm)) continue;
+                char p[160];
+                fmt(p, sizeof p, "%s/%s/driver", dirs[b], nm);
+                long dfd = l_open(p, 0200000);
+                int bound = dfd >= 0;
+                if (dfd >= 0) l_close((int)dfd);
+                if (report) klog("sound: device %s: %s", nm, bound ? "has its driver" : "NO driver");
+                if (!bound) {
+                    unbound++;
+                    write_text(b == 0 ? "/sys/bus/platform/drivers_probe" : "/sys/bus/i2c/drivers_probe", nm);
+                }
+            }
+        l_close((int)fd);
+    }
+    return unbound;
+}
 void argon_sound_report(void) {
     int first = nsl > NSND ? nsl - NSND : 0;
     for (int i = first; i < nsl; i++) klog("sound: linux said: %s", slines[i % NSND]);
-    if (!nsl) klog("sound: Linux said nothing about the audio DSP or the card");
+    if (!nsl) {                                                     /* not on the console: Linux's own log */
+        static char kb[65536];
+        long n = sys(NR_SYSLOG, 3, (long)kb, sizeof kb - 1, 0, 0);   /* SYSLOG_ACTION_READ_ALL */
+        kb[n > 0 ? n : 0] = 0;
+        static const char *lines[40];
+        int nl = 0;
+        for (char *l = kb; *l; ) {
+            char *e = strchr(l, '\n');
+            if (e) *e = 0;
+            int hit = 0;
+            if (!strstr(l, "initcall") && !strstr(l, "calling ")) {
+                static const char *const w[] = { "adsp", "c200000", "apr", "q6", "snd", "sound", "asoc", "ASoC", "wcd", "codec", "max98927",
+                                                 "MI2S", "amplifier", "dai", NULL };
+                for (int i = 0; w[i] && !hit; i++) hit = strstr(l, w[i]) != NULL;
+            }
+            if (hit) lines[nl++ % 40] = l;
+            if (!e) break;
+            l = e + 1;
+        }
+        for (int i = nl > 40 ? nl - 40 : 0; i < nl; i++) {
+            const char *m = lines[i % 40];
+            if (*m == '<' && strchr(m, '>')) m = strchr(m, '>') + 1;
+            if (*m == '[' && strchr(m, ']')) m = strchr(m, ']') + 2;
+            klog("sound: linux said: %s", m);
+        }
+        if (!nl) klog("sound: Linux's log has nothing about the audio DSP or the card (%ld bytes read)", n);
+    }
+    argon_sound_reprobe(1);
     list_dir("SMD channels (rpmsg)", "/sys/bus/rpmsg/devices");
     list_dir("DSP services (APR)", "/sys/bus/aprbus/devices");
     list_dir("sound devices", "/sys/class/sound");

@@ -189,6 +189,20 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.23.3: the codecs, asked again
+
+0.23.2 on the Mi A1: the codec's crystal clock is there now; at boot the WCD digital
+codec waits for `mclk` (a clock the DSP provides), and once the DSP runs, the card
+alone waits - `Primary MI2S: codec dai not found`.  The codecs are no longer on the
+waiting list: one gave up for good, most likely when it first asked the DSP for its
+clock.
+
+- **QRT asks Linux to try the audio devices again** (`drivers_probe`) every 10 s while
+  there is no card: every codec, amplifier and sound device without a driver.
+- **The report lists each audio device and whether it has its driver**, and reads
+  Linux's own log (`syslog`) for its lines about the DSP, the codecs and the card -
+  0.23.1's report found none on the console.
+
 ## 0.23.2: the clock the codec waited for
 
 0.23.1's report on the Mi A1: the audio DSP runs and all its APR services are up

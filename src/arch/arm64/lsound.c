@@ -156,15 +156,20 @@ card:;
     char t[64], sp[64];
     fmt(sp, sizeof sp, "/sys/class/sound/%s/dev", pcm + 9);
     int i = 0;
-    for (; i < 150 && rd(sp, t, sizeof t) <= 0; i++) thr_sleep_us(200000);
+    for (; i < 150 && rd(sp, t, sizeof t) <= 0; i++) {
+        thr_sleep_us(200000);
+        if (!testing && (i == 50 || i == 100)) { int argon_sound_reprobe(int); argon_sound_reprobe(0); }
+    }
     if (i == 150) {
         /* say why, then keep waiting: a card can bind late (its parts probe in any order) */
         void argon_sound_report(void);
         fmt(state, sizeof state, "waiting: no sound card 30 s after the DSP started (see the log)");
         LOG("no sound card 30 s after the DSP started - what Linux has:");
         argon_sound_report();
+        int argon_sound_reprobe(int report);
         for (i = 0; i < 900 && rd(sp, t, sizeof t) <= 0; i++) {
             thr_sleep_us(200000);
+            if (i % 50 == 25) argon_sound_reprobe(0);                /* every 10 s: try the codecs again */
             if (i == 450) { LOG("still no sound card at 2 minutes:"); argon_sound_report(); }
         }
         if (i == 900) {
