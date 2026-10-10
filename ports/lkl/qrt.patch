@@ -589,10 +589,10 @@ index fdbabc3e6..e2e7581d5 100644
  }
 diff --git a/arch/lkl/kernel/qrt_soc.c b/arch/lkl/kernel/qrt_soc.c
 new file mode 100644
-index 000000000..39bcb2f04
+index 000000000..1127c0551
 --- /dev/null
 +++ b/arch/lkl/kernel/qrt_soc.c
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,160 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * QRT: Linux's SoC drivers run inside QRT's kernel (Tessera) on ARM phones.
@@ -649,6 +649,22 @@ index 000000000..39bcb2f04
 +	unflatten_device_tree();
 +	pr_info("qrt: device tree: %s\n", of_flat_dt_get_machine_name());
 +}
++
++/*
++ * The tree's fixed clocks (the board's 19.2 MHz crystal, "xo-board"; the sleep clock)
++ * are set up by of_clk_init() from time_init() on a normal boot - LKL has no time_init,
++ * so they never existed and whatever named them waited for ever (the msm8953 WCD
++ * digital codec's ahbix clock: no sound card).  Not on QEMU's virt machine: its
++ * apb-pclk would hand the host's own PL011/PL031 to Linux's drivers.
++ */
++#include <linux/clk-provider.h>
++static int __init lkl_qrt_clk_init(void)
++{
++	if (lkl_qrt_fdt && !of_machine_is_compatible("linux,dummy-virt"))
++		of_clk_init(NULL);
++	return 0;
++}
++arch_initcall(lkl_qrt_clk_init);
 +
 +static int __init lkl_qrt_dma_pool(void)
 +{

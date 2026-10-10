@@ -189,6 +189,17 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.23.2: the clock the codec waited for
+
+0.23.1's report on the Mi A1: the audio DSP runs and all its APR services are up
+(`aprsvc:service:4:3` ... `4:b`); still waiting were only the WCD digital codec -
+`failed to get ahbix clk` - and the sound card, for that codec (`Primary MI2S: codec
+dai not found`).  The codec's ahbix clock is the board's 19.2 MHz crystal, a
+`fixed-clock` node (`xo-board`).  A normal boot registers fixed clocks in `of_clk_init()`
+from `time_init()`; LKL has no `time_init`, so they never existed.  LKL's QRT setup
+(`arch/lkl/kernel/qrt_soc.c`) now calls `of_clk_init()` at `arch_initcall` - not on
+QEMU's virt machine, whose `apb-pclk` would hand QRT's own PL011/PL031 to Linux.
+
 ## 0.23.1: why there is no sound card
 
 0.23.0 on the Mi A1: the audio DSP started, but no sound card appeared within 30 s.
