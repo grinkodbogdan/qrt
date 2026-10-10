@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.27.1: the 2D engine, tried every way
+
+0.27.0 on the Mi A1: QRT's own commands run ("a CP_MEM_WRITE came back") - but the 2D
+engine's test copy left the destination untouched (4095 of 4096 pixels wrong, the one
+right pixel being 0).  Nothing hung: the command processor took the packets.  How the
+a5xx 2D engine is started is undocumented, and 0.27.0 had one guess (render mode
+BLIT2DSCALE, BLIT_OP_SCALE, register 0x2184 = 9, a 5-dword CP_SET_RENDER_MODE).
+
+- **Every combination at boot**: render mode BLIT2D or BLIT2DSCALE, BLIT_OP_COPY or
+  _SCALE, a 1- or 5-dword render-mode packet, 0x2184 = 9 or 1 - sixteen test copies, and
+  four solid fills (which show whether the engine writes at all).  The log gets one
+  `2D tries` line per four, each with pixels right / pixels written; the first exact copy
+  is the one used for the screen.  A colour-cache invalidate now comes first, as in
+  Mesa's sysmem setup.
+
 ## 0.27.0: the GPU runs QRT's commands and puts the frames on the screen
 
 0.26.4 on the Mi A1: "Adreno 506 running".  Now QRT drives it, as it drives the tablets'

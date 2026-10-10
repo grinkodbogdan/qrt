@@ -322,33 +322,44 @@ enum { RM_BLIT2DSCALE = 7, RM_END2D = 8 };
 static u32 *cp;                          /* where the next dword of the stream goes */
 static void out(u32 v) { *cp++ = v; }
 static void reg1(u32 reg, u32 v) { out(pkt4(reg, 1)); out(v); }
-static void render_mode(u32 m) {         /* fd5_set_render_mode */
-    out(pkt7(CP_SET_RENDER_MODE, 5)); out(m); out(0); out(0); out(0); out(0);
+static void render_mode(u32 m, int len) {   /* fd5_set_render_mode: 5 dwords; the blob's 2D: 1? */
+    out(pkt7(CP_SET_RENDER_MODE, (u32)len)); out(m);
+    for (int i = 1; i < len; i++) out(0);
 }
+/* how the 2D engine is started: not documented, and 0.27.0's one guess wrote nothing
+ * (the CP took it, nothing hung).  The boot tries the combinations on a test copy and
+ * keeps the first that copies exactly. */
+struct bv { u8 mode, op, rmlen; u32 r2184; };
+static struct bv bvs[16];
+static int nbv;
+static const struct bv *use_bv;
 static void event_ts(u32 ev) {
     out(pkt7(CP_EVENT_WRITE, 4)); out(ev); out((u32)(scr.iova + 64)); out((u32)((scr.iova + 64) >> 32)); out(0);
 }
 /* a rectangle from one 32-bit surface to another, by the 2D engine: format R8G8B8A8,
  * linear, the same byte order on both sides - a plain copy */
-static void blit(u64 src, u32 spitch, u64 dst, u32 dpitch, int sx, int sy, int dx, int dy, int w, int h) {
+static void blit(const struct bv *v, u64 src, u32 spitch, u64 dst, u32 dpitch, int sx, int sy, int dx, int dy, int w, int h, u32 solid) {
     out(pkt7(CP_EVENT_WRITE, 1)); out(EV_LRZ_FLUSH);
     out(pkt7(CP_SKIP_IB2_ENABLE_GLOBAL, 1)); out(0);
     out(pkt7(CP_SKIP_IB2_ENABLE_LOCAL, 1)); out(0);
+    out(pkt7(CP_EVENT_WRITE, 1)); out(25);   /* PC_CCU_INVALIDATE_COLOR */
     reg1(0xe3b0, 3);                     /* PC_POWER_CNTL */
     reg1(0xe4f0, 3);                     /* VFD_POWER_CNTL */
     out(pkt7(CP_WAIT_FOR_IDLE, 0));
     reg1(0x0cc7, 0x10000000);            /* RB_CCU_CNTL: bypass */
     reg1(0xe141, 0x00000008);            /* RB_RENDER_CNTL */
-    reg1(0x2100, 0x86000000);            /* RB_2D_BLIT_CNTL: copy */
-    reg1(0x2180, 0x86000000);            /* GRAS_2D_BLIT_CNTL */
-    reg1(0x2184, 0x00000009);
+    u32 cntl = v->op ? 0x86000000u : 0;  /* 0x86000000 for a copy, 0 for a fill (a5xx.xml) */
+    reg1(0x2100, cntl);                  /* RB_2D_BLIT_CNTL */
+    reg1(0x2180, cntl);                  /* GRAS_2D_BLIT_CNTL */
+    reg1(0x2184, v->r2184);
+    if (!v->op) { out(pkt4(0x2101, 4)); out(solid); out(solid); out(solid); out(solid); }   /* RB_2D_SRC_SOLID_DW0-3 */
     reg1(0xe140, 1u << 17);              /* RB_CNTL: BYPASS */
     reg1(0x0cc6, 0x00000004);            /* RB_MODE_CNTL */
     reg1(0x0ec2, 0x0000000c);            /* SP_MODE_CNTL */
     reg1(0x0f02, 0x00000344);            /* TPL1_MODE_CNTL */
     reg1(0x0e06, 0x00000002);            /* HLSQ_MODE_CNTL */
     reg1(0xe000, 0x00000181);            /* GRAS_CL_CNTL */
-    render_mode(RM_BLIT2DSCALE);
+    render_mode(v->mode, v->rmlen);
     const u32 fmt = 0x30;                /* RB5_R8G8B8A8_UNORM, TILE5_LINEAR, swap WZYX */
     out(pkt4(0x2107, 9));                /* RB_2D_SRC_INFO, _LO, _HI, _SIZE, 5 more */
     out(fmt); out((u32)src); out((u32)(src >> 32)); out(spitch >> 6);
@@ -358,12 +369,12 @@ static void blit(u64 src, u32 spitch, u64 dst, u32 dpitch, int sx, int sy, int d
     out(0); out(0); out(0); out(0); out(0);
     out(pkt4(0x2181, 2)); out(fmt); out(fmt);   /* GRAS_2D_SRC_INFO, GRAS_2D_DST_INFO */
     out(pkt7(CP_BLIT, 5));
-    out(3);                              /* BLIT_OP_SCALE */
+    out(v->op);                          /* BLIT_OP_FILL 0, _COPY 1, _SCALE 3 */
     out((u32)sx | (u32)sy << 16);
     out((u32)(sx + w - 1) | (u32)(sy + h - 1) << 16);
     out((u32)dx | (u32)dy << 16);
     out((u32)(dx + w - 1) | (u32)(dy + h - 1) << 16);
-    render_mode(RM_END2D);
+    render_mode(RM_END2D, v->rmlen);
     out(pkt7(CP_WAIT_FOR_IDLE, 0));
     event_ts(EV_PC_CCU_FLUSH_COLOR_TS);
     event_ts(EV_CACHE_FLUSH_TS);
@@ -407,23 +418,41 @@ static int test_write(void) {
     LOG("QRT's commands run: a CP_MEM_WRITE came back in %llu us", k_now_us() - t0);
     return 1;
 }
-/* check 2: the 2D engine copies a 64 x 64 picture exactly */
+/* check 2: the 2D engine copies a 64 x 64 picture exactly - each way of starting it is
+ * tried (and a solid fill, which says whether it writes at all); every result is logged */
 static int test_copy(void) {
     struct bo a, b;
     if (!bo_new(&a, 64 << 10) || !bo_new(&b, 64 << 10)) return 0;
-    for (u32 i = 0; i < 64 * 64; i++) { a.cpu[i] = i * 2654435761u; b.cpu[i] = 0; }
-    cp = cmd.cpu;
-    blit(a.iova, 256, b.iova, 256, 0, 0, 0, 0, 64, 64);
-    u64 t0 = k_now_us();
-    long r = run(1000, &a, &b);
-    int bad = 0, first = -1;
-    for (u32 i = 0; i < 64 * 64; i++) if (b.cpu[i] != a.cpu[i]) { if (first < 0) first = (int)i; bad++; }
-    if (r < 0 || bad) {
-        LOG("the 2D engine's test copy: %ld, %d of 4096 pixels wrong (first %d: %x, not %x)", r, bad, first,
-            first >= 0 ? b.cpu[first] : 0, first >= 0 ? a.cpu[first] : 0);
-        return 0;
+    for (u32 i = 0; i < 64 * 64; i++) a.cpu[i] = i * 2654435761u + 0x01020304u;
+    static const u8 modes[] = { RM_BLIT2DSCALE, 5 /* BLIT2D */ }, ops[] = { 3, 1 }, lens[] = { 5, 1 };
+    static const u32 r84[] = { 9, 1 };
+    nbv = 0;
+    for (int m = 0; m < 2; m++) for (int o = 0; o < 2; o++) for (int l = 0; l < 2; l++) for (int r = 0; r < 2; r++)
+        bvs[nbv++] = (struct bv){ modes[m], ops[o], lens[l], r84[r] };
+    char line[160];
+    int ll = 0;
+    line[0] = 0;
+    for (int i = 0; i < nbv + 4; i++) {
+        struct bv fill = { i - nbv < 2 ? 5 : RM_BLIT2DSCALE, 0, (i - nbv) & 1 ? 1 : 5, 9 };
+        const struct bv *v = i < nbv ? &bvs[i] : &fill;
+        for (u32 k = 0; k < 64 * 64; k++) b.cpu[k] = 0;
+        cp = cmd.cpu;
+        blit(v, a.iova, 256, b.iova, 256, 0, 0, 0, 0, 64, 64, 0x5a5a5a5a);
+        long rr = run(3000, &a, &b);
+        int good = 0, written = 0;
+        for (u32 k = 0; k < 64 * 64; k++) {
+            u32 want = v->op ? a.cpu[k] : 0x5a5a5a5au;
+            good += b.cpu[k] == want;
+            written += b.cpu[k] != 0;
+        }
+        if (i < nbv && good == 4096 && !use_bv) use_bv = v;
+        ll += (int)fmt(line + ll, sizeof line - (usize)ll, " %s m%u op%u n%u r%u:%d/%d%s", i < nbv ? "" : "fill", v->mode, v->op,
+                       v->rmlen, v->r2184, good, written, rr < 0 ? "!" : "");
+        if ((i & 3) == 3) { LOG("2D tries (good/written):%s", line); ll = 0; line[0] = 0; }
     }
-    LOG("the 2D engine copies: 64 x 64 pixels exact, in %llu us", k_now_us() - t0);
+    if (ll) LOG("2D tries (good/written):%s", line);
+    if (!use_bv) { LOG("the 2D engine copied exactly in none of them"); return 0; }
+    LOG("the 2D engine copies: mode %u, op %u, %u-dword render mode, 2184=%u", use_bv->mode, use_bv->op, use_bv->rmlen, use_bv->r2184);
     return 1;
 }
 
@@ -468,7 +497,7 @@ int gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int 
     if (bands > 1) smp_run(clean_band, NULL, bands);
     else clean_band(NULL, 0, 1);
     cp = cmd.cpu;
-    blit(s, (u32)stride * 4, fb_iova, fb_pitch, x, y, x, y, w, h);
+    blit(use_bv, s, (u32)stride * 4, fb_iova, fb_pitch, x, y, x, y, w, h, 0);
     long r = run(500, NULL, NULL);
     if (r < 0) {                         /* the GPU hung or went away: the CPU draws from now on */
         g_on = 0;
