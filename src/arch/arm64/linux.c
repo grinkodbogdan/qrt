@@ -1120,11 +1120,15 @@ static void accel_poll(void) {
     }
     long v[3];
     for (int i = 0; i < 3; i++) v[i] = mmat[3 * i] * r[0] + mmat[3 * i + 1] * r[1] + mmat[3 * i + 2] * r[2];
-    long ax_ = v[0] < 0 ? -v[0] : v[0], ay = v[1] < 0 ? -v[1] : v[1], az = v[2] < 0 ? -v[2] : v[2];
+    /* the screen's axes (x to its right edge, y to its top) from the matrix's: on the Mi A1
+     * (0.25.0, turning it by hand) the matrix's second axis follows the left and right edges
+     * and its first the top and bottom - tilting left gave -v[1], right +v[1] */
+    long sx = -v[1], sy = -v[0];
+    long ax_ = sx < 0 ? -sx : sx, ay = sy < 0 ? -sy : sy, az = v[2] < 0 ? -v[2] : v[2];
     int o = -1;
     if (az > 2 * (ax_ > ay ? ax_ : ay)) o = -1;                       /* flat */
-    else if (ay * 2 > ax_ * 3) o = v[1] > 0 ? 0 : 2;
-    else if (ax_ * 2 > ay * 3) o = v[0] > 0 ? 1 : 3;
+    else if (ay * 2 > ax_ * 3) o = sy > 0 ? 0 : 2;                    /* top up: as it is; top down: upside down */
+    else if (ax_ * 2 > ay * 3) o = sx > 0 ? 1 : 3;                    /* right edge up (turned left): 90 */
     static int last = -1, same;
     if (o == last) same++; else { last = o; same = 0; }
     if (o >= 0 && same >= 1 && o != orient) {

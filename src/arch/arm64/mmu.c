@@ -169,10 +169,11 @@ int argon_unmap(u64 va, u64 size) {
 }
 
 /* ---- pages: a bump allocator over the free RAM span, with a free list ----------- */
-static u64 pool_next, pool_end;
+static u64 pool_next, pool_end, pool_start, freed_pages;
 static u64 *free_pages;                       /* singly linked through the pages themselves */
-void pmm_init(u64 base, u64 end) { pool_next = (base + 4095) & ~4095ull; pool_end = end & ~4095ull; }
-u64 pmm_free_bytes(void) { return pool_end > pool_next ? pool_end - pool_next : 0; }
+void pmm_init(u64 base, u64 end) { pool_start = pool_next = (base + 4095) & ~4095ull; pool_end = end & ~4095ull; }
+/* free: never handed out, or handed back (the free list) */
+u64 pmm_free_bytes(void) { return (pool_end > pool_next ? pool_end - pool_next : 0) + freed_pages * 4096; }
 u64 pmm_alloc_contig(usize pages) {
     u64 bytes = (u64)pages * 4096;
     u64 f = irq_save();
@@ -189,6 +190,7 @@ u64 pmm_alloc(int high) {
     if (free_pages) {
         u64 *p = free_pages;
         free_pages = (u64 *)(usize)*p;
+        freed_pages--;
         irq_restore(f);
         memset(p, 0, 4096);
         return (u64)(usize)p;
@@ -200,6 +202,7 @@ void pmm_free(u64 frame) {
     u64 f = irq_save();
     *(u64 *)(usize)frame = (u64)(usize)free_pages;
     free_pages = (u64 *)(usize)frame;
+    freed_pages++;
     irq_restore(f);
 }
 
@@ -209,6 +212,7 @@ typedef struct blk { usize size; struct blk *next; } blk_t;
 static struct { u64 start, end; } arenas[MAX_ARENAS];
 static int n_arenas;
 static blk_t *free_list;
+static u64 heap_total, heap_used;            /* arenas' bytes; bytes in live blocks */
 
 static void heap_insert(blk_t *b) {
     blk_t **pp = &free_list;
@@ -231,6 +235,7 @@ static void heap_grow(usize need) {
     arenas[n_arenas].start = base;
     arenas[n_arenas].end = base + bytes;
     n_arenas++;
+    heap_total += bytes;
     blk_t *b = (blk_t *)(usize)base;
     b->size = bytes;
     heap_insert(b);
@@ -250,6 +255,7 @@ void *heap_alloc(usize n) {
                 *pp = rest;
                 b->size = need;
             } else *pp = b->next;
+            heap_used += b->size;
             irq_restore(flags);
             void *p = (u8 *)b + sizeof(blk_t);
             memset(p, 0, b->size - sizeof(blk_t));
@@ -265,6 +271,7 @@ void *heap_alloc(usize n) {
 void heap_free(void *p) {
     if (!p) return;
     u64 flags = irq_save();
+    heap_used -= ((blk_t *)((u8 *)p - sizeof(blk_t)))->size;
     heap_insert((blk_t *)((u8 *)p - sizeof(blk_t)));
     irq_restore(flags);
 }
@@ -284,3 +291,11 @@ int mmu_attr_at(u64 pa) {
     }
     return (int)((d >> 2) & 7);
 }
+
+/* what memory is really used: pages handed out and not back, less the heap's free space */
+void mem_stats(u64 *heap_tot, u64 *heap_live, u64 *pages_out) {
+    *heap_tot = heap_total;
+    *heap_live = heap_used;
+    *pages_out = (pool_next - pool_start) - freed_pages * 4096;
+}
+u64 mem_used_bytes(void) { return (pool_next - pool_start) - freed_pages * 4096 - (heap_total - heap_used); }

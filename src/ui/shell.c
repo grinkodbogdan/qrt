@@ -536,6 +536,7 @@ static void rotate_job_fn(void *arg, int i, int n) {
 }
 
 static void present_panel(const canvas_t *src, rect_t d);
+__attribute__((weak)) int hal_fb_direct(void) { return 1; }
 
 /* The shell's picture goes to the external monitor (mirrored, or as the desk in desk
  * mode) and, unless the shell lives on the monitor, to the panel. */
@@ -566,7 +567,9 @@ static void present_panel(const canvas_t *src, rect_t d) {
         hal_present(p, fw, fw - (d.x + d.w), fh - (d.y + d.h), d.w, d.h);
         return;
     }
-    int direct = k.native && k.fb_base;
+    /* straight into the framebuffer only where it holds 32-bit pixels and needs no copy
+     * of its own (the PCs); the Mi A1's is 24-bit and fed through hal_present */
+    int direct = k.native && k.fb_base && hal_fb_direct();
     rot_job.src = src;
     rot_job.d = d;
     rot_job.fw = fw; rot_job.fh = fh;

@@ -204,7 +204,8 @@ void hal_probe(void) {}
 
 void *hal_dma_alloc(usize bytes) { return (void *)(usize)pmm_alloc_contig((bytes + 4095) / 4096); }
 const char *hal_mode(void) { return "native kernel (arm64)"; }
-int hal_form_phone(void) { return 1; }                  /* the ARM targets are phones (QEMU stands in for one) */
+int hal_form_phone(void) { return 1; }
+int hal_fb_direct(void) { return 0; }                   /* fb.c converts (24-bit panels) and tracks what changed */                  /* the ARM targets are phones (QEMU stands in for one) */
 
 /* ---- power ---- */
 static void psci(u64 fn) {

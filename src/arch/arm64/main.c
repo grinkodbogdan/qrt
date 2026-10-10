@@ -476,6 +476,8 @@ void arm_main(const void *dtb, u64 base) {
         }
         linux_start(dtb);
     }
+    int arm_smp_start(void);
+    arm_smp_start();                                                /* the other cores: drawing help */
     shell_main();
     panic("the shell returned");
 }

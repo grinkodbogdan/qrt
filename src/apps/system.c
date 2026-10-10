@@ -293,9 +293,16 @@ static int tick(u64 now) {
             o += fmt(ks.irqs + o, sizeof ks.irqs - o, "; %s vector 0x%x: %llu", l[i].owner, l[i].vector, l[i].count);
     }
 #elif defined(__aarch64__)
-    u64 pmm_free_bytes(void);
-    ks.mem_total = k.ram_bytes;                     /* ARM: all of RAM; free = pages not handed out yet */
-    ks.mem_free = MIN(pmm_free_bytes(), k.ram_bytes);
+    {
+        u64 sched_idle_total_us(void);
+        static u64 last_idle, last_us;
+        u64 idle = sched_idle_total_us(), t = k_now_us();
+        if (last_us && t > last_us) ks.busy_pct = 100 - (int)(MIN(idle - last_idle, t - last_us) * 100 / (t - last_us));
+        last_idle = idle; last_us = t;
+    }
+    u64 mem_used_bytes(void);
+    ks.mem_total = k.ram_bytes;                     /* ARM: what is really in use (heap free space not counted) */
+    ks.mem_free = k.ram_bytes - MIN(mem_used_bytes(), k.ram_bytes);
 #endif
     if (ks.n_hist == 60) { memmove(ks.cpu_hist, ks.cpu_hist + 1, 59); ks.n_hist--; }
     ks.cpu_hist[ks.n_hist++] = (u8)CLAMP(ks.busy_pct, 0, 100);

@@ -189,6 +189,31 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.25.1: turning right, all the cores, honest numbers
+
+0.25.0 on the Mi A1: turning the phone left turned the picture upside down, and both
+180 degrees and the other way gave a grey, smeared screen; System Monitor said 2.3 GB of
+memory used, one core and 0 % CPU.
+
+- **Turned pictures on a 24-bit panel:** for 90 and 270 degrees the shell wrote 32-bit
+  pixels straight into the framebuffer - the PCs' shortcut.  The Mi A1's framebuffer
+  holds 3-byte pixels: the writes landed smeared and nothing was flushed.  On ARM every
+  turn now goes through `fb.c`, which converts and tracks what changed (`hal_fb_direct`).
+- **Which way is up:** on the phone the accelerometer's second axis (after the tree's
+  mount matrix) follows the left and right edges, its first the top and bottom; the turn
+  is now worked out from those - left edge down is 90 degrees, upside down 180.
+- **Memory:** "used" was everything outside the free span QRT draws pages from - the
+  rest of the phone's RAM, never touched, counted as used.  Now it is what is really
+  handed out: pages given and not returned, less the heap's own free space (freed pages
+  counted too).  A line every 10 s in the log (`memory: N MB used ...`).  In QEMU, three
+  minutes of switching apps: 197 MB, flat - no leak.
+- **All the cores:** the other cores are started through PSCI `CPU_ON` (the tree lists
+  eight Cortex-A53s on the Mi A1); they take the boot core's tables and do the shell's
+  pixel work - the wallpaper, turning the picture - as the x86-64 kernel's first did.
+  Threads (and Linux) stay on the boot core: the ARM scheduler is single-core.  System
+  Monitor counts them all.  Tested in QEMU with four.
+- **CPU usage:** from the scheduler's idle time on ARM (it was never measured there).
+
 ## 0.25.0: a phone's shell; sensors, LED, vibration
 
 0.24.0: Bluetooth works on the Mi A1.  Asked next: the real browser, a shell made for a

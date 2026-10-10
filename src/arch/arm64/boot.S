@@ -81,6 +81,55 @@ at_el1:
 5:  wfe
     b       5b
 
+/* another core, started by PSCI CPU_ON (smp.c) with the MMU off and x0 = its context:
+ * [0] stack top, [8] TTBR0, [16] TCR, [24] MAIR, [32] SCTLR, [40] VBAR, [48] C entry,
+ * [56] core index.  It takes the boot core's tables and settings and calls the entry. */
+    .globl  secondary_entry
+secondary_entry:
+    msr     daifset, #0xf
+    mov     x19, x0
+    mrs     x1, CurrentEL
+    lsr     x1, x1, #2
+    cmp     x1, #2
+    b.ne    6f
+    mov     x1, #(1 << 31)
+    msr     hcr_el2, x1
+    mov     x1, #3
+    msr     cnthctl_el2, x1
+    msr     cntvoff_el2, xzr
+    mov     x1, #0x0800
+    movk    x1, #0x30d0, lsl #16
+    msr     sctlr_el1, x1
+    mov     x1, #0x3c5
+    msr     spsr_el2, x1
+    adr     x1, 6f
+    msr     elr_el2, x1
+    eret
+6:  mov     x1, #(3 << 20)
+    msr     cpacr_el1, x1
+    ldr     x1, [x19, #24]
+    msr     mair_el1, x1
+    ldr     x1, [x19, #16]
+    msr     tcr_el1, x1
+    ldr     x1, [x19, #8]
+    msr     ttbr0_el1, x1
+    isb
+    tlbi    vmalle1
+    dsb     nsh
+    isb
+    ldr     x1, [x19, #40]
+    msr     vbar_el1, x1
+    ldr     x1, [x19, #32]
+    msr     sctlr_el1, x1
+    isb
+    ldr     x1, [x19, #0]
+    mov     sp, x1
+    ldr     x2, [x19, #48]
+    ldr     x0, [x19, #56]
+    blr     x2
+7:  wfe
+    b       7b
+
 /* exception vectors: everything goes to arm_exception(kind, frame) */
     .macro  vent kind
     .balign 0x80
@@ -110,6 +159,7 @@ at_el1:
     .endm
 
     .balign 0x800
+    .globl  vectors
 vectors:
     vent 0  /* EL1t sync */
     vent 1

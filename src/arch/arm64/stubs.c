@@ -33,11 +33,6 @@ void ntouch_revert(void) {}
 int  ntouch_save(void) { return 0; }
 const char *dwi2c_strerror(int err) { (void)err; return "no I2C controller"; }
 
-/* one core for now: jobs run in the caller */
-int  smp_enabled(void) { return 0; }
-int  smp_workers(void) { return 0; }
-void smp_set_enabled(int on) { (void)on; }
-void smp_run(smp_job_t job, void *arg, int count) { for (int i = 0; i < count; i++) job(arg, i, count); }
 
 const char *lsound_status(void);
 const char *audio_status(void) { return lsound_status(); }

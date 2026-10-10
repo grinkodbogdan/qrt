@@ -35,7 +35,7 @@ static thr_t main_thr = { .state = T_READY, .name = "shell", .next = &main_thr }
 static thr_t *cur = &main_thr;
 static int nthreads = 1;
 static u64 switches;
-static u64 last_switch, idle_us;     /* k_now_us() of the last switch; time in wfi */
+static u64 last_switch, idle_us, idle_total;     /* k_now_us() of the last switch; time in wfi */
 static int main_boost;               /* the shell was woken: it runs next (the UI stays responsive) */
 static void account(void) { u64 now = k_now_us(); cur->run_us += now - last_switch; last_switch = now; }
 
@@ -128,6 +128,7 @@ static void schedule(void) {
         else while (k_now_us() < soonest) __asm__ volatile("yield");    /* no tick (yet): watch the clock */
         u64 now = k_now_us();
         idle_us += now - last_switch;
+        idle_total += now - last_switch;
         last_switch = now;
     }
 }
@@ -238,6 +239,12 @@ void thr_report(void) {
     u64 gic_ticks(void);
     static u64 last_ticks, last_sw;
     u64 tk = gic_ticks();
+    {
+        void mem_stats(u64 *, u64 *, u64 *);
+        u64 ht, hl, po;
+        mem_stats(&ht, &hl, &po);
+        klog("memory: %llu MB used: pages %llu MB (heap %llu MB reserved, %llu MB live)", (po - (ht - hl)) >> 20, po >> 20, ht >> 20, hl >> 20);
+    }
     klog("cpu: %llu s: shell %llu%%, idle %llu%%, %d others %llu%% (top %s %llu%%, %s %llu%%, %s %llu%%); %llu ticks, %llu switches",
          span / 1000000, shell, idle, nthreads - 1, rest, nm[0], pct[0], nm[1], pct[1], nm[2], pct[2], tk - last_ticks, sw - last_sw);
     last_ticks = tk; last_sw = sw;
@@ -303,3 +310,6 @@ int  tls_key_new(void) {
 void tls_key_del(int k) { if (k >= 0 && k < THR_TLS) tls_used[k] = 0; }
 void tls_put(int k, void *v) { if (k >= 0 && k < THR_TLS) cur->tls[k] = v; }
 void *tls_fetch(int k) { return k >= 0 && k < THR_TLS ? cur->tls[k] : NULL; }
+
+/* System Monitor: time the boot core spent idle, since boot */
+u64 sched_idle_total_us(void) { return idle_total; }
