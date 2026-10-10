@@ -189,6 +189,25 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.27.2: frames copied without waiting
+
+0.27.1 on the Mi A1: the 2D engine copies - every BLIT_OP_COPY combination exact, no
+BLIT_OP_SCALE wrote anything, the fills too - and the GPU put the frames on the screen.
+But slower: 39 ms a frame (14 ms on the CPU), as each copy waited for its fence, and a
+round trip through Linux takes ~28 ms.
+
+- **No wait**: a frame's copy is submitted and present returns; the command buffer is a
+  ring of 8 slots, a slot's previous copy must be done before it is written again (only
+  then does present wait).  Every 10 s the log says what a frame cost: the cache
+  write-back, the submit, any wait for a slot.
+- **A late GPU no longer turns it off**: 0.27.1 gave up for good when a fence was 500 ms
+  late (Wi-Fi's core being started in the secure world stalled the phone for 0.6 s).  Now
+  the CPU draws while the GPU is behind, and once its last copy is done the GPU copies
+  the whole frame once (the shell's frame always holds the full picture).  Only a failed
+  submit hands the screen to the CPU for good.
+- The boot's 2D check tries BLIT_OP_COPY first and stops at the first exact copy (the
+  full table only when it fails).
+
 ## 0.27.1: the 2D engine, tried every way
 
 0.27.0 on the Mi A1: QRT's own commands run ("a CP_MEM_WRITE came back") - but the 2D

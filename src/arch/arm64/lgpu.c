@@ -281,6 +281,12 @@ static volatile int g_on;                /* the GPU puts frames on the screen */
 static u64 fb_iova;
 static u32 fb_pitch;
 static u32 g_frames, g_us;               /* since the last gpu_stats() */
+#define NSLOT 8
+#define SLOT_BYTES 8192                  /* NSLOT of them fill cmd (64 KB) */
+static u32 slot_fence[NSLOT], nsub;
+static u64 st_t0, st_clean, st_submit, st_block;
+static u32 st_n, st_behind, last_fence;
+static int behind;
 
 static long info(u32 handle, u32 what, u64 *value, u32 len) {
     struct { u32 handle, info; u64 value; u32 len, pad; } a = { handle, what, *value, len, 0 };
@@ -382,14 +388,13 @@ static void blit(const struct bv *v, u64 src, u32 spitch, u64 dst, u32 dpitch, i
 /* run what is in cmd (from its start to cp) and wait for it: 0, or why not.  Every
  * buffer the stream touches is listed (the driver maps a buffer's pages for the GPU
  * when a submit lists it): cmd, the scratch page, and up to two more */
-static long run(u32 timeout_ms, const struct bo *x1, const struct bo *x2) {
-    u32 bytes = (u32)((u8 *)cp - (u8 *)cmd.cpu);
+static long submit(u32 off, u32 bytes, const struct bo *x1, const struct bo *x2, u32 *fence) {
     __asm__ volatile("dsb sy" ::: "memory");
     struct { u32 flags, handle; u64 presumed; } bo[4] = { { 1, cmd.handle, 0 }, { 3, scr.handle, 0 } };   /* READ, READ | WRITE */
     u32 nb = 2;
     if (x1) { bo[nb].flags = 3; bo[nb].handle = x1->handle; nb++; }
     if (x2) { bo[nb].flags = 3; bo[nb].handle = x2->handle; nb++; }
-    struct { u32 type, idx, off, size, pad, nr_relocs; u64 relocs; } c = { 1, 0, 0, bytes, 0, 0, 0 };   /* MSM_SUBMIT_CMD_BUF */
+    struct { u32 type, idx, off, size, pad, nr_relocs; u64 relocs; } c = { 1, 0, off, bytes, 0, 0, 0 };   /* MSM_SUBMIT_CMD_BUF */
     struct { u32 flags, fence, nr_bos, nr_cmds; u64 bos, cmds; int fence_fd; u32 queueid; u64 in_s, out_s; u32 nin, nout, stride, pad; } sb;
     memset(&sb, 0, sizeof sb);
     sb.flags = 0x10 | 0x80000000u;       /* MSM_PIPE_3D0 | MSM_SUBMIT_NO_IMPLICIT */
@@ -397,13 +402,27 @@ static long run(u32 timeout_ms, const struct bo *x1, const struct bo *x2) {
     sb.bos = (u64)(usize)bo; sb.cmds = (u64)(usize)&c;
     sb.fence_fd = -1;
     long r = S(NR_IOCTL, gfd, MSM_GEM_SUBMIT, &sb, 0, 0);
-    if (r < 0) return r;
+    *fence = sb.fence;
+    return r;
+}
+/* wait for a fence (timeout 0: only look - -ETIMEDOUT if not yet) */
+static long wait_fence(u32 fence, u32 timeout_ms) {
     struct { long long s, ns; } now = { 0, 0 };
-    S(113, 1, &now, 0, 0, 0);            /* clock_gettime(CLOCK_MONOTONIC): the wait's end is absolute */
-    now.ns += (long long)timeout_ms * 1000000;
-    now.s += now.ns / 1000000000; now.ns %= 1000000000;
-    struct { u32 fence, flags; long long s, ns; u32 queueid, pad; } w = { sb.fence, 0, now.s, now.ns, 0, 0 };
+    if (timeout_ms) {
+        S(113, 1, &now, 0, 0, 0);        /* clock_gettime(CLOCK_MONOTONIC): the wait's end is absolute */
+        now.ns += (long long)timeout_ms * 1000000;
+        now.s += now.ns / 1000000000; now.ns %= 1000000000;
+    }
+    struct { u32 fence, flags; long long s, ns; u32 queueid, pad; } w = { fence, 0, now.s, now.ns, 0, 0 };
     return S(NR_IOCTL, gfd, MSM_WAIT_FENCE, &w, 0, 0);
+}
+/* run what is in cmd (from its start to cp) and wait for it: 0, or why not.  Every
+ * buffer the stream touches is listed (the driver maps a buffer's pages for the GPU
+ * when a submit lists it): cmd, the scratch page, and up to two more */
+static long run(u32 timeout_ms, const struct bo *x1, const struct bo *x2) {
+    u32 f;
+    long r = submit(0, (u32)((u8 *)cp - (u8 *)cmd.cpu), x1, x2, &f);
+    return r < 0 ? r : wait_fence(f, timeout_ms);
 }
 
 /* check 1: the command processor runs QRT's packets - a value written to memory */
@@ -424,7 +443,8 @@ static int test_copy(void) {
     struct bo a, b;
     if (!bo_new(&a, 64 << 10) || !bo_new(&b, 64 << 10)) return 0;
     for (u32 i = 0; i < 64 * 64; i++) a.cpu[i] = i * 2654435761u + 0x01020304u;
-    static const u8 modes[] = { RM_BLIT2DSCALE, 5 /* BLIT2D */ }, ops[] = { 3, 1 }, lens[] = { 5, 1 };
+    /* BLIT_OP_COPY first: on the Mi A1 every COPY worked, no SCALE wrote (0.27.1) */
+    static const u8 modes[] = { RM_BLIT2DSCALE, 5 /* BLIT2D */ }, ops[] = { 1, 3 }, lens[] = { 5, 1 };
     static const u32 r84[] = { 9, 1 };
     nbv = 0;
     for (int m = 0; m < 2; m++) for (int o = 0; o < 2; o++) for (int l = 0; l < 2; l++) for (int r = 0; r < 2; r++)
@@ -446,11 +466,12 @@ static int test_copy(void) {
             written += b.cpu[k] != 0;
         }
         if (i < nbv && good == 4096 && !use_bv) use_bv = v;
+        if (use_bv) break;
         ll += (int)fmt(line + ll, sizeof line - (usize)ll, " %s m%u op%u n%u r%u:%d/%d%s", i < nbv ? "" : "fill", v->mode, v->op,
                        v->rmlen, v->r2184, good, written, rr < 0 ? "!" : "");
         if ((i & 3) == 3) { LOG("2D tries (good/written):%s", line); ll = 0; line[0] = 0; }
     }
-    if (ll) LOG("2D tries (good/written):%s", line);
+    if (ll && (!use_bv || use_bv != &bvs[0])) LOG("2D tries (good/written):%s", line);
     if (!use_bv) { LOG("the 2D engine copied exactly in none of them"); return 0; }
     LOG("the 2D engine copies: mode %u, op %u, %u-dword render mode, 2184=%u", use_bv->mode, use_bv->op, use_bv->rmlen, use_bv->r2184);
     return 1;
@@ -489,6 +510,14 @@ int gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int 
     if (x + w > sw) w = sw - x;
     if (y + h > sh) h = sh - y;
     if (w <= 0 || h <= 0) return 1;
+    /* behind (a fence came late - Wi-Fi's start in the secure world stalled the phone for
+     * 0.6 s and 0.27.1 turned the GPU off for good): the CPU draws until the GPU's last
+     * copy is done; then the whole frame once, over whatever the late copies wrote */
+    if (behind) {
+        if (wait_fence(last_fence, 0) < 0) return 0;
+        behind = 0;
+        x = 0; y = 0; w = sw; h = sh;
+    }
     u64 t0 = k_now_us();
     u64 s = frame_iova(src, (u64)stride * 4 * (u64)sh);
     if (!s) return 0;
@@ -496,16 +525,39 @@ int gpu_present(const u32 *src, int sw, int sh, int stride, int rot, int x, int 
     int bands = (u64)w * (u64)h >= 40000 ? MIN(16, MIN(h, 2 * (smp_workers() + 1))) : 1;
     if (bands > 1) smp_run(clean_band, NULL, bands);
     else clean_band(NULL, 0, 1);
-    cp = cmd.cpu;
-    blit(use_bv, s, (u32)stride * 4, fb_iova, fb_pitch, x, y, x, y, w, h, 0);
-    long r = run(500, NULL, NULL);
-    if (r < 0) {                         /* the GPU hung or went away: the CPU draws from now on */
+    u64 t1 = k_now_us();
+    /* no waiting for the copy (a round trip through Linux took ~28 ms): the stream goes
+     * in one of NSLOT slots of the command buffer, whose last use must be done first */
+    u32 slot = nsub % NSLOT;
+    long r = 0;
+    if (slot_fence[slot] && (r = wait_fence(slot_fence[slot], 0)) < 0) {
+        u64 tw = k_now_us();
+        r = wait_fence(slot_fence[slot], 100);
+        st_block += k_now_us() - tw;
+        if (r < 0) { behind = 1; st_behind++; return 0; }       /* this frame: the CPU's */
+    }
+    u32 f = 0;
+    if (r >= 0) {
+        cp = cmd.cpu + slot * (SLOT_BYTES / 4);
+        blit(use_bv, s, (u32)stride * 4, fb_iova, fb_pitch, x, y, x, y, w, h, 0);
+        r = submit(slot * SLOT_BYTES, (u32)((u8 *)cp - (u8 *)(cmd.cpu + slot * (SLOT_BYTES / 4))), NULL, NULL, &f);
+    }
+    if (r < 0) {                         /* the submit failed: the CPU draws from now on */
         g_on = 0;
         fmt(state, sizeof state, "off: a frame copy failed (%ld) - the CPU draws", r);
         LOG("%s", state);
         return 0;
     }
-    u64 us = k_now_us() - t0;
+    slot_fence[slot] = f;
+    last_fence = f;
+    nsub++;
+    u64 t2 = k_now_us(), us = t2 - t0;
+    st_clean += t1 - t0; st_submit += t2 - t1; st_n++;
+    if (t2 - st_t0 >= 10000000) {
+        if (st_n) LOG("10 s: %u frames copied; each: cache write-back %llu us, submit %llu us, waited for a slot %llu us%s", st_n,
+                      st_clean / st_n, (st_submit - st_block) / st_n, st_block / st_n, st_behind ? "; the GPU fell behind (the CPU drew meanwhile)" : "");
+        st_t0 = t2; st_n = 0; st_clean = st_submit = st_block = 0; st_behind = 0;
+    }
     g_frames++; g_us += (u32)us;
     fb_gpu_presented(x, y, w, h, us);
     return 1;
