@@ -152,7 +152,7 @@ static void report(void) {
     for (char *l = kb; *l; ) {
         char *e = strchr(l, '\n');
         if (e) *e = 0;
-        static const char *const w[] = { "msm", "adreno", "a5xx", "iommu", "zap", "gpu", "a530", "1c00000", "1c48000", NULL };
+        static const char *const w[] = { "msm", "adreno", "a5xx", "iommu", "zap", "gpu", "a530", "1c00000", "1c48000", "drm", "VRAM", "gdsc", "opp", NULL };
         int hit = 0;
         if (!strstr(l, "initcall") && !strstr(l, "calling ")) for (int i = 0; w[i] && !hit; i++) hit = strstr(l, w[i]) != NULL;
         if (hit) lines[nl++ % 30] = l;
@@ -166,7 +166,7 @@ static void report(void) {
         LOG("linux said: %s", m);
     }
     if (!nl) LOG("Linux said nothing about the GPU or its IOMMU");
-    const char *const devs[] = { iommu_dev, "1c00000.gpu", NULL };
+    const char *const devs[] = { iommu_dev, "1c00000.gpu", "msm", NULL };   /* msm: the headless DRM device */
     for (int i = 0; devs[i]; i++) {
         char p[96];
         fmt(p, sizeof p, "/sys/bus/platform/devices/%s", devs[i]);

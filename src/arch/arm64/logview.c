@@ -66,7 +66,7 @@ static void draw(void) {
     gfx_fill(&cv, (rect_t){ 0, 0, (int)k.fb_w, (int)k.fb_h }, RGB(12, 12, 16));
     char title[128];
     int left = until > now ? (int)((until - now + 999) / 1000) : 0;
-    fmt(title, sizeof title, "%s - %s", previous ? "The LAST boot's log, it reset here" : "QRT kernel log",
+    fmt(title, sizeof title, "%s - %s", previous ? "The LAST boot's log (it ended without a shutdown)" : "QRT kernel log",
         until ? "closes by itself" : back ? "vol down: older, vol up x3: close" : "vol down: older, vol up x3: close");
     if (until) { usize l = strlen(title); fmt(title + l, sizeof title - l, " in %d s", left); }
     gfx_text(&cv, f, 8, 4, title, previous ? RGB(255, 200, 120) : RGB(120, 200, 255));

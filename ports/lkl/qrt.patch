@@ -808,10 +808,28 @@ index 45c5255bc..943fc1718 100644
  		.key = cpu_to_le32(QCOM_RPM_SMD_KEY_ENABLE),
  		.nbytes = cpu_to_le32(sizeof(u32)),
 diff --git a/drivers/gpu/drm/msm/adreno/adreno_device.c b/drivers/gpu/drm/msm/adreno/adreno_device.c
-index cfc74a9e2..31332ea34 100644
+index cfc74a9e2..9b2054499 100644
 --- a/drivers/gpu/drm/msm/adreno/adreno_device.c
 +++ b/drivers/gpu/drm/msm/adreno/adreno_device.c
-@@ -264,7 +264,12 @@ static int adreno_probe(struct platform_device *pdev)
+@@ -207,13 +207,15 @@ static int adreno_bind(struct device *dev, struct device *master, void *data)
+ 
+ 	gpu = info->init(drm);
+ 	if (IS_ERR(gpu)) {
+-		dev_warn(drm->dev, "failed to load adreno gpu\n");
++		dev_warn(drm->dev, "failed to load adreno gpu: %ld\n", PTR_ERR(gpu));
+ 		return PTR_ERR(gpu);
+ 	}
+ 
+ 	ret = dev_pm_opp_of_find_icc_paths(dev, NULL);
+-	if (ret)
++	if (ret) {
++		dev_warn(dev, "adreno: no interconnect paths: %d\n", ret);
+ 		return ret;
++	}
+ 
+ 	return 0;
+ }
+@@ -264,7 +266,12 @@ static int adreno_probe(struct platform_device *pdev)
  	if (ret)
  		return ret;
  
@@ -825,6 +843,37 @@ index cfc74a9e2..31332ea34 100644
  		adreno_device_register_headless();
  
  	return 0;
+diff --git a/drivers/gpu/drm/msm/msm_drv.c b/drivers/gpu/drm/msm/msm_drv.c
+index 8c13b0870..4e535adb3 100644
+--- a/drivers/gpu/drm/msm/msm_drv.c
++++ b/drivers/gpu/drm/msm/msm_drv.c
+@@ -117,6 +117,14 @@ bool msm_use_mmu(struct drm_device *dev)
+ 	 * On other platforms IOMMU can be declared specified either for the
+ 	 * MDP/DPU device or for its parent, MDSS device.
+ 	 */
++	/*
++	 * QRT: the headless GPU's own IOMMU maps its buffers - the dummy "msm"
++	 * device has none, and the 16M VRAM carveout taken otherwise cannot be
++	 * allocated (no CMA).
++	 */
++	if (IS_ENABLED(CONFIG_LKL_QRT_SOC))
++		return true;
++
+ 	return priv->is_a2xx ||
+ 		device_iommu_mapped(dev->dev) ||
+ 		device_iommu_mapped(dev->dev->parent);
+@@ -263,8 +271,10 @@ static int msm_drm_init(struct device *dev, const struct drm_driver *drv)
+ 
+ 	/* Bind all our sub-components: */
+ 	ret = component_bind_all(dev, ddev);
+-	if (ret)
++	if (ret) {
++		DRM_DEV_ERROR(dev, "binding the GPU failed: %d\n", ret);
+ 		goto err_deinit_vram;
++	}
+ 
+ 	ret = msm_gem_shrinker_init(ddev);
+ 	if (ret)
 diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
 index d3a9a9faf..778f5e1ed 100644
 --- a/drivers/gpu/drm/panel/Kconfig

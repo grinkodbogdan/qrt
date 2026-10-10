@@ -189,6 +189,22 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.26.3: the GPU's DRM device; the last boot's log named plainly
+
+0.26.2 on the Mi A1: the GPU's IOMMU came up and Linux's adreno driver took the GPU,
+but no `/dev/dri/card0` appeared (-2).
+
+- **No VRAM carveout** (LKL patch, `msm_drv.c`): with the display kept by QRT the GPU is
+  a headless DRM device, a dummy "msm" device with no IOMMU of its own.  The msm driver
+  then took the GPU for one without an MMU and tried to allocate a 16 MB contiguous
+  "VRAM" block - more than Linux's allocator gives in one piece without CMA - so the
+  device was never registered.  Under QRT the GPU's own IOMMU (msm-iommu-v2, up since
+  0.26.2) maps its buffers: no carveout.  A failed bind now prints its error code, and
+  the GPU report also lists Linux's drm/VRAM/GDSC/OPP lines and the "msm" device.
+- **The last boot's log**: shown after any boot that ended without a shutdown (a held
+  power key, a new `fastboot boot`) - its title said "it reset here" even when nothing
+  crashed.  It now says "it ended without a shutdown".
+
 ## 0.26.2: only fast cores draw; the IOMMU by its real name
 
 0.26.1 on the Mi A1: frames took 36-45 ms to present (20 ms before the other cores
