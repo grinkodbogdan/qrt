@@ -44,6 +44,7 @@ void snd_output_add(snd_output_t *o);               /* the newest output plays *
 void snd_output_remove(snd_output_t *o);
 void snd_mix(i16 *out, int frames, int rate, int channels);   /* the mix of every stream, volume applied */
 const char *snd_output_name(void);                  /* the one playing; "" if none */
+snd_output_t *snd_current_output(void);             /* the one playing; NULL if none */
 int  snd_outputs(const char **names, int max);      /* every output there is */
 void snd_choose_output(const char *name);           /* play on this one while it is there; NULL or "" = automatic */
 const char *snd_chosen_output(void);

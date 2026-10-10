@@ -87,15 +87,6 @@ int  wifi_set_pairwise_key(const u8 key[16]) { (void)key; return -1; }
 void wifi_set_rx(iwm_rx_fn fn) { (void)fn; }
 int  wifi_tx(const u8 *frame, usize len, int mgmt) { (void)frame; (void)len; (void)mgmt; return -1; }
 
-int  bt_state(void) { return 0; }
-const char *bt_status(void) { return "no Bluetooth driver on ARM yet"; }
-void bt_scan(void) {}
-int  bt_devices(bt_device_t *out, int max) { (void)out; (void)max; return 0; }
-const char *bt_kind(u32 cod, int le) { (void)cod; (void)le; return "device"; }
-void bt_audio_connect(const u8 addr[6]) { (void)addr; }
-int  bt_audio_connected(const u8 addr[6]) { (void)addr; return 0; }
-void bt_audio_disconnect(void) {}
-const char *bt_audio_status(void) { return ""; }
 
 int  gpu_active(void) { return 0; }
 void gpu_autostart(void) {}

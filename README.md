@@ -189,6 +189,28 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.24.0: Bluetooth on the Mi A1
+
+0.23.4: sound works on the Mi A1 - the speaker plays.  Next: Bluetooth.
+
+The WCN3680's Bluetooth sits behind the same Pronto core as Wi-Fi; Linux's
+`btqcomsmd` makes it `hci0` over the core's SMD channels.  QRT keeps its own Bluetooth
+host stack - the tablets' (`src/drivers/bt`: HCI, Secure Simple Pairing, L2CAP, A2DP,
+SBC) - and `lbt.c` is its new transport, as `btusb.c` is on USB:
+
+- `hci0` is opened through Linux's **HCI user channel**: Linux's Bluetooth core steps
+  aside and every packet goes to QRT, framed as on a UART (01 command, 02 ACL, 04 event);
+- the Pronto core is started if Wi-Fi has not started it within a minute;
+- the controller has no address of its own (the tree gives none): it gets one made from
+  the eMMC's serial number, through Qualcomm's NVM command (`fc0b`, tag 2 - what Linux's
+  `qca_set_bdaddr_rome` sends);
+- **Bluetooth headphones and speakers** (A2DP): when one is connected it becomes the
+  output, and the ARM sound loop pumps it (the speaker's stream stops meanwhile);
+- pairings (link keys) are kept across boots with the other settings (logdump).
+
+The stack is the one the tablets use; only its transport is new, and it is untested on
+the phone - in QEMU there is no Bluetooth controller.
+
 ## 0.23.4: the analog codec's half of the PMIC
 
 0.23.3's report on the Mi A1: the MAX98927 amplifier (`1-003a`), the WCD digital codec

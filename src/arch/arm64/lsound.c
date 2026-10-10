@@ -123,6 +123,16 @@ static int pcm_setup(long fd, int period, int periods, int *got_period) {
 }
 
 static snd_output_t out = { .name = "Speaker", .rate = 48000, .channels = 2 };
+/* another output plays (Bluetooth headphones): it pulls the mix itself, every few ms;
+ * returns 1 when it did */
+static int pump_other(snd_output_t *mine) {
+    snd_output_t *o = snd_current_output();
+    if (!o || o == mine || !o->pump) return 0;
+    o->pump(o);
+    thr_sleep_us(4000);
+    return 1;
+}
+
 
 static void sound_loop(void *a) {
     (void)a;
@@ -212,6 +222,10 @@ card:;
     int playing = 0;
     u64 quiet_since = k_now_ms();
     for (;;) {
+        if (pump_other(&out)) {                                     /* not the speaker's turn */
+            if (playing) { S(NR_IOCTL, fd, PCM_DROP, 0, 0, 0); playing = 0; }
+            continue;
+        }
         snd_mix(buf, period, 48000, 2);
         int loud = 0;
         for (int k = 0; k < 2 * period && !loud; k++) if (buf[k] > 8 || buf[k] < -8) loud = 1;
@@ -240,12 +254,12 @@ card:;
         if (playing && now - quiet_since > 3000) { S(NR_IOCTL, fd, PCM_DROP, 0, 0, 0); playing = 0; static int qs; if (qs++ < 3) LOG("quiet: stream stopped"); }   /* silence: rest */
     }
 silent:
-    for (;;) { snd_tick(k_now_us()); thr_sleep_us(10000); }       /* players keep time */
+    for (;;) if (!pump_other(NULL)) { snd_tick(k_now_us()); thr_sleep_us(10000); }   /* players keep time */
 }
 
 static void sound_loop_none(void *a) {
     (void)a;
-    for (;;) { snd_tick(k_now_us()); thr_sleep_us(10000); }       /* no output: players keep time */
+    for (;;) if (!pump_other(NULL)) { snd_tick(k_now_us()); thr_sleep_us(10000); }   /* no output: players keep time */
 }
 void lsound_start(void) {
     int ch = fdt_node("/chosen"), al;

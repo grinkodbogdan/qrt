@@ -207,6 +207,7 @@ int snd_outputs(const char **names, int max) {
 void snd_choose_output(const char *name) { LOCK(); strlcpy(chosen, name ? name : "", sizeof chosen); UNLOCK(); klog("sound: output %s", name && name[0] ? name : "automatic"); }
 const char *snd_chosen_output(void) { return chosen; }
 const char *snd_output_name(void) { snd_output_t *o = current(); return o ? o->name : ""; }
+snd_output_t *snd_current_output(void) { return current(); }   /* ARM: lsound.c's thread pumps it */
 int snd_volume(void) { return volume; }
 void snd_set_volume(int v) { volume = CLAMP(v, 0, 100); }
 

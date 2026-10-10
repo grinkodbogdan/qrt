@@ -682,6 +682,8 @@ static void start_work(void *a) {
     up = ok;
     start_state = ok ? 2 : -1;
 }
+/* lbt.c: Bluetooth sits behind the same core */
+int lwifi_core_start(void) { return start_pronto(); }
 static int lw_start(void) {
     if (up) return 0;
     if (start_state == 1) return 1;

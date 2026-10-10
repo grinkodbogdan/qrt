@@ -103,7 +103,8 @@ ARM_SHARED := src/kernel/rt.c src/kernel/vfs.c src/kernel/sound.c src/kernel/tim
               src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c src/apps/settings.c src/apps/life.c \
               src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/apps/browser.c src/apps/bluetooth.c src/apps/html.c \
               src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c \
-              src/net/wlan.c src/net/netstack.c src/drivers/hidparse.c src/drivers/hidmouse.c
+              src/net/wlan.c src/net/netstack.c src/drivers/hidparse.c src/drivers/hidmouse.c \
+              src/drivers/bt/hci.c src/drivers/bt/l2cap.c src/drivers/bt/a2dp.c src/drivers/bt/sbc.c
 ARM_SRC    := $(wildcard src/arch/arm64/*.c)
 ARM_OBJ    := $(ARM_SHARED:src/%.c=build/arm64/%.o) $(ARM_SRC:src/%.c=build/arm64/%.o) build/arm64/arch/arm64/boot.o build/arm64/arch/arm64/switch.o
 ARM_CFLAGS := -target aarch64-none-elf -fpie -mno-outline-atomics -mstrict-align
@@ -122,6 +123,7 @@ build/arm64/arch/arm64/linux.o: CFLAGS += -DQRT_LKL -Ibuild/arm64/lkl/include
 build/arm64/arch/arm64/hal.o: CFLAGS += -DQRT_LKL
 build/arm64/arch/arm64/lwifi.o: CFLAGS += -DQRT_LKL
 build/arm64/arch/arm64/lsound.o: CFLAGS += -DQRT_LKL
+build/arm64/arch/arm64/lbt.o: CFLAGS += -DQRT_LKL
 build/arm64/arch/arm64/linux.o build/arm64/arch/arm64/hal.o: $(ARM_LKL)
 ARM_LIBS := $(ARM_LKL) $(shell aarch64-linux-gnu-gcc -print-libgcc-file-name 2>/dev/null)
 endif
