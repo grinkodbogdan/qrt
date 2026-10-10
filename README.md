@@ -189,6 +189,16 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.22.7: the battery's last link
+
+0.22.6's log on the Mi A1: `the gauge device exists`, `the gauge driver said nothing -
+its probe never ran`, and the gauge on Linux's waiting list.  Linux's device links
+(`fw_devlink`) hold a device back until every device its node names has a driver; the
+gauge's node names the charger in `power-supplies`, and the charger is kept from Linux
+(0.21.14) - so the gauge waited for ever.  QRT now points that link nowhere before Linux
+starts (`argon: fuel gauge: works without the charger`); the driver already runs without
+a charger, the status coming from the battery's current.
+
 ## 0.22.6: web pages open; the battery says where it stops
 
 0.22.5 on the Mi A1: **web pages open** - with 802.11n off, frames addressed to the

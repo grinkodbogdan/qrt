@@ -436,6 +436,17 @@ void arm_main(const void *dtb, u64 base) {
                 hide_from_linux(n);
                 hidden++;
             }
+        /* the fuel gauge names the charger as its power supply, and Linux holds a device
+         * back until what it names has a driver - the charger, kept, never gets one: the
+         * battery waited forever (0.22.6).  Its link goes nowhere instead; the gauge
+         * driver works without a charger (QRT patch) */
+        static const char *const gauges[] = { "qcom,pmi8994-fg", "qcom,pmi8996-fg", "qcom,pmi8998-fg", NULL };
+        for (int i = 0; gauges[i]; i++)
+            for (int n = fdt_find_compatible(-1, gauges[i]); n >= 0; n = fdt_find_compatible(n, gauges[i])) {
+                int len;
+                u8 *ps = (u8 *)fdt_prop(n, "power-supplies", &len);
+                if (ps && len >= 4) { memset(ps, 0xff, (usize)len); klog("argon: fuel gauge: works without the charger"); }
+            }
         klog("argon: %d device(s) kept from Linux (secure world, reset/power-off, thermal, charger, USB; qrt.allhw gives them)", hidden);
     }
     if (bootargs && strstr(bootargs, "qrt.nolinux")) klog("linux: off (qrt.nolinux)");
