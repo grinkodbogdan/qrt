@@ -51,15 +51,17 @@ typedef struct {
     rect_t outsel[5]; int nout; const char *outname[4];
     rect_t accent[N_ACCENTS], rot[5], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], cores[2], power[3], tz[2], test, install;
     rect_t bright, vol;                         /* slider tracks */
+    rect_t autob;                               /* the brightness label: automatic on/off (a light sensor) */
     rect_t g_look, g_power, g_sound, g_time, g_start, g_system, g_about;   /* group boxes */
-    int bottom;
+    int bottom, npow;
 } lay_t;
 
 static int bl(void) { return 1; }                 /* a PWM, or the shell's software dimming */
 
 static lay_t layout(rect_t a) {
     lay_t L;
-    L.w = MIN(a.w - dp(48), dp(680));
+    memset(&L, 0, sizeof L);                         /* rows not shown catch no taps */
+    L.w = ui_phone() ? a.w - dp(24) : MIN(a.w - dp(48), dp(680));
     L.x = a.x + (a.w - L.w) / 2;
     int y = a.y + dp(24) - st.sc.off, x = L.x, w = L.w, pad = dp(16);
     int title = ui.label->line + dp(10);
@@ -80,6 +82,7 @@ static lay_t layout(rect_t a) {
     int sw = (w - 2 * pad) / N_SLEEP;
     for (int i = 0; i < N_SLEEP; i++) L.sleep[i] = (rect_t){ x + pad + i * sw, y + ROW_H + dp(8), sw, ROW_H - dp(20) };
     L.bright = (rect_t){ x + w / 2, y + 2 * ROW_H + ROW_H / 2 - dp(3), w / 2 - pad, dp(6) };
+    L.autob = (rect_t){ x, y + 2 * ROW_H, w / 2, ROW_H };
     y += L.g_power.h + dp(24);
 
     /* Sound */
@@ -103,7 +106,7 @@ static lay_t layout(rect_t a) {
 
     /* Startup (64-bit only) */
     L.y_start = y;
-    if (sizeof(void *) == 8) {
+    if (sizeof(void *) == 8 && !ui_phone()) {       /* a PC's: firmware, GPU, monitors, cores */
         y += title;
         L.g_start = (rect_t){ x, y, w, 5 * ROW_H };
         int kw = MIN(dp(130), w / 4);
@@ -117,11 +120,12 @@ static lay_t layout(rect_t a) {
 
     /* System: restart, shut down, firmware */
     L.y_system = y; y += title;
-    L.g_system = (rect_t){ x, y, w, 2 * ROW_H };
-    int bw = (w - 2 * pad - 2 * dp(10)) / 3;
-    for (int i = 0; i < 3; i++) L.power[i] = (rect_t){ x + pad + i * (bw + dp(10)), y + dp(10), bw, ROW_H - dp(20) };
+    L.npow = ui_phone() ? 2 : 3;                    /* a phone has no firmware setup, no disk to install on */
+    L.g_system = (rect_t){ x, y, w, (ui_phone() ? 1 : 2) * ROW_H };
+    int bw = (w - 2 * pad - (L.npow - 1) * dp(10)) / L.npow;
+    for (int i = 0; i < L.npow; i++) L.power[i] = (rect_t){ x + pad + i * (bw + dp(10)), y + dp(10), bw, ROW_H - dp(20) };
     int iw = MIN(dp(220), w / 3);
-    L.install = (rect_t){ x + w - pad - iw, y + ROW_H + dp(10), iw, ROW_H - dp(20) };
+    if (!ui_phone()) L.install = (rect_t){ x + w - pad - iw, y + ROW_H + dp(10), iw, ROW_H - dp(20) };
     y += L.g_system.h + dp(24);
 
     /* About */
@@ -189,7 +193,12 @@ static void draw(canvas_t *c, rect_t a) {
     group(c, L.g_power, L.y_power, "Power", bl() ? 3 : 2);
     row_label(c, L.g_power, 0, "Automatic sleep", "Lock and turn the screen off after");
     for (int i = 0; i < N_SLEEP; i++) segment(c, L.sleep[i], sleep_label[i], sleep_secs[i] == shell_sleep_after(), i == 0, i == N_SLEEP - 1);
-    if (bl()) { row_label(c, L.g_power, 2, "Screen brightness", backlight_method()); slider(c, L.bright, backlight_level()); }
+    if (bl()) {
+        const char *how = ish_lux() < 0 || !ui_phone() ? backlight_method()
+                        : hal_setting_get(u"QrtAutoBright", 1) ? "Automatic (light sensor)" : "By hand - tap for automatic";
+        row_label(c, L.g_power, 2, "Screen brightness", how);
+        slider(c, L.bright, backlight_level());
+    }
 
     group(c, L.g_sound, L.y_sound, "Sound", 3);
     row_label(c, L.g_sound, 0, "Volume", NULL);
@@ -226,7 +235,7 @@ static void draw(canvas_t *c, rect_t a) {
         int z = time_zone();
         fmt(zone, sizeof zone, "UTC%c%d:%02d%s", z < 0 ? '-' : '+', ABS_I(z) / 3600, ABS_I(z) / 60 % 60, time_zone_known() ? "" : " (not set yet)");
         group(c, L.g_time, L.y_time, "Date & time", 2);
-        row_label(c, L.g_time, 0, "Date and time", time_synced() ? "Set from the network" : "Waiting for the network (secure sites need the right date)");
+        row_label(c, L.g_time, 0, "Date and time", time_synced() ? "Set from the network" : ui_phone() ? "Waiting for the network" : "Waiting for the network (secure sites need the right date)");
         int vw = text_width(ui.body, now);
         gfx_text(c, ui.body, L.g_time.x + L.g_time.w - dp(16) - vw, L.g_time.y + (ROW_H - ui.body->line) / 2, now, ui.text2);
         row_label(c, L.g_time, 1, "Time zone", zone);
@@ -234,7 +243,7 @@ static void draw(canvas_t *c, rect_t a) {
         segment(c, L.tz[1], "+", 0, 0, 1);
     }
 
-    if (sizeof(void *) == 8) {
+    if (L.g_start.h) {
         int fw = st.fw_mode;                     /* draw() may run on any core: no firmware calls here */
         group(c, L.g_start, L.y_start, "Startup", 5);
         row_label(c, L.g_start, 0, "Kernel mode", k.boot_note[0] ? k.boot_note : "Applies after a restart");
@@ -256,8 +265,8 @@ static void draw(canvas_t *c, rect_t a) {
         segment(c, L.cores[1], "All cores", allc, 0, 1);
     }
 
-    group(c, L.g_system, L.y_system, "System", 2);
-    {
+    group(c, L.g_system, L.y_system, "System", L.install.w ? 2 : 1);
+    if (L.install.w) {
         /* Install: QRT onto the internal disk, erasing it (install.c, at the next start) */
         u64 tb = install_target_bytes();
         char sub[96], size[24];
@@ -269,7 +278,7 @@ static void draw(canvas_t *c, rect_t a) {
         ui_button(c, L.install, !tb ? "Unavailable" : armed ? "Erase and install" : "Install...",
                   tb && armed ? RGB(0xc0, 0x1c, 0x28) : RGBA(255, 255, 255, tb ? 22 : 8), tb ? ui.text : ui.text3);
     }
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < L.npow; i++) {
         int armed = st.confirm == i + 1;
         ui_button(c, L.power[i], armed ? "Tap again" : power_label[i],
                   armed || i == 1 ? RGB(0xc0, 0x1c, 0x28) : RGBA(255, 255, 255, 22), ui.text);
@@ -327,6 +336,11 @@ static int event(const event_t *e, rect_t a) {
     if (in_rect(L.rot[0], e->x, e->y)) { shell_set_auto_rotate(1); return 1; }
     for (int i = 0; i < 4; i++) if (in_rect(L.rot[i + 1], e->x, e->y)) { shell_set_auto_rotate(0); shell_set_rotation(i); return 1; }
     for (int i = 0; i < N_SLEEP; i++) if (in_rect(L.sleep[i], e->x, e->y)) { shell_set_sleep_after(sleep_secs[i]); return 1; }
+    if (in_rect(L.autob, e->x, e->y) && bl() && ui_phone() && ish_lux() >= 0) {
+        hal_setting_set(u"QrtAutoBright", hal_setting_get(u"QrtAutoBright", 1) ? 0 : 1);
+        shell_redraw();
+        return 1;
+    }
     if (in_rect(L.test, e->x, e->y)) { snd_beep(); return 1; }
     for (int i = 0; i <= L.nout; i++)
         if (in_rect(L.outsel[i], e->x, e->y)) { snd_choose_output(i ? L.outname[i - 1] : NULL); snd_beep(); return 1; }
@@ -362,7 +376,7 @@ static int event(const event_t *e, rect_t a) {
         hal_reboot();
         return 1;
     }
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < L.npow; i++) {
         if (!in_rect(L.power[i], e->x, e->y)) continue;
         if (st.confirm != i + 1) { st.confirm = i + 1; return 1; }
         st.confirm = 0;

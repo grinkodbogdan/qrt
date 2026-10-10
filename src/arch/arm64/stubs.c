@@ -52,7 +52,17 @@ int  backlight_dim_alpha(void) { return 0; }
 int  backlight_level(void) { return bl_level; }
 const char *backlight_method(void) { return linux_backlight_present() ? "Linux's backlight driver" : "the boot loader's setting"; }
 void backlight_power(int on) { bl_on = on; bl_want = on ? bl_level : 0; }
-void backlight_set_level(int pct) { bl_level = CLAMP(pct, 5, 100); if (bl_on) bl_want = bl_level; }
+/* set by hand (the slider, the keys): kept, and the light sensor stops steering it */
+void backlight_set_level(int pct) {
+    bl_level = CLAMP(pct, 5, 100);
+    hal_setting_set(u"QrtBrightness", (u32)bl_level);
+    hal_setting_set(u"QrtAutoBright", 0);
+    if (bl_on) bl_want = bl_level;
+}
+/* set by the light sensor (linux.c): not saved */
+void backlight_auto_level(int pct) { bl_level = CLAMP(pct, 5, 100); if (bl_on) bl_want = bl_level; }
+/* the saved level, once the settings are read (linux.c) */
+void backlight_restore(void) { bl_level = CLAMP((int)hal_setting_get(u"QrtBrightness", 70), 5, 100); if (bl_on) bl_want = bl_level; }
 void backlight_tick(void) { if (bl_want >= 0) { linux_backlight_set(bl_want); bl_want = -1; } }   /* never waits */
 static battery_t no_battery = { .minutes = -1 };
 const battery_t *linux_battery(void);                 /* linux.c: Linux's fuel gauge, NULL if none */
@@ -61,8 +71,6 @@ void battery_poll(void) {}
 int  buttons_active(void) { return 0; }
 int  buttons_debug(char lines[][112], int max) { (void)lines; (void)max; return 0; }
 void buttons_scan_start(void) {}
-int  ish_orientation(void) { return -1; }
-const char *ish_status(void) { return "none"; }
 int  hwreport_write(const char *name, const void *data, usize len) { (void)name; (void)data; (void)len; return 0; }
 u64  install_target_bytes(void) { return 0; }
 void e1000_poll(void) {}

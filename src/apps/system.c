@@ -292,6 +292,10 @@ static int tick(u64 now) {
         for (int i = 0; i < n; i++)
             o += fmt(ks.irqs + o, sizeof ks.irqs - o, "; %s vector 0x%x: %llu", l[i].owner, l[i].vector, l[i].count);
     }
+#elif defined(__aarch64__)
+    u64 pmm_free_bytes(void);
+    ks.mem_total = k.ram_bytes;                     /* ARM: all of RAM; free = pages not handed out yet */
+    ks.mem_free = MIN(pmm_free_bytes(), k.ram_bytes);
 #endif
     if (ks.n_hist == 60) { memmove(ks.cpu_hist, ks.cpu_hist + 1, 59); ks.n_hist--; }
     ks.cpu_hist[ks.n_hist++] = (u8)CLAMP(ks.busy_pct, 0, 100);

@@ -309,6 +309,14 @@ void arm_main(const void *dtb, u64 base) {
     int len;
     const char *model = fdt_prop(0, "model", &len);
     if (model) arm_model = model;
+    /* Settings' About: the device and its processor, from the tree */
+    strlcpy(k.sys_product, arm_model, sizeof k.sys_product);
+    {
+        int ncpu = 0;
+        for (int n = fdt_find_compatible(-1, "arm,cortex-a53"); n >= 0; n = fdt_find_compatible(n, "arm,cortex-a53")) ncpu++;
+        const char *soc = fdt_find_compatible(-1, "qcom,msm8953") >= 0 || (model && strstr(model, "Mi A1")) ? "Snapdragon 625 (MSM8953), " : "";
+        fmt(k.cpu, sizeof k.cpu, "%s%d x Cortex-A53", soc, ncpu ? ncpu : 1);
+    }
     klog("QRT %s (arm64) - Tessera kernel on %s, loaded at %llx", QRT_VERSION, arm_model, base);
     if (uartdm) klog("console: the Qualcomm UART at %llx, 115200 8N1 (Linux's msm_serial is off: the UART is Tessera's)", uartdm);
     else if (!pl011 && fdt_find_compatible(-1, "qcom,msm-uartdm") >= 0) klog("console: the Qualcomm UART's clocks are off (the boot loader did not use it): no serial log");
@@ -426,7 +434,7 @@ void arm_main(const void *dtb, u64 base) {
             "qcom,pm8916-wcd-analog-codec",
             /* what can reset or power off the phone */
             "qcom,pshold", "qcom,msm8953-tsens", "qcom,spmi-temp-alarm", "qcom,pmi8996-smbchg", "qcom,pmi8998-lab-ibb",
-            "qcom,msm8953-dwc3", "qcom,msm8953-qusb2-phy", "qcom,pmi8950-haptics", "qcom,msm8953-cpr4pd",
+            "qcom,msm8953-dwc3", "qcom,msm8953-qusb2-phy", "qcom,msm8953-cpr4pd",
             "qcom,apcs-cc-msm8953", NULL };
         int hidden = 0, sound = !(bootargs && strstr(bootargs, "qrt.nosound"));
         /* Wi-Fi stays Linux's: the Pronto core, its SMD driver, SMSM, SCM and the Pronto core's

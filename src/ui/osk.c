@@ -162,7 +162,9 @@ static int hit(rect_t p, int x, int y, int *rr, int *kk) {
     return 0;
 }
 
+__attribute__((weak)) void hal_vibrate(int ms) { (void)ms; }
 static int emit(const osk_key_t *key, event_t *out) {
+    hal_vibrate(12);                                  /* a tick under the finger, where there is a motor */
     memset(out, 0, sizeof *out);
     out->type = EV_KEY;
     switch (key->kind) {

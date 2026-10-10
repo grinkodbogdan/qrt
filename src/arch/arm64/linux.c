@@ -889,13 +889,15 @@ u32 hal_settings_gen(void);
 usize hal_settings_export(u8 *buf, usize cap);
 int hal_settings_import(const u8 *buf, usize len);
 void hal_settings_mark_ready(void);
+void backlight_restore(void);
+static void settings_ready(void) { hal_settings_mark_ready(); backlight_restore(); }   /* the saved brightness, now */
 static void settings_loop(void *a) {
     (void)a;
     const struct amnt *m = NULL;
     while (!m) {                                                    /* the partition, once mounted */
         for (int i = 0; i < namnt && !m; i++) if (!strcmp(amnts[i].name, "logdump")) m = &amnts[i];
         if (m) break;
-        if (dead || scans >= 2) { klog("settings: no logdump partition - settings last until power-off"); hal_settings_mark_ready(); return; }
+        if (dead || scans >= 2) { klog("settings: no logdump partition - settings last until power-off"); settings_ready(); return; }
         thr_sleep_us(1000000);
     }
     char dir[96], file[112], tmp[112];
@@ -903,7 +905,7 @@ static void settings_loop(void *a) {
     fmt(file, sizeof file, "%s/settings", dir);
     fmt(tmp, sizeof tmp, "%s/settings.new", dir);
     long r = sys(NR_MOUNT, 0, (long)m->lpath, 0, 32, 0);            /* MS_REMOUNT, writable */
-    if (r < 0) { klog("settings: logdump stays read-only (%ld) - settings last until power-off", r); hal_settings_mark_ready(); return; }
+    if (r < 0) { klog("settings: logdump stays read-only (%ld) - settings last until power-off", r); settings_ready(); return; }
     sys(NR_MKDIRAT, AT_FDCWD, (long)dir, 0755, 0, 0);
     static u8 buf[64 * 300];
     long fd = l_open(file, 0);
@@ -913,7 +915,7 @@ static void settings_loop(void *a) {
         int got = n > 8 && !memcmp(buf, "QRTSET1\n", 8) ? hal_settings_import(buf + 8, (usize)(n - 8)) : 0;
         klog("settings: %d loaded from the phone (logdump/qrt/settings)", got);
     } else klog("settings: none saved yet (logdump/qrt/settings)");
-    hal_settings_mark_ready();
+    settings_ready();
     u32 saved = hal_settings_gen() ? ~0u : 0;                       /* set before the file was read: save them too */
     for (;;) {
         thr_sleep_us(2000000);
@@ -1047,6 +1049,210 @@ static void sensors_loop(void *a) {
     }
 }
 
+
+/* ---- Argon sensors and small parts (the Mi A1): which way up (the BMI120 accelerometer,
+ * Linux's bmi160 driver over IIO), how bright around (the LTR579 light sensor - no Linux
+ * driver: read here through /dev/i2c-N), the notification LED (AW2013, Linux's leds
+ * class) and the vibration motor (PMI8950's haptics, Linux's input force feedback) ---- */
+#define NR_WRITE2 64
+static char accel_dir[64];
+static int mmat[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+static volatile int orient = -1, lux_now = -1;
+static char sens_status[80] = "none";
+int ish_orientation(void) { return orient; }
+int ish_lux(void) { return lux_now; }
+const char *ish_status(void) { return sens_status; }
+static long read_long(const char *p) {
+    char t[32];
+    if (read_text(p, t, sizeof t) <= 0) return -999999;
+    long v = 0, sg = 1;
+    const char *c = t;
+    if (*c == '-') { sg = -1; c++; }
+    if (*c < '0' || *c > '9') return -999999;
+    while (*c >= '0' && *c <= '9') v = v * 10 + (*c++ - '0');
+    return v * sg;
+}
+static void find_accel(void) {
+    long fd = l_open("/sys/bus/iio/devices", 0200000);
+    if (fd < 0) return;
+    static char d[2048];
+    long n = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+    l_close((int)fd);
+    for (long o = 0; o < n && !accel_dir[0]; o += *(u16 *)(d + o + 16)) {
+        const char *nm = d + o + 19;
+        if (strncmp(nm, "iio:device", 10)) continue;
+        char p[96], name[32] = "";
+        fmt(p, sizeof p, "/sys/bus/iio/devices/%s/in_accel_x_raw", nm);
+        if (read_long(p) == -999999) continue;
+        fmt(accel_dir, sizeof accel_dir, "/sys/bus/iio/devices/%s", nm);
+        fmt(p, sizeof p, "%s/name", accel_dir);
+        read_text(p, name, sizeof name);
+        for (char *c = name; *c; c++) if (*c == '\n') *c = 0;
+        char m[96] = "";
+        fmt(p, sizeof p, "%s/in_accel_mount_matrix", accel_dir);
+        if (read_text(p, m, sizeof m) <= 0) { fmt(p, sizeof p, "%s/mount_matrix", accel_dir); read_text(p, m, sizeof m); }
+        int k = 0;
+        for (const char *c = m; *c && k < 9; ) {                         /* "0, 1, 0; 1, 0, 0; 0, 0, 1" */
+            while (*c && *c != '-' && (*c < '0' || *c > '9')) c++;
+            if (!*c) break;
+            int sg = 1;
+            if (*c == '-') { sg = -1; c++; }
+            int v = 0;
+            while (*c >= '0' && *c <= '9') v = v * 10 + (*c++ - '0');
+            if (*c == '.') { c++; while (*c >= '0' && *c <= '9') c++; }
+            mmat[k++] = sg * v;
+        }
+        fmt(sens_status, sizeof sens_status, "accelerometer (%s)", name[0] ? name : nm);
+        klog("argon: accelerometer %s (%s), mount matrix %d %d %d / %d %d %d / %d %d %d", name, nm,
+             mmat[0], mmat[1], mmat[2], mmat[3], mmat[4], mmat[5], mmat[6], mmat[7], mmat[8]);
+    }
+}
+/* the screen turn that keeps the picture upright (the shell's rotation): the axis gravity
+ * pulls along, once it clearly does - flat on a table keeps what was */
+static void accel_poll(void) {
+    char p[96];
+    long r[3];
+    static const char ax[3] = { 'x', 'y', 'z' };
+    for (int i = 0; i < 3; i++) {
+        fmt(p, sizeof p, "%s/in_accel_%c_raw", accel_dir, ax[i]);
+        r[i] = read_long(p);
+        if (r[i] == -999999) return;
+    }
+    long v[3];
+    for (int i = 0; i < 3; i++) v[i] = mmat[3 * i] * r[0] + mmat[3 * i + 1] * r[1] + mmat[3 * i + 2] * r[2];
+    long ax_ = v[0] < 0 ? -v[0] : v[0], ay = v[1] < 0 ? -v[1] : v[1], az = v[2] < 0 ? -v[2] : v[2];
+    int o = -1;
+    if (az > 2 * (ax_ > ay ? ax_ : ay)) o = -1;                       /* flat */
+    else if (ay * 2 > ax_ * 3) o = v[1] > 0 ? 0 : 2;
+    else if (ax_ * 2 > ay * 3) o = v[0] > 0 ? 1 : 3;
+    static int last = -1, same;
+    if (o == last) same++; else { last = o; same = 0; }
+    if (o >= 0 && same >= 1 && o != orient) {
+        orient = o;
+        static int said;
+        if (said++ < 8) klog("argon: turned: %d degrees (accelerometer %ld %ld %ld)", o * 90, v[0], v[1], v[2]);
+    }
+}
+/* LTR579 on the sensors' I2C (gpio) bus, through Linux's i2c-dev */
+static long ltr_fd = -1;
+static int ltr_xfer(u8 reg, u8 *rd, int rn, int wv) {
+    u8 w[2] = { reg, (u8)wv };
+    struct { u16 addr, flags, len, pad; u8 *buf; } msgs[2] = {
+        { 0x53, 0, (u16)(wv >= 0 ? 2 : 1), 0, w }, { 0x53, 1, (u16)rn, 0, rd } };
+    struct { void *msgs; u32 n; } x = { msgs, wv >= 0 ? 1u : 2u };
+    return sys(NR_IOCTL, ltr_fd, 0x0707, (long)&x, 0, 0) < 0 ? -1 : 0;   /* I2C_RDWR */
+}
+static void find_light(void) {
+    for (int b = 0; b < 16; b++) {
+        char p[80], nm[32] = "";
+        fmt(p, sizeof p, "/sys/bus/i2c/devices/i2c-%d/of_node/name", b);
+        if (read_text(p, nm, sizeof nm) <= 0 || strncmp(nm, "i2c-sensors", 11)) continue;
+        fmt(p, sizeof p, "/dev/i2c-%d", b);
+        ltr_fd = l_open(p, 2);
+        if (ltr_fd < 0) { klog("argon: light sensor: %s did not open (%ld)", p, ltr_fd); return; }
+        u8 id = 0;
+        if (ltr_xfer(0x06, &id, 1, -1) < 0) { klog("argon: light sensor: no answer at 0x53"); l_close((int)ltr_fd); ltr_fd = -1; return; }
+        ltr_xfer(0x05, NULL, 0, 0x01);                               /* ALS_GAIN: x3 */
+        ltr_xfer(0x04, NULL, 0, 0x22);                               /* ALS_MEAS_RATE: 18 bits, 100 ms */
+        ltr_xfer(0x00, NULL, 0, 0x02);                               /* MAIN_CTRL: ALS on */
+        klog("argon: light sensor LTR579 (part %02x) on i2c-%d", id, b);
+        return;
+    }
+}
+static void light_poll(void) {
+    u8 d[3];
+    if (ltr_fd < 0 || ltr_xfer(0x0d, d, 3, -1) < 0) return;
+    long raw = d[0] | d[1] << 8 | (d[2] & 0x0f) << 16;
+    lux_now = (int)(raw / 5);                                         /* x 0.6 / gain 3 / 100 ms */
+    if (!hal_setting_get(u"QrtAutoBright", 1)) return;
+    /* about 8 + 22 x log10(1 + lux): dark 10 %, a room 50 %, daylight 100 % */
+    static const u32 dec[] = { 1, 2, 3, 4, 5, 6, 8, 10, 13, 16, 20, 25, 32, 40, 50, 63, 79, 100, 126, 158, 200, 251, 316, 398, 501, 631,
+                               794, 1000, 1259, 1585, 1995, 2512, 3162, 3981, 5012, 6310, 7943, 10000, 12589, 15849, 19953, 25119,
+                               31623, 39811, 50119 };   /* 10^(k/10) */
+    int lg = 0;                                                       /* log10(1 + lux), in tenths */
+    while (lg + 1 < (int)ARRAY_LEN(dec) && (u32)(lux_now + 1) >= dec[lg + 1]) lg++;
+    int want = CLAMP(8 + 22 * lg / 10, 8, 100);
+    static int cur = -1;
+    if (cur < 0) cur = want;
+    cur += (want - cur) / 3;                                          /* settle over a few seconds */
+    static int set = -1;
+    if (set < 0 || cur - set > 2 || set - cur > 2) { set = cur; void backlight_auto_level(int); backlight_auto_level(cur); }
+}
+/* the notification LED: on while charging, blinking when the battery runs low */
+static char led_dir[80];
+static void led_poll(void) {
+    if (!led_dir[0]) {
+        long fd = l_open("/sys/class/leds", 0200000);
+        if (fd < 0) return;
+        static char d[1024];
+        long n = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+        l_close((int)fd);
+        for (long o = 0; o < n; o += *(u16 *)(d + o + 16))
+            if (strstr(d + o + 19, "indicator")) { fmt(led_dir, sizeof led_dir, "/sys/class/leds/%s", d + o + 19); klog("argon: notification LED %s", d + o + 19); break; }
+        if (!led_dir[0]) { strlcpy(led_dir, "-", sizeof led_dir); return; }
+    }
+    if (led_dir[0] == '-' || !lbat.present) return;
+    int want = lbat.charging && lbat.percent < 100 ? 1 : lbat.discharging && lbat.percent <= 15 ? 2 : 0;
+    static int now = -1;
+    if (want == now) return;
+    now = want;
+    char p[100];
+    fmt(p, sizeof p, "%s/trigger", led_dir);
+    write_text(p, want == 2 ? "timer" : "none");
+    fmt(p, sizeof p, "%s/brightness", led_dir);
+    write_text(p, want ? "255" : "0");
+}
+/* vibration: a short buzz on request (the keyboard's keys) */
+static long vib_fd = -1;
+static int vib_id = -1;
+static volatile int vib_ms;
+void hal_vibrate(int ms) { if (vib_fd >= 0) vib_ms = ms; }
+static void find_vibrator(void) {
+    for (int i = 0; i < 16; i++) {
+        char p[80], nm[48] = "";
+        fmt(p, sizeof p, "/sys/class/input/event%d/device/name", i);
+        if (read_text(p, nm, sizeof nm) <= 0 || !strstr(nm, "haptics")) continue;
+        fmt(p, sizeof p, "/dev/input/event%d", i);
+        vib_fd = l_open(p, 2);
+        klog("argon: vibration motor (%s, event%d)%s", "PMI8950 haptics", i, vib_fd < 0 ? " did not open" : "");
+        return;
+    }
+}
+static void vib_loop(void *a) {
+    (void)a;
+    for (;;) {
+        int ms = vib_ms;
+        if (!ms) { thr_sleep_us(15000); continue; }
+        vib_ms = 0;
+        u8 eff[48];
+        memset(eff, 0, sizeof eff);
+        *(u16 *)eff = 0x50;                                            /* FF_RUMBLE */
+        *(i16 *)(eff + 2) = (i16)vib_id;
+        *(u16 *)(eff + 10) = (u16)ms;                                  /* replay.length */
+        *(u16 *)(eff + 16) = 0xc000;                                   /* rumble.strong_magnitude */
+        if (sys(NR_IOCTL, vib_fd, 0x40304580, (long)eff, 0, 0) < 0) continue;   /* EVIOCSFF */
+        vib_id = *(i16 *)(eff + 2);
+        u8 ev[24];
+        memset(ev, 0, sizeof ev);
+        *(u16 *)(ev + 16) = 0x15; *(u16 *)(ev + 18) = (u16)vib_id; *(i32 *)(ev + 20) = 1;   /* EV_FF, play */
+        sys(NR_WRITE2, vib_fd, (long)ev, sizeof ev, 0, 0);
+    }
+}
+static void motion_loop(void *a) {
+    (void)a;
+    for (int t = 0; t < 120 && !accel_dir[0]; t++) { if (linux_running()) find_accel(); if (!accel_dir[0]) thr_sleep_us(1000000); }
+    if (!accel_dir[0]) { strlcpy(sens_status, "none found in Linux", sizeof sens_status); }
+    find_light();
+    find_vibrator();
+    if (vib_fd >= 0) thr_create("vibration", vib_loop, NULL, 16 << 10);
+    for (u64 n = 0;; n++) {
+        if (accel_dir[0]) accel_poll();
+        if (n % 3 == 0) light_poll();
+        if (n % 10 == 0) led_poll();
+        thr_sleep_us(300000);
+    }
+}
+
 /* ---- start ---- */
 static const void *dtb;
 /* what did not come up and why: the devices still waiting for something (debugfs's
@@ -1153,6 +1359,7 @@ static void linux_main(void *a) {
     void lbt_start(void);
     lbt_start();                                                    /* Bluetooth: hci0 to QRT's own stack */
     thr_create("linux sensors", sensors_loop, NULL, 32 << 10);
+    if (fdt_find_compatible(-1, "linux,dummy-virt") < 0) thr_create("motion", motion_loop, NULL, 32 << 10);
     thr_sleep_us(25ull * 1000000);
     if (!dead) linux_summary();
     thr_sleep_us(5ull * 1000000);
@@ -1196,4 +1403,8 @@ int linux_start(const void *fdt) { (void)fdt; return 0; }
 int linux_running(void) { return 0; }
 int linux_input_poll(event_t *out, int max) { (void)out; (void)max; return 0; }
 const char *linux_status(char *buf, int cap) { strlcpy(buf, "not in this build", (usize)cap); return buf; }
+int ish_orientation(void) { return -1; }
+int ish_lux(void) { return -1; }
+const char *ish_status(void) { return "none"; }
+void hal_vibrate(int ms) { (void)ms; }
 #endif

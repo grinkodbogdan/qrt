@@ -360,9 +360,16 @@ static void metrics_for(int W, int H, float across) {
     ui.bg_bottom = RGB(0x06, 0x0b, 0x19);
 }
 
+/* a phone (the Mi A1, and QEMU's ARM machine standing in for it): held close, so more
+ * pixels per dp - about 420 dp across the short edge, as Android's phones are - and
+ * laid out for one hand: the dock along the bottom */
+__attribute__((weak)) int hal_form_phone(void) { return 0; }
+int ui_phone(void) { return hal_form_phone(); }
+
 static void ui_metrics(void) {
     int w, h;
     panel_size(&w, &h);
+    if (ui_phone() && !sh.desk) { metrics_for(w, h, 420); return; }
     /* An 8" tablet is ~680 dp across its short edge; a desk monitor is seen from further
      * away but has room to spare: 760 dp across keeps 1080p at about 1.4 px per dp */
     if (sh.desk && display_size(&w, &h)) metrics_for(w, h, 760);
@@ -2112,7 +2119,7 @@ void shell_main(void) {
     sh.rot = (int)hal_setting_get(u"QrtRotation", 0) & 3;
     sh.auto_rot = (int)hal_setting_get(u"QrtAutoRotate", 1) != 0;
     sh.accent_idx = (int)hal_setting_get(u"QrtAccent", 0) % N_ACCENTS;
-    sh.dock_edge = (int)hal_setting_get(u"QrtDockEdge", DOCK_RIGHT) & 3;
+    sh.dock_edge = (int)hal_setting_get(u"QrtDockEdge", ui_phone() ? DOCK_BOTTOM : DOCK_RIGHT) & 3;
     sh.sleep_after = (int)hal_setting_get(u"QrtSleepAfter", 120);
     sh.volume = sh.volume_saved = CLAMP((int)hal_setting_get(u"QrtVolume", 50), 0, 100);
     snd_set_volume(sh.volume);

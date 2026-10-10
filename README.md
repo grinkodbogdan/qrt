@@ -189,6 +189,50 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.25.0: a phone's shell; sensors, LED, vibration
+
+0.24.0: Bluetooth works on the Mi A1.  Asked next: the real browser, a shell made for a
+phone, and the rest of the small drivers.
+
+**A phone's shell.**  The ARM targets are phones (QEMU's ARM machine, 720 x 1280, stands
+in for one): `hal_form_phone()`.
+- **Phone metrics:** about 420 dp across the short edge, as Android's phones (a tablet
+  stays at 680): text and touch targets at a phone's size.
+- **The dock along the bottom** by default (it can still be dragged to any edge).
+- **Settings:** the full width; what a PC has and a phone does not - kernel mode,
+  graphics acceleration, external display, monitor mode, cores, firmware setup, installing
+  to a disk - is not shown; About names the device and processor from the tree
+  ("Snapdragon 625 (MSM8953), 8 x Cortex-A53").
+- **Drawing:** on a narrow screen the brush sizes and Clear go to a second row; **Clock:**
+  the face shrinks so the stopwatch's buttons stay above the dock; **System Monitor:**
+  memory on ARM.
+- Checked app by app at phone metrics in QEMU (screenshots of each).
+
+**Drivers (the Mi A1):**
+- **Auto-rotate:** the BMI120 accelerometer (Linux's bmi160 over IIO, its mount matrix
+  applied) turns the screen; flat on a table it stays as it was.
+- **Automatic brightness:** the LTR579 light sensor has no Linux driver - QRT reads it
+  through `/dev/i2c-N` (the sensors' GPIO I2C bus, address 0x53: ALS on, gain x3, 100 ms,
+  20-bit readings).  On by default; dragging the slider sets it by hand, tapping the
+  brightness label turns automatic back on.  The brightness set by hand is now kept
+  across boots.
+- **Notification LED** (AW2013): on while charging, blinking when the battery is at 15 %
+  or less.
+- **Vibration** (PMI8950's haptics, ported from postmarketOS's tree; no longer kept from
+  Linux): a short tick under the finger for each key of the on-screen keyboard.
+
+**The real browser (Ladybird) on the phone - not yet, and why.**  On the tablets
+Ladybird is a QRT program: it runs in user mode on QRT's Linux-compatible system calls,
+built with QRT's x86-64 SDK.  QRT on ARM has no user mode yet: no EL0 processes, no
+system-call layer, no ELF loader.  The way there, in order:
+1. ARM64 user mode in Tessera: address spaces, EL0 threads, the SVC entry, signals;
+2. the Linux system-call layer (files, sockets, mmap, futex, threads) for aarch64 - the
+   x86 one's logic, the ARM calling convention;
+3. QRT's SDK (musl, libc++) and Ladybird's ports, cross-built for aarch64;
+4. Ladybird itself for aarch64 with QRT's front-end, then on the phone (with 3 GB of RAM).
+Each is a release of its own.  The build machine also needs room: Ladybird's x86 build
+alone is 2.6 GB.
+
 ## 0.24.0: Bluetooth on the Mi A1
 
 0.23.4: sound works on the Mi A1 - the speaker plays.  Next: Bluetooth.

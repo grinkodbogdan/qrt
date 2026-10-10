@@ -14,6 +14,7 @@ typedef struct {
 } ui_t;
 
 extern ui_t ui;
+int ui_phone(void);                  /* a phone: phone metrics, the dock along the bottom */
 static inline int dp(float v) { return (int)(v * ui.s + 0.5f); }
 
 typedef struct app {

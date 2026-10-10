@@ -12,7 +12,7 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
 static u64 elapsed(void) { return st.acc + (st.running ? k_now_ms() - st.start : 0); }
 
 static void layout(rect_t a, float *cx, float *cy, float *rad, rect_t *digital, rect_t *btn1, rect_t *btn2) {
-    *rad = ui.landscape ? MIN(a.w * 0.22f, a.h * 0.40f) : MIN(a.w * 0.36f, a.h * 0.27f);
+    *rad = ui.landscape ? MIN(a.w * 0.22f, a.h * 0.40f) : MIN(a.w * 0.36f, MIN(a.h * 0.27f, (a.h - dp(340)) / 2.0f));   /* the stopwatch fits below */
     if (ui.landscape) { *cx = a.x + a.w * 0.30f; *cy = a.y + a.h * 0.48f; }
     else { *cx = a.x + a.w / 2.0f; *cy = a.y + *rad + dp(24); }
     int px = ui.landscape ? a.x + a.w * 58 / 100 : a.x + dp(24);

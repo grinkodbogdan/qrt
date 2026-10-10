@@ -19,15 +19,19 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
     gfx_circle(c, cx - r * 0.72f, cy + r * 0.72f, r * 0.17f, fg);
 }
 
+/* the inks, the sizes and Clear in one row; on a narrow screen (a phone held upright)
+ * the sizes and Clear go to a second row */
+static int two_rows(rect_t a) { return a.w - dp(32) < (int)(ARRAY_LEN(inks) + 3) * dp(46) + dp(12) + dp(104); }
 static rect_t toolbar(rect_t a) { return (rect_t){ a.x + dp(16), a.y, a.w - dp(32), dp(56) }; }
-static rect_t paper_rect(rect_t a) { return (rect_t){ a.x + dp(16), a.y + dp(68), a.w - dp(32), a.h - dp(80) }; }
+static rect_t paper_rect(rect_t a) { int t = two_rows(a) ? dp(112) : dp(56); return (rect_t){ a.x + dp(16), a.y + t + dp(12), a.w - dp(32), a.h - t - dp(24) }; }
 static rect_t ink_rect(rect_t a, int i) { rect_t t = toolbar(a); return (rect_t){ t.x + i * dp(46), t.y + dp(6), dp(44), dp(44) }; }
 static rect_t size_rect(rect_t a, int i) {
     rect_t t = toolbar(a);
+    if (two_rows(a)) return (rect_t){ t.x + i * dp(46), t.y + dp(56 + 6), dp(44), dp(44) };
     int x0 = t.x + (int)ARRAY_LEN(inks) * dp(46) + dp(12);
     return (rect_t){ x0 + i * dp(46), t.y + dp(6), dp(44), dp(44) };
 }
-static rect_t clear_rect(rect_t a) { rect_t t = toolbar(a); return (rect_t){ t.x + t.w - dp(96), t.y + dp(8), dp(96), dp(40) }; }
+static rect_t clear_rect(rect_t a) { rect_t t = toolbar(a); return (rect_t){ t.x + t.w - dp(96), t.y + dp(8) + (two_rows(a) ? dp(56) : 0), dp(96), dp(40) }; }
 
 #define PAPER RGB(0x1e, 0x1e, 0x1e)
 
