@@ -205,15 +205,16 @@ static int splash_init(void) {
 
 int fb_init(void) { return ramfb_init() || mdp5_init() || splash_init(); }
 
-/* ---- a 32-bit screen (0.27.0): the Adreno's copy engine takes rows in 64-byte units,
- * and the splash buffer's 24-bit rows are 3240 bytes - so once the GPU copies frames, the
- * pipe scans a buffer of its own: XRGB8888, rows of 4352 bytes, reserved uncached at
- * boot (main.c, under 4 GB: the pipe's address register is 32 bits) ---- */
+/* ---- a 32-bit screen (0.27.0): the pipe scans a buffer of its own, XRGB8888 with rows
+ * of 4352 bytes (the Adreno's copy engine takes rows in 64-byte units; the splash
+ * buffer's 24-bit rows are 3240 bytes), reserved uncached at boot (main.c, under 4 GB:
+ * the pipe's address register is 32 bits).  Since 0.27.3 at boot, GPU or not: a present
+ * is a plain copy then, with no conversion per pixel ---- */
 u64 fb32_base, fb32_size;
 int fb_wants_32(void) { return mdp_pipe && mdp_flush_reg && bpp == 3; }
 u32 fb32_pitch(void) { return ((u32)k.fb_w * 4 + 63) & ~63u; }
 int fb_switch_32(void) {
-    if (!fb_wants_32() || !fb32_base) return 0;
+    if (!fb_wants_32() || !fb32_base) return bpp == 4 && fb == (u8 *)(usize)fb32_base && fb32_base;   /* already */
     u32 w = k.fb_w, h = k.fb_h, pitch = fb32_pitch();
     if ((u64)pitch * h > fb32_size || fb32_base + fb32_size > (4ull << 30)) return 0;
     /* what is on the screen now, so the switch shows nothing new */
@@ -240,7 +241,7 @@ int fb_switch_32(void) {
     irq_restore(fl);
     if (kick) fb_dirty = 1;
     usize l = strlen(fb_what);
-    fmt(fb_what + l, sizeof fb_what - l, ", 32-bit since the GPU started");
+    fmt(fb_what + l, sizeof fb_what - l, ", now 32-bit");
     klog("display: the pipe now scans a 32-bit buffer at %llx (rows of %u bytes)", fb32_base, pitch);
     return 1;
 }

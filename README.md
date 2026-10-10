@@ -189,6 +189,21 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.27.3: the CPU presents again - to the 32-bit screen; ripples gone
+
+0.27.2 on the Mi A1 measured a GPU frame copy: writing the CPU's cache back over the
+changed pixels took ~12 ms (the GPU reads RAM, not the CPU's cache), the submit 1-6 ms -
+15-17 ms a frame against the CPU's 12-14.  Copying frames the CPU drew cannot beat the
+CPU: the same pixels go out of its cache either way.  And as the copy was not waited for,
+the shell moved the next scroll step into its frame while the GPU still read it: ripples.
+
+- **The CPU presents again** (synchronously: no ripples), into the **32-bit screen**,
+  which is now set up at boot whether or not the GPU starts (`main.c`; `qrt.fb24` keeps the
+  splash buffer): a present is a plain copy, no conversion per pixel.
+- **The GPU stays ready**: the boot still checks QRT's commands and the 2D copy;
+  `qrt.gpudraw` brings back its frame copies.  It pays when the GPU draws (fills,
+  wallpaper, blending) - pixels the CPU then never writes.
+
 ## 0.27.2: frames copied without waiting
 
 0.27.1 on the Mi A1: the 2D engine copies - every BLIT_OP_COPY combination exact, no

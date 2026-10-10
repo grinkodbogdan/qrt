@@ -408,6 +408,8 @@ void arm_main(const void *dtb, u64 base) {
      * starting: then this boot stays without them and shows that boot's log */
     int ch = fdt_node("/chosen"), alen;
     const char *bootargs = ch >= 0 ? fdt_prop(ch, "bootargs", &alen) : NULL;
+    /* the 32-bit screen (fb.c): a present is then a plain copy, no conversion per pixel */
+    if (!(bootargs && strstr(bootargs, "qrt.fb24"))) { int fb_switch_32(void); fb_switch_32(); }
     if (bootargs && strstr(bootargs, "qrt.mmucheck")) {               /* each reserved region's edges */
         int mmu_attr_at(u64 pa);
         static const char *const t[] = { "device", "cached", "uncached" };

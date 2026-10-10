@@ -582,12 +582,15 @@ static void own_commands(long fd) {
     if (!ok) { fmt(state + strlen(state), sizeof state - strlen(state), "; QRT's commands failed (see the log)"); return; }
     int ch = fdt_node("/chosen"), al;
     const char *args = ch >= 0 ? fdt_prop(ch, "bootargs", &al) : NULL;
-    if (args && strstr(args, "qrt.nogpudraw")) { LOG("frames stay the CPU's (qrt.nogpudraw)"); return; }
-    if (!fb_wants_32() || !fb32_base) { LOG("no 32-bit screen buffer (the display is not the MDP's splash pipe): frames stay the CPU's"); return; }
+    /* copying the CPU's frames does not pay (0.27.2 on the Mi A1): the CPU must write its
+     * cache back over every changed pixel first - ~12 ms a full frame, the memory traffic
+     * of its own copy - and a copy not waited for tears while scrolling.  The GPU earns its
+     * keep when it draws; until then its frame copies are there for trying (qrt.gpudraw) */
+    if (!(args && strstr(args, "qrt.gpudraw"))) { LOG("ready; the CPU puts the frames on the screen (qrt.gpudraw: the GPU)"); fmt(state + strlen(state), sizeof state - strlen(state), "; ready for QRT's commands"); return; }
+    if (!fb32_base || !fb_switch_32()) { LOG("no 32-bit screen: frames stay the CPU's"); return; }
     fb_iova = map_phys(fb32_base, fb32_size);
     if (!fb_iova) return;
     fb_pitch = fb32_pitch();
-    if (!fb_switch_32()) { LOG("the display stayed 24-bit: frames stay the CPU's"); return; }
     __asm__ volatile("dmb ish" ::: "memory");
     g_on = 1;
     fmt(state + strlen(state), sizeof state - strlen(state), "; puts the frames on the screen");
