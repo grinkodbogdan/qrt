@@ -725,6 +725,10 @@ static int lw_connect(const u8 bssid[6], const char *ssid, int freq, const u8 *i
     attr(A_SSID, ssid, (int)strlen(ssid));
     attr32(A_WIPHY_FREQ, (u32)freq);
     attr32(A_AUTH_TYPE, 0);                                             /* open system */
+    /* no 802.11n: with it the access point sets up block-ack and sends the phone its
+     * frames aggregated, and on the Mi A1 (0.22.4) none of those arrived - only the
+     * first one or two frames to the phone, then broadcasts alone.  802.11g rates. */
+    attr(147, NULL, 0);                                                 /* NL80211_ATTR_DISABLE_HT */
     if (ie && ielen >= 8) {
         attr(A_IE, ie, (int)ielen);
         attr(A_PRIVACY, NULL, 0);
@@ -817,7 +821,14 @@ static void lw_poll(void) {
     static u64 next_count;
     if (count_from && k_now_ms() - count_from < 120000 && k_now_ms() >= next_count) {
         next_count = k_now_ms() + 20000;
-        LOG("frames in: %u to us, %u broadcast; out: %u", rx_uni, rx_multi, tx_n);
+        char a[24] = "", b[24] = "", c[24] = "";                       /* Linux's own counts for wlan0 */
+        rd("/sys/class/net/wlan0/statistics/rx_packets", a, sizeof a);
+        rd("/sys/class/net/wlan0/statistics/rx_dropped", b, sizeof b);
+        rd("/sys/class/net/wlan0/statistics/tx_packets", c, sizeof c);
+        for (char *t = a; *t; t++) if (*t == '\n') *t = 0;
+        for (char *t = b; *t; t++) if (*t == '\n') *t = 0;
+        for (char *t = c; *t; t++) if (*t == '\n') *t = 0;
+        LOG("frames in: %u to us, %u broadcast; out: %u (Linux: in %s, dropped %s, out %s)", rx_uni, rx_multi, tx_n, a, b, c);
     }
     while (rq_tail != rq_head) {
         const u8 *f = rxq[rq_tail % RXQ].f;

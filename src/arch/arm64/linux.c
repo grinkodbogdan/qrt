@@ -794,6 +794,37 @@ static void power_poll(void) {
     }
     if (b.present) lbat = b;
 }
+/* no battery after a minute: say why - is the gauge's driver there, did it take the
+ * device, which supplies Linux has, is the device still waiting for something */
+static void battery_why(void) {
+    char line[200] = "", p[96];
+    long fd = l_open("/sys/bus/platform/drivers/qcom-fg", 0200000);
+    int bound = -1;
+    if (fd >= 0) {
+        static char d[1024];
+        long len = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+        bound = 0;
+        for (long o = 0; o < len; o += *(u16 *)(d + o + 16)) if (strchr(d + o + 19, ':')) bound++;
+        l_close((int)fd);
+    }
+    fd = l_open("/sys/class/power_supply", 0200000);
+    if (fd >= 0) {
+        static char d[1024];
+        long len = sys(NR_GETDENTS64, fd, (long)d, sizeof d, 0, 0);
+        for (long o = 0; o < len; o += *(u16 *)(d + o + 16)) {
+            const char *nm = d + o + 19;
+            if (nm[0] == '.') continue;
+            char cap[16] = "?";
+            fmt(p, sizeof p, "/sys/class/power_supply/%s/capacity", nm);
+            if (read_text(p, cap, sizeof cap) <= 0) fmt(cap, sizeof cap, "unreadable");
+            for (char *t = cap; *t; t++) if (*t == '\n') *t = 0;
+            usize l = strlen(line);
+            fmt(line + l, sizeof line - l, " %s (capacity %s)", nm, cap);
+        }
+        l_close((int)fd);
+    }
+    klog("argon: no battery: gauge driver %s, %d device(s); supplies:%s", bound < 0 ? "missing" : "present", bound < 0 ? 0 : bound, line[0] ? line : " none");
+}
 static void sensors_loop(void *a) {
     (void)a;
     int said = 0;
@@ -801,6 +832,8 @@ static void sensors_loop(void *a) {
         if (linux_running()) {
             power_poll();
             if (!said && lbat.present) { said = 1; klog("argon: battery %d%%%s (Linux's fuel gauge)", lbat.percent, lbat.charging ? ", charging" : ""); }
+            static int polls;
+            if (!said && !lbat.present && ++polls == 12) battery_why();      /* a minute and no battery */
         }
         thr_sleep_us(5ull * 1000000);
     }

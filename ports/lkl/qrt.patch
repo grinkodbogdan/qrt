@@ -2012,10 +2012,10 @@ index 8dcb41545..59d3bc43c 100644
 +obj-$(CONFIG_BATTERY_QCOM_FG)	+= qcom_fg.o
 diff --git a/drivers/power/supply/qcom_fg.c b/drivers/power/supply/qcom_fg.c
 new file mode 100644
-index 000000000..64e4249dc
+index 000000000..c6bb3dfb0
 --- /dev/null
 +++ b/drivers/power/supply/qcom_fg.c
-@@ -0,0 +1,1302 @@
+@@ -0,0 +1,1354 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* Copyright (c) 2020, The Linux Foundation. All rights reserved. */
 +
@@ -2115,6 +2115,7 @@ index 000000000..64e4249dc
 +	int status;
 +
 +	const struct qcom_fg_sram_regs *sram_regs;
++	bool qrt_sram_off;	/* QRT: SRAM never answered - stop waiting on it */
 +	struct completion sram_access_granted;
 +	struct completion sram_access_revoked;
 +	struct workqueue_struct *sram_wq;
@@ -2389,9 +2390,13 @@ index 000000000..64e4249dc
 +	u8 *rd_data = val;
 +	int ret = 0;
 +
++	if (!chip->sram_regs || chip->qrt_sram_off)
++		return -ENODEV;
 +	ret = qcom_fg_sram_request_access(chip);
 +	if (ret) {
 +		dev_err(chip->dev, "Failed to request SRAM access: %d", ret);
++		if (IS_ENABLED(CONFIG_LKL_QRT_SOC) && ret == -ETIMEDOUT)
++			chip->qrt_sram_off = true;
 +		return ret;
 +	}
 +
@@ -3098,6 +3103,40 @@ index 000000000..64e4249dc
 +	.sram_regs = NULL,
 +};
 +
++static void qcom_fg_qrt_optional(struct platform_device *pdev,
++				 struct qcom_fg_chip *chip)
++{
++	int irq, ret;
++
++	if (chip->sram_regs) {
++		irq = of_irq_get_byname(pdev->dev.of_node, "mem-avail");
++		if (irq < 0) {
++			dev_warn(&pdev->dev, "no mem-avail irq (%d): no SRAM\n", irq);
++			chip->sram_regs = NULL;
++		} else {
++			init_completion(&chip->sram_access_granted);
++			init_completion(&chip->sram_access_revoked);
++			chip->sram_wq = create_singlethread_workqueue("qcom_fg");
++			INIT_DELAYED_WORK(&chip->sram_release_access_work,
++				qcom_fg_sram_release_access_worker);
++			spin_lock_init(&chip->sram_request_lock);
++			spin_lock_init(&chip->sram_rw_lock);
++			chip->sram_requests = 0;
++			ret = devm_request_threaded_irq(chip->dev, irq, NULL,
++							qcom_fg_handle_mem_avail,
++							IRQF_ONESHOT, "mem-avail", chip);
++			if (ret < 0)
++				dev_warn(&pdev->dev, "mem-avail irq: %d\n", ret);
++		}
++	}
++	irq = of_irq_get_byname(pdev->dev.of_node, "soc-delta");
++	if (irq >= 0)
++		ret = devm_request_threaded_irq(chip->dev, irq, NULL,
++						qcom_fg_handle_soc_delta,
++						IRQF_ONESHOT, "soc-delta", chip);
++	dev_info(&pdev->dev, "battery registered\n");
++}
++
 +static int qcom_fg_probe(struct platform_device *pdev)
 +{
 +	struct power_supply_config supply_config = {};
@@ -3150,7 +3189,8 @@ index 000000000..64e4249dc
 +	ret = qcom_fg_clear_ima(chip, true);
 +	if (ret && ret != -EAGAIN) {
 +		dev_err(chip->dev, "Failed to clear IMA exception: %d\n", ret);
-+		return ret;
++		if (!IS_ENABLED(CONFIG_LKL_QRT_SOC))
++			return ret;
 +	}
 +
 +	/* Check and clear DMA errors */
@@ -3165,7 +3205,8 @@ index 000000000..64e4249dc
 +			error_present ? BIT(0) : 0);
 +	if (ret < 0) {
 +		dev_err(chip->dev, "Failed to write dma_ctl: %d\n", ret);
-+		return ret;
++		if (!IS_ENABLED(CONFIG_LKL_QRT_SOC))
++			return ret;
 +	}
 +
 +	/* Get charger power supply */
@@ -3196,7 +3237,18 @@ index 000000000..64e4249dc
 +	ret = power_supply_get_battery_info(chip->batt_psy, &chip->batt_info);
 +	if (ret) {
 +		dev_err(&pdev->dev, "Failed to get battery info: %d\n", ret);
-+		return ret;
++		if (!IS_ENABLED(CONFIG_LKL_QRT_SOC))
++			return ret;
++	}
++
++	/*
++	 * QRT: capacity, voltage and current are plain registers; the rest
++	 * (SRAM, temperature limits, interrupts) is optional - a failure there
++	 * leaves the battery registered instead of taking it away.
++	 */
++	if (IS_ENABLED(CONFIG_LKL_QRT_SOC)) {
++		qcom_fg_qrt_optional(pdev, chip);
++		return 0;
 +	}
 +
 +	/* Initialize SRAM if available */

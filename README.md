@@ -189,6 +189,25 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.22.5: Wi-Fi without 802.11n; the battery driver stays
+
+0.22.4 on the Mi A1 counted what came in: after joining, **3 frames addressed to the
+phone, then none** - while broadcasts kept arriving by the hundreds.  The first frame or
+two get through; after that the access point sets up block-ack and sends the phone's
+frames aggregated, and those were lost.  DNS's answers, ARP's replies - everything that
+is not a broadcast - never arrived.
+
+- **Wi-Fi joins without 802.11n** (`NL80211_ATTR_DISABLE_HT` on connect): no
+  aggregation, 802.11g rates (54 Mbit/s).  Every frame comes on its own.
+- **The frame counts add Linux's own** (`Linux: in N, dropped M, out K` from
+  `wlan0`'s statistics), so a log shows whether frames die before or after Linux.
+- **The battery**: the gauge driver set up things the battery reading does not need
+  (temperature limits and interrupts through the gauge's SRAM) and gave up the whole
+  battery when one of them failed.  Under QRT those steps are optional now; capacity
+  is a plain register read.  SRAM readings (voltage, current) are tried once and
+  dropped if the gauge never answers.  No battery a minute after boot logs why:
+  `argon: no battery: gauge driver ..., N device(s); supplies: ...`.
+
 ## 0.22.4: Wi-Fi traffic both ways; the battery
 
 0.22.3 on the Mi A1: **Wi-Fi connects** - WPA2 with the router, DHCP gave an address -
