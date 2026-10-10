@@ -1909,6 +1909,18 @@ index 0e67f1721..6e4357332 100644
  	return &data->iop;
  
  out_free_data:
+diff --git a/drivers/mfd/qcom-spmi-pmic.c b/drivers/mfd/qcom-spmi-pmic.c
+index b4b178caf..2f4ff93b5 100644
+--- a/drivers/mfd/qcom-spmi-pmic.c
++++ b/drivers/mfd/qcom-spmi-pmic.c
+@@ -56,6 +56,7 @@ static const struct of_device_id pmic_spmi_id_table[] = {
+ 	{ .compatible = "qcom,pm8937", .data = N_USIDS(2) },
+ 	{ .compatible = "qcom,pm8941", .data = N_USIDS(2) },
+ 	{ .compatible = "qcom,pm8950", .data = N_USIDS(2) },
++	{ .compatible = "qcom,pm8953", .data = N_USIDS(2) },	/* QRT: its sid 1 (the WCD analog codec) has no REVID */
+ 	{ .compatible = "qcom,pm8994", .data = N_USIDS(2) },
+ 	{ .compatible = "qcom,pm8998", .data = N_USIDS(2) },
+ 	{ .compatible = "qcom,pma8084", .data = N_USIDS(2) },
 diff --git a/drivers/of/of_reserved_mem.c b/drivers/of/of_reserved_mem.c
 index 46e1c3fbc..5f2e8e3cf 100644
 --- a/drivers/of/of_reserved_mem.c

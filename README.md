@@ -189,6 +189,17 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.23.4: the analog codec's half of the PMIC
+
+0.23.3's report on the Mi A1: the MAX98927 amplifier (`1-003a`), the WCD digital codec
+(`c0f0000.codec`) and the headphone amplifier all have their drivers; the card still
+waits for `Primary MI2S: codec dai not found` - and the WCD **analog** codec is not in
+Linux's device list at all.  It lives in the PM8953's second SPMI slave id (`pmic@1`).
+Linux's `qcom-spmi-pmic` knows which PMICs span two slave ids, but not the PM8953: it
+took `pmic@1` for a PMIC of its own, read a revision register that is not there, and
+never created its children.  `qcom,pm8953` is now in its table with two slave ids
+(LKL patch), so `pmic@1` takes its revision from `pmic@0` and the codec appears.
+
 ## 0.23.3: the codecs, asked again
 
 0.23.2 on the Mi A1: the codec's crystal clock is there now; at boot the WCD digital
