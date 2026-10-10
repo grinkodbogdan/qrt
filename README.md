@@ -189,6 +189,16 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.28.1: when the GPU's first job does not come back
+
+0.28.0 on the Mi A1: QRT's very first command stream (one CP_MEM_WRITE - 28 ms in
+0.27.1) timed out after 1 s, so none of the GPU's checks ran and the CPU kept drawing.
+Nothing in that path changed; the log said nothing more.
+
+- The first check waits 3 s, and on a failure logs what Linux knows - its debugfs GPU
+  state (fences, ring pointers, suspended or not) and its own log lines about the GPU
+  (hang detection, recovery) - then tries once more.  The program checks do the same.
+
 ## 0.28.0: QRT's own GPU programs - the transitions drawn by the GPU
 
 0.27.3 measured why copying the CPU's frames does not pay: the pixels leave the CPU's

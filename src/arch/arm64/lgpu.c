@@ -586,16 +586,49 @@ static int seq_wait(u32 s, u32 ms) {
 }
 
 /* check 1: the command processor runs QRT's packets - a value written to memory */
+/* Linux's own view of the GPU when a check fails: its debugfs state (fences, ring
+ * pointers, whether it is suspended) and its log lines about the GPU */
+static void gpu_dump(void) {
+    static const char *const paths[] = { "/sys/kernel/debug/dri/0/gpu", "/sys/kernel/debug/dri/128/gpu", NULL };
+    for (int i = 0; paths[i]; i++) {
+        long f = S(NR_OPENAT, AT_FDCWD, paths[i], 0, 0, 0);
+        if (f < 0) continue;
+        static char b[4096];
+        long n = S(NR_READ, f, b, sizeof b - 1, 0, 0);
+        S(NR_CLOSE, f, 0, 0, 0, 0);
+        b[n > 0 ? n : 0] = 0;
+        int lines = 0;
+        for (char *l = b; *l && lines < 24; ) {
+            char *e = strchr(l, '\n');
+            if (e) *e = 0;
+            if (*l) { LOG("linux's state: %s", l); lines++; }
+            if (!e) break;
+            l = e + 1;
+        }
+        break;
+    }
+    report();
+}
+/* check 1: the command processor runs QRT's packets - a value written to memory.  0.28.0
+ * once saw it time out after 1 s (0.27.x: 28 ms): it waits 3 s now, says what Linux
+ * knows, and tries once more */
 static int test_write(void) {
-    cp = cmd.cpu;
-    scr.cpu[0] = 0;
-    out(pkt7(CP_MEM_WRITE, 3)); out((u32)scr.iova); out((u32)(scr.iova >> 32)); out(0x51525427);
-    u64 t0 = k_now_us();
-    long r = run(1000, NULL, NULL);
-    u32 got = scr.cpu[0];
-    if (r < 0 || got != 0x51525427) { LOG("QRT's first command stream: %ld, read back %x", r, got); return 0; }
-    LOG("QRT's commands run: a CP_MEM_WRITE came back in %llu us", k_now_us() - t0);
-    return 1;
+    for (int tries = 0; tries < 2; tries++) {
+        cp = cmd.cpu;
+        scr.cpu[0] = 0;
+        out(pkt7(CP_MEM_WRITE, 3)); out((u32)scr.iova); out((u32)(scr.iova >> 32)); out(0x51525427 + tries);
+        u64 t0 = k_now_us();
+        long r = run(3000, NULL, NULL);
+        u32 got = scr.cpu[0];
+        if (r >= 0 && got == 0x51525427u + tries) {
+            LOG("QRT's commands run: a CP_MEM_WRITE came back in %llu us%s", k_now_us() - t0, tries ? " (the second try)" : "");
+            return 1;
+        }
+        LOG("QRT's first command stream: %ld after %llu ms, read back %x%s", r, (k_now_us() - t0) / 1000, got,
+            tries ? "" : " - what Linux knows, then once more");
+        if (!tries) { gpu_dump(); thr_sleep_us(2000000); }
+    }
+    return 0;
 }
 /* check 2: the 2D engine copies a 64 x 64 picture exactly - each way of starting it is
  * tried (and a solid fill, which says whether it writes at all); every result is logged */
@@ -678,6 +711,7 @@ static int test_compute(void) {
     if (r < 0 || !done || bad) {
         LOG("the test program: submit %ld, %s, %d of 4096 words wrong (first %d: %x)", r, done ? "done" : "never finished", bad, first,
             first >= 0 ? o.cpu[first] : 0);
+        gpu_dump();
         return 0;
     }
     LOG("QRT's GPU programs run: 4096 invocations exact, %llu us from submit to done", us);
@@ -707,6 +741,7 @@ static int test_trans(void) {
     if (r < 0 || !done || bad) {
         LOG("the transition program: submit %ld, %s, %d of 1024 pixels wrong (first %d: %x)", r, done ? "done" : "never finished", bad, first,
             first >= 0 ? o.cpu[first] : 0);
+        gpu_dump();
         return 0;
     }
     LOG("the transition program blends exactly");
