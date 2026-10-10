@@ -41,15 +41,6 @@ enum { PIPE_3D0 = 0x10, P_GPU_ID = 1, P_GMEM = 2, P_CHIP_ID = 3, P_TIMESTAMP = 5
 static char state[96] = "off";
 const char *gpu_status(void) { return state; }
 
-static int rd(const char *path, char *out, int cap) {
-    long f = S(NR_OPENAT, AT_FDCWD, path, 0, 0, 0);
-    if (f < 0) return -1;
-    long n = S(NR_READ, f, out, cap - 1, 0, 0);
-    S(NR_CLOSE, f, 0, 0, 0, 0);
-    if (n < 0) n = 0;
-    out[n] = 0;
-    return (int)n;
-}
 static void wr(const char *path, const char *t) {
     long f = S(NR_OPENAT, AT_FDCWD, path, 1, 0, 0);
     if (f < 0) return;
@@ -113,10 +104,15 @@ static int firmware(void) {
     return got >= 2;
 }
 
+/* a driver took it: its "driver" link leads to a directory (0.26.0 read the driver's
+ * uevent, which is write-only - every probe looked failed) */
 static int bound(const char *dev) {
-    char p[96], t[8];
-    fmt(p, sizeof p, "/sys/bus/platform/devices/%s/driver/uevent", dev);
-    return rd(p, t, sizeof t) >= 0;
+    char p[96];
+    fmt(p, sizeof p, "/sys/bus/platform/devices/%s/driver", dev);
+    long f = S(NR_OPENAT, AT_FDCWD, p, 0200000, 0, 0);               /* O_DIRECTORY */
+    if (f < 0) return 0;
+    S(NR_CLOSE, f, 0, 0, 0, 0);
+    return 1;
 }
 static int probe(const char *compat_hidden, const char *dev, int secs) {
     if (!arm_unhide(compat_hidden)) { LOG("no %s in the tree", compat_hidden); return 0; }
@@ -127,6 +123,7 @@ static int probe(const char *compat_hidden, const char *dev, int secs) {
     return bound(dev);
 }
 
+static int bound(const char *dev);
 /* what Linux said about it (its own log: the console may not carry it) */
 static void report(void) {
     static char kb[65536];
@@ -151,6 +148,28 @@ static void report(void) {
         LOG("linux said: %s", m);
     }
     if (!nl) LOG("Linux said nothing about the GPU or its IOMMU");
+    static const char *const devs[] = { "1c48000.iommu", "1c00000.gpu", NULL };
+    for (int i = 0; devs[i]; i++) {
+        char p[96];
+        fmt(p, sizeof p, "/sys/bus/platform/devices/%s", devs[i]);
+        long f = S(NR_OPENAT, AT_FDCWD, p, 0200000, 0, 0);
+        if (f >= 0) S(NR_CLOSE, f, 0, 0, 0, 0);
+        LOG("device %s: %s", devs[i], f < 0 ? "not in Linux" : bound(devs[i]) ? "has its driver" : "no driver");
+    }
+    long f = S(NR_OPENAT, AT_FDCWD, "/sys/kernel/debug/devices_deferred", 0, 0, 0);   /* still waiting, and why */
+    if (f >= 0) {
+        static char dd[4096];
+        long n2 = S(NR_READ, f, dd, sizeof dd - 1, 0, 0);
+        S(NR_CLOSE, f, 0, 0, 0, 0);
+        dd[n2 > 0 ? n2 : 0] = 0;
+        for (char *l = dd; *l; ) {
+            char *e = strchr(l, '\n');
+            if (e) *e = 0;
+            if (strstr(l, "1c48000") || strstr(l, "1c00000") || strstr(l, "msm")) { for (char *t = l; *t; t++) if (*t == '\t') *t = ' '; LOG("waiting: %s", l); }
+            if (!e) break;
+            l = e + 1;
+        }
+    }
 }
 
 static long param(long fd, u32 p, u64 *v) {

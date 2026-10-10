@@ -12,6 +12,7 @@
  */
 #include "arm.h"
 #include "sched.h"
+#include "../../kernel/smp.h"
 
 char fb_what[128] = "none";
 u64 fb_other[4][2]; int fb_nother;                 /* other layers' memory: kept out of the heap (main.c) */
@@ -268,6 +269,34 @@ void fb_linux_owns_mdp(void) { }
 void fb_start_watch(void) { }
 /* px is the whole frame (stride pixels a row); the rectangle (x, y, w, h) of it goes to
  * the same place on the screen - as GOP's Blt and the x86-64 kernel's native_present */
+/* one band of rows of a present: converted in cached memory, stored with 8-byte writes.
+ * Pure memory work, so the other cores take bands too (smp_run): a full 1080 x 1920 frame
+ * took 20 ms on one core (0.26.0's log) */
+static struct { const u32 *px; int stride, x, y, w, h; } pj;
+static u8 rowbufs[16][4096 * 4 + 16] __attribute__((aligned(16)));
+static void present_band(void *arg, int i, int n) {
+    (void)arg;
+    int ra = pj.h * i / n, rb = pj.h * (i + 1) / n;
+    usize line = (usize)k.fb_stride * (usize)bpp;
+    if (bpp == 4 && byte_of[0] == 2 && byte_of[1] == 1 && byte_of[2] == 0) {
+        for (int r = ra; r < rb; r++)
+            memcpy(fb + (usize)(pj.y + r) * line + (usize)pj.x * 4, pj.px + (usize)r * pj.stride, (usize)pj.w * 4);
+        return;
+    }
+    u8 *rowbuf = rowbufs[i & 15];
+    int r0 = byte_of[0], g0 = byte_of[1], b0 = byte_of[2];
+    for (int r = ra; r < rb; r++) {
+        u8 *d = fb + (usize)(pj.y + r) * line + (usize)pj.x * (usize)bpp;
+        u8 *b = rowbuf + ((usize)d & 7), *o = b;                  /* the same alignment as d */
+        const u32 *src = pj.px + (usize)r * pj.stride;
+        int nn = MIN(pj.w, 4096);
+        for (int c = 0; c < nn; c++, o += bpp) {
+            u32 v = src[c];
+            o[r0] = (u8)(v >> 16); o[g0] = (u8)(v >> 8); o[b0] = (u8)v;
+        }
+        row_store(d, b, (usize)nn * (usize)bpp);
+    }
+}
 void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     if (!fb) return;
     if (x < 0) { w += x; x = 0; }
@@ -275,29 +304,11 @@ void fb_present(const u32 *px, int stride, int x, int y, int w, int h) {
     if (x + w > (int)k.fb_w) w = (int)k.fb_w - x;
     if (y + h > (int)k.fb_h) h = (int)k.fb_h - y;
     if (w <= 0 || h <= 0) return;
-    px += (usize)y * (usize)stride + (usize)x;
     u64 t0 = k_now_us();
-    usize line = (usize)k.fb_stride * (usize)bpp;
-    if (bpp == 4 && byte_of[0] == 2 && byte_of[1] == 1 && byte_of[2] == 0) {
-        for (int r = 0; r < h; r++) {
-            u8 *d = fb + (usize)(y + r) * line + (usize)x * 4;
-            memcpy(d, px + (usize)r * stride, (usize)w * 4);
-        }
-    } else {
-        static u8 rowbuf[4096 * 4 + 16] __attribute__((aligned(16)));
-        int r0 = byte_of[0], g0 = byte_of[1], b0 = byte_of[2];
-        for (int r = 0; r < h; r++) {
-            u8 *d = fb + (usize)(y + r) * line + (usize)x * (usize)bpp;
-            u8 *b = rowbuf + ((usize)d & 7), *o = b;              /* the same alignment as d */
-            const u32 *s = px + (usize)r * stride;
-            int n = MIN(w, 4096);
-            for (int c = 0; c < n; c++, o += bpp) {
-                u32 v = s[c];
-                o[r0] = (u8)(v >> 16); o[g0] = (u8)(v >> 8); o[b0] = (u8)v;
-            }
-            row_store(d, b, (usize)n * (usize)bpp);
-        }
-    }
+    pj.px = px + (usize)y * (usize)stride + (usize)x; pj.stride = stride; pj.x = x; pj.y = y; pj.w = w; pj.h = h;
+    int bands = (u64)w * (u64)h >= 40000 ? MIN(16, MIN(h, 2 * (smp_workers() + 1))) : 1;
+    if (bands > 1) smp_run(present_band, NULL, bands);
+    else present_band(NULL, 0, 1);
     note_dirty(x, y, w, h);
     fb_us += k_now_us() - t0;
     fb_frames++;

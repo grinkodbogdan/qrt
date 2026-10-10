@@ -53,14 +53,20 @@ int smp_enabled(void) { return nworkers > 0; }
 void smp_set_enabled(int on) { (void)on; }
 int smp_init(void) { return nworkers; }
 
+static volatile int busy;
 void smp_run(smp_job_t fn, void *arg, int count) {
-    if (!nworkers || count < 2) { for (int i = 0; i < count; i++) fn(arg, i, count); return; }
+    /* one job at a time: a second caller (another thread) does its own work alone */
+    if (!nworkers || count < 2 || __atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) {
+        for (int i = 0; i < count; i++) fn(arg, i, count);
+        return;
+    }
     job.fn = fn; job.arg = arg; job.count = count;
     next_idx = 0; done_idx = 0;
     __atomic_fetch_add(&job.gen, 1, __ATOMIC_RELEASE);
     __asm__ volatile("dsb sy; sev" ::: "memory");
     run_indices();                               /* the boot core works too */
     while (__atomic_load_n(&done_idx, __ATOMIC_ACQUIRE) < count) __asm__ volatile("yield");
+    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
 }
 
 /* every core the tree lists but this one; returns how many answered */

@@ -802,14 +802,33 @@ static int lw_set_keys(const u8 tk[16], int gtk_id, const u8 gtk[16]) {
 static const u8 *lw_mac(void) { return mac; }
 
 /* events (scan done, connected, disconnected) and received frames */
+/* nl80211's events: a thread waits in Linux for them and queues them - the shell's loop
+ * (which calls lw_poll every frame) never waits on Linux (0.26.0: the shell stalled for
+ * 300-600 ms while Linux was busy elsewhere) */
+#define EVQ 16
+static struct { u8 m[4096]; long n; } evq[EVQ];
+static volatile u32 ev_head, ev_tail;
+static void events_loop(void *a) {
+    (void)a;
+    for (;;) {
+        u32 h = ev_head;
+        if (h - ev_tail >= EVQ) { thr_sleep_us(20000); continue; }   /* the shell catches up */
+        long n = S6(NR_RECVFROM, nle, evq[h % EVQ].m, sizeof evq[0].m, 0, 0, 0);
+        if (n <= 0) { thr_sleep_us(100000); continue; }
+        evq[h % EVQ].n = n;
+        __asm__ volatile("dmb ish" ::: "memory");
+        ev_head = h + 1;
+    }
+}
 static void lw_poll(void) {
     if (!up) return;
-    static u64 next_events;                                           /* the shell calls this every frame */
-    int events = k_now_ms() >= next_events;
-    if (events) next_events = k_now_ms() + 100;
-    for (int i = 0; i < 8 && events; i++) {
-        long n = S6(NR_RECVFROM, nle, rb, sizeof rb, 0x40, 0, 0);       /* MSG_DONTWAIT */
-        if (n <= 0) break;
+    static int started;
+    if (!started) { started = 1; thr_create("wifi events", events_loop, NULL, 16 << 10); }
+    for (int i = 0; i < 8 && ev_tail != ev_head; i++) {
+        long n = evq[ev_tail % EVQ].n;
+        memcpy(rb, evq[ev_tail % EVQ].m, (usize)n);
+        __asm__ volatile("dmb ish" ::: "memory");
+        ev_tail++;
         for (long o = 0; o + 20 <= n;) {
             u32 len = get32(rb + o);
             if (len < 20 || o + len > (u32)n) break;

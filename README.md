@@ -189,6 +189,25 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.26.1: frames on all cores; the shell never waits on Linux
+
+0.26.0 on the Mi A1: the shell itself used 35-58 % of the CPU and stalled for 300-600 ms
+now and then; "display: 74 frames presented, 20 ms each".  And the GPU's IOMMU "did not
+come up".
+
+- **Presenting on every core** (`fb.c`): the Mi A1's framebuffer holds 3-byte pixels, so
+  each frame is converted pixel by pixel - 20 ms for a full 1080 x 1920 frame on one core,
+  every second while the Clock (or System Monitor) runs.  The rows are now split into
+  bands the other cores take (`smp_run`; the seven helpers sat idle).
+- **The shell no longer waits on Linux:** it read nl80211's events itself, every frame -
+  a call into Linux that waits whenever Linux is busy elsewhere (the stalls).  A thread
+  now waits for those events and queues them; the shell only reads the queue.
+- `smp_run` takes one job at a time; a second caller works alone.
+- **The GPU's IOMMU:** 0.26.0 decided whether a driver had taken a device by reading the
+  driver's `uevent` - write-only, so every probe looked failed.  It checks the driver
+  link now; a failure lists both devices, whether each has a driver, and what Linux
+  says they wait for.
+
 ## 0.26.0: the GPU, first step - up and running under Linux
 
 Asked: the GPU (the Mi A1's Adreno 506; Linux has its driver, msm).  Getting it to draw
