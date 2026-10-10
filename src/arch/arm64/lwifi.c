@@ -274,6 +274,58 @@ static int start_pronto(void) {
     return 0;
 }
 
+/* wlan0's MAC address.  Android hands the Pronto core its address from persist's
+ * wlan_mac.bin; wcn36xx reads no such file, wlan0 is 00:00:00:00:00:00, and mac80211 will
+ * not bring an interface up without a valid one (-EADDRNOTAVAIL, 0.22.2).  The phone's
+ * own address if persist has it, else one made from the eMMC's serial number (CID): the
+ * same at every boot, marked locally administered. */
+static int hexv(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+static int testing;
+static void set_mac(void) {
+    if (testing) memset(mac, 0, 6);                                    /* QEMU: take the phone's path */
+    int valid = 0;
+    for (int i = 0; i < 6; i++) if (mac[i]) valid = 1;
+    if (valid && !(mac[0] & 1)) return;                                /* the driver has one */
+    u8 m[6] = { 0 };
+    const char *how = NULL;
+    const char *per = argon_part_path("persist");
+    if (per) {
+        char p[128], t[256];
+        fmt(p, sizeof p, "%s/wlan_mac.bin", per);
+        const char *k = rd(p, t, sizeof t) > 0 ? strstr(t, "Intf0MacAddress=") : NULL;
+        if (k) {
+            k += 16;
+            int ok = 1;
+            for (int i = 0; i < 6 && ok; i++) {
+                int a = hexv(k[2 * i]), b = hexv(k[2 * i + 1]);
+                if (a < 0 || b < 0) ok = 0; else m[i] = (u8)(a << 4 | b);
+            }
+            if (ok && !(m[0] & 1) && (m[0] | m[1] | m[2] | m[3] | m[4] | m[5])) how = "the phone's own (persist/wlan_mac.bin)";
+        }
+    }
+    if (!how) {
+        char cid[64] = "";
+        if (rd("/sys/block/mmcblk0/device/cid", cid, sizeof cid) <= 0) strlcpy(cid, "qrt", sizeof cid);
+        u64 h = 0xcbf29ce484222325ull;                                     /* FNV-1a */
+        for (char *c = cid; *c && *c != '\n'; c++) { h ^= (u8)*c; h *= 0x100000001b3ull; }
+        for (int i = 1; i < 6; i++) m[i] = (u8)(h >> (8 * i));
+        m[0] = 0x02;                                                       /* locally administered, unicast */
+        how = "made from the eMMC's serial number";
+    }
+    long fd = S(NR_SOCKET, 2, 2, 0, 0, 0);
+    if (fd < 0) return;
+    u8 ifr[40];
+    memset(ifr, 0, sizeof ifr);
+    strlcpy((char *)ifr, ifname, 16);
+    put16(ifr + 16, 1);                                                    /* ARPHRD_ETHER */
+    memcpy(ifr + 18, m, 6);
+    long r = S(NR_IOCTL, fd, 0x8924, ifr, 0, 0);                           /* SIOCSIFHWADDR */
+    S(NR_CLOSE, fd, 0, 0, 0, 0);
+    if (r < 0) { LOG("could not set %s's address (error %ld)", ifname, r); return; }
+    memcpy(mac, m, 6);
+    LOG("%s address %02x:%02x:%02x:%02x:%02x:%02x, %s", ifname, m[0], m[1], m[2], m[3], m[4], m[5], how);
+}
+
 /* interface up: mac80211 starts the radio (wcn36xx loads its firmware) */
 static int if_up_name(const char *name, int on) {
     long fd = S(NR_SOCKET, 2, 2, 0, 0, 0);                             /* AF_INET, SOCK_DGRAM */
@@ -335,7 +387,7 @@ static int lw_present(void) {
  * What hostapd does, cut to an open network: beacons from a template, authentication and
  * association answered by hand, the client added as an authorized station; then a frame
  * every second to the client, and what the client sends is counted. */
-static int testing, testing_wpa, ap_if, ap_pkt = -1, ap_sock = -1;
+static int testing_wpa, ap_if, ap_pkt = -1, ap_sock = -1;
 static u8 ap_mac[6];
 static volatile int ap_assoc;
 static const u8 rsn_ie[22] = { 48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0 };
@@ -587,6 +639,7 @@ static void start_work(void *a) {
             wr(p, "1");
             /* rfkill: unblocked (a soft block refuses the interface) */
             for (int i = 0; i < 4; i++) { char rp[64]; fmt(rp, sizeof rp, "/sys/class/rfkill/rfkill%d/soft", i); wr(rp, "0"); }
+            set_mac();
             int r = -1;
             for (int t = 0; t < 6 && (r = if_up(1)) != 0; t++) {        /* the core may still be booting */
                 LOG("%s would not come up (error %d)%s", ifname, r, t < 5 ? ", trying again" : "");

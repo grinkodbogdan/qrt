@@ -189,6 +189,17 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.22.3: wlan0 gets a MAC address
+
+0.22.2 on the Mi A1: bringing `wlan0` up failed with error -99 (`EADDRNOTAVAIL`):
+mac80211 will not start an interface without a valid MAC address, and `wlan0` had none -
+Android hands the Pronto core its address from persist's `wlan_mac.bin`, which
+`wcn36xx` does not read.  Now (`lwifi.c`) `wlan0` gets the phone's own address from
+`persist/wlan_mac.bin` (`Intf0MacAddress=...`), or else one made from the eMMC's serial
+number - the same at every boot, locally administered - before it is brought up.  The
+QEMU test takes the same path (its radio's address is cleared first) and joins the
+WPA2 test network with the made-up address.
+
 ## 0.22.2: why wlan0 does not come up, in the log
 
 0.22.1 on the Mi A1: the Pronto core starts through the secure world (`remoteproc0
