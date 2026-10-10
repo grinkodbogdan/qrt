@@ -114,6 +114,24 @@ static int bound(const char *dev) {
     S(NR_CLOSE, f, 0, 0, 0, 0);
     return 1;
 }
+/* a platform device's name by its address: a node with a "reg" is "1c00000.gpu", one with
+ * only "ranges" (the IOMMU) is named after its path - 0.26.1 looked for "1c48000.iommu" */
+static char iommu_dev[96] = "1c48000.iommu";
+static void find_dev(const char *addr, char *out, usize cap) {
+    long fd = S(NR_OPENAT, AT_FDCWD, "/sys/bus/platform/devices", 0200000, 0, 0);
+    if (fd < 0) return;
+    static char ents[8192];
+    long n;
+    char best[96] = "";
+    while ((n = S(NR_GETDENTS64, fd, ents, sizeof ents, 0, 0)) > 0)
+        for (long o = 0; o < n; o += *(u16 *)(ents + o + 16)) {
+            const char *nm = ents + o + 19;
+            if (!strstr(nm, addr) || strstr(nm, "ctx")) continue;       /* the IOMMU, not its context banks */
+            if (!best[0] || strlen(nm) < strlen(best)) strlcpy(best, nm, sizeof best);
+        }
+    S(NR_CLOSE, fd, 0, 0, 0, 0);
+    if (best[0]) strlcpy(out, best, cap);
+}
 static int probe(const char *compat_hidden, const char *dev, int secs) {
     if (!arm_unhide(compat_hidden)) { LOG("no %s in the tree", compat_hidden); return 0; }
     for (int t = 0; t < secs * 5 && !bound(dev); t++) {
@@ -148,7 +166,7 @@ static void report(void) {
         LOG("linux said: %s", m);
     }
     if (!nl) LOG("Linux said nothing about the GPU or its IOMMU");
-    static const char *const devs[] = { "1c48000.iommu", "1c00000.gpu", NULL };
+    const char *const devs[] = { iommu_dev, "1c00000.gpu", NULL };
     for (int i = 0; devs[i]; i++) {
         char p[96];
         fmt(p, sizeof p, "/sys/bus/platform/devices/%s", devs[i]);
@@ -195,7 +213,9 @@ static void gpu_loop(void *a) {
     fmt(state, sizeof state, "starting");
     if (!firmware()) { fmt(state, sizeof state, "off: no firmware on the vendor partition"); return; }
     plog_state(PLOG_GPU_STARTING);
-    if (!probe("qrt-,msm-iommu-v2", "1c48000.iommu", 10)) {
+    find_dev("1c48000", iommu_dev, sizeof iommu_dev);
+    LOG("the IOMMU is %s in Linux", iommu_dev);
+    if (!probe("qrt-,msm-iommu-v2", iommu_dev, 10)) {
         plog_state(PLOG_LINUX_OK);
         fmt(state, sizeof state, "off: its IOMMU did not come up (see the log)");
         LOG("%s", state);

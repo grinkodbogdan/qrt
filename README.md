@@ -189,6 +189,22 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.26.2: only fast cores draw; the IOMMU by its real name
+
+0.26.1 on the Mi A1: frames took 36-45 ms to present (20 ms before the other cores
+helped), and the GPU's IOMMU was "not in Linux".
+
+- **Slow cores stay out of the way** (`smp.c`): the Mi A1's eight cores sit in two
+  clusters, and with CPU frequency control kept from Linux nothing raises the second
+  cluster's clock - a band of a frame given to a slow core held up the whole frame.
+  Every core now times a fixed loop when it starts (the best of three; the boot core's
+  with interrupts masked); only those within 30 % of the fastest take drawing work, the
+  others stay parked.  The log says how fast each is
+  (`smp: ... speed against the fastest: boot:100% 1:98% ... 4:31%`).
+- **The GPU's IOMMU by its real name:** its node has `ranges` and no `reg`, so Linux
+  names its device after its path, not "1c48000.iommu" - 0.26.1 asked Linux to probe a
+  device that does not exist.  The name is now looked up in Linux's device list.
+
 ## 0.26.1: frames on all cores; the shell never waits on Linux
 
 0.26.0 on the Mi A1: the shell itself used 35-58 % of the CPU and stalled for 300-600 ms

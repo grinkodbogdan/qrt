@@ -12,6 +12,7 @@
 extern char secondary_entry[], vectors[];
 static struct ctx { u64 sp, ttbr, tcr, mair, sctlr, vbar, entry, idx; } __attribute__((aligned(64))) ctx[MAXCPU];
 static volatile u32 alive[MAXCPU];
+static u64 mp[MAXCPU];
 static int nworkers;
 static volatile struct { smp_job_t fn; void *arg; int count; u32 gen; } job;
 static volatile int next_idx, done_idx;
@@ -37,9 +38,29 @@ static void run_indices(void) {
     }
 }
 
+/* how fast a core is: a fixed loop, timed on the counter (the clusters may run at very
+ * different clocks - a band given to a slow core holds up the whole frame) */
+static volatile u64 speed[MAXCPU];                       /* counter ticks for the loop */
+static volatile int use[MAXCPU];                         /* fast enough to take jobs */
+static u64 time_once(void);
+static u64 time_loop(void) {                              /* the best of three: noise only slows */
+    u64 b = time_once();
+    for (int i = 0; i < 2; i++) { u64 t = time_once(); if (t < b) b = t; }
+    return b;
+}
+static u64 time_once(void) {
+    u64 t0, t1;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t0));
+    volatile u32 x = 0;
+    for (u32 i = 0; i < 2000000; i++) x += i;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t1));
+    return t1 - t0;
+}
 static void secondary_main(u64 idx) {
+    speed[idx] = time_loop();
     alive[idx] = 1;
     __asm__ volatile("dsb sy; sev" ::: "memory");
+    while (!use[idx]) __asm__ volatile("wfe");          /* parked until chosen (a slow one stays) */
     u32 seen = job.gen;
     for (;;) {
         while (__atomic_load_n(&job.gen, __ATOMIC_ACQUIRE) == seen) __asm__ volatile("wfe");
@@ -106,8 +127,27 @@ int arm_smp_start(void) {
         }
         if (!alive[idx]) { klog("smp: core %llx started but never answered", mpidr); continue; }
         started++;
-        nworkers = started;                       /* usable from now on */
+        mp[idx] = mpidr;
     }
-    klog("smp: %d core(s) in the tree; this one runs the threads, %d help with drawing", listed ? listed : 1, started);
-    return started;
+    /* only cores about as fast as this one take drawing work */
+    u64 f = irq_save();
+    u64 mine = time_loop();                                           /* not interrupted */
+    irq_restore(f);
+    u64 best = mine;                                                  /* against the fastest core */
+    for (int i = 1; i <= started; i++) if (speed[i] && speed[i] < best) best = speed[i];
+    char line[160] = "";
+    int fast = 0;
+    fmt(line, sizeof line, " boot:%llu%%", best * 100 / mine);
+    for (int i = 1; i <= started; i++) {
+        u64 sp = speed[i];
+        int ok = sp && sp * 10 <= best * 13;                          /* within 30 % of the fastest */
+        usize l = strlen(line);
+        fmt(line + l, sizeof line - l, " %llx:%llu%%", mp[i], sp ? best * 100 / sp : 0);
+        if (ok) { use[i] = 1; fast++; }
+    }
+    __asm__ volatile("dsb sy; sev" ::: "memory");
+    nworkers = fast;
+    klog("smp: %d core(s) in the tree, %d started; speed against the fastest:%s", listed ? listed : 1, started, line);
+    klog("smp: %d help with drawing%s", fast, fast < started ? " (the slower ones stay parked)" : "");
+    return fast;
 }
