@@ -60,7 +60,8 @@ int gic_init(void) {
         if (type == 1 && num < 16) vtimer = 16 + num;
     }
     *(volatile u8 *)(usize)(dist + 0x400 + vtimer) = 0x80;    /* ... but the virtual timer, above the mask */
-    W32(dist + 0x100, 1u << vtimer);
+    for (int i = 0; i < 16; i++) *(volatile u8 *)(usize)(dist + 0x400 + i) = 0x80;   /* and the other cores' signals (SGIs) */
+    W32(dist + 0x100, 1u << vtimer | 0xffff);
     W32(dist, 1);
     W32(cpu + 0x04, 0x90);                                    /* GICC_PMR: SPIs (0xa0) stay below it */
     W32(cpu, 1);
@@ -73,11 +74,43 @@ int gic_init(void) {
     return 1;
 }
 
+/* ---- the other cores (smp.c): their own CPU interface, timer and signals ---- */
+/* this core's bit in the distributor's CPU target lists (ITARGETSR0 reads it, banked) */
+u32 gic_my_mask(void) { u32 v = dist ? R32(dist + 0x800) : 0; return (v | v >> 8 | v >> 16 | v >> 24) & 0xff; }
+/* a signal (SGI id, 0-15) to the cores in mask */
+void gic_sgi(u32 mask, u32 id) {
+    if (!dist || !mask) return;
+    __asm__ volatile("dsb ish" ::: "memory");
+    W32(dist + 0xf00, (mask & 0xff) << 16 | (id & 15));
+}
+/* a helper core: its banked registers - the timer and signals above the mask; no device
+ * interrupt (SPI) targets it */
+void gic_cpu_init_helper(u32 me) {
+    if (!dist) return;
+    for (int i = 0; i < 16; i++) *(volatile u8 *)(usize)(dist + 0x400 + i) = 0x80;
+    *(volatile u8 *)(usize)(dist + 0x400 + vtimer) = 0x80;
+    W32(dist + 0x100, 1u << vtimer | 0xffff);
+    for (u32 i = 32; i < lines; i++) {                        /* SPIs aimed at this core: not any more */
+        volatile u8 *t = (volatile u8 *)(usize)(dist + 0x800 + i);
+        if (*t & me) *t = (u8)(*t & ~me);
+    }
+    W32(cpu + 0x04, 0x90);
+    W32(cpu, 1);
+}
+u32 gic_vtimer(void) { return vtimer; }
+u64 gic_tick_count(void) { return tick_cnt; }
+u64 gic_cpu_base(void) { return cpu; }
+
 /* the IRQ exception (main.c), interrupts masked */
 void gic_irq(void) {
     for (int n = 0; n < 16; n++) {
         u32 iar = R32(cpu + 0x0c), id = iar & 0x3ff;
         if (id >= 1020) return;
+        if (id < 16) {                                            /* a helper core: a program's run ended (smp.c) */
+            W32(cpu + 0x10, iar);
+            thr_tick();                                           /* wakes its thread (arm_urun_poll), which may run now */
+            continue;
+        }
         if (id != vtimer) {                                       /* not ours: masked, so it cannot storm */
             W32(dist + 0x180 + 4 * (id / 32), 1u << (id % 32));
             W32(cpu + 0x10, iar);

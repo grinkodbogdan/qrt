@@ -49,7 +49,8 @@ void  phys_write(u64 pa, const void *src, usize len);
 u64   pmm_total_bytes(void);
 
 /* threads: sched.c's, by x86-64's names */
-#define ncpus 1
+int arm_helpers(void);                                  /* smp.c: cores besides this one that run programs */
+#define ncpus (1 + arm_helpers())
 static inline thread_t *thread_current(void) { return thr_self(); }
 static inline void thread_yield(void) { thr_yield(); }
 static inline void thread_sleep_ms(u64 ms) { thr_sleep_us((ms ? ms : 1) * 1000); }
@@ -57,8 +58,9 @@ static inline void thread_wake(thread_t *t) { if (t) thr_wake(t); }
 static inline void thread_stop(thread_t *t) { thr_stop(t); }
 static inline void thread_exit(void) { thr_exit(); }
 static inline int  sched_threads(thread_t **out, int max) { return thr_list(out, max); }
-static inline int  sched_smp_enabled(void) { return 0; }
-static inline void sched_quiesce_cr3(u64 cr3) { (void)cr3; }
+int sched_smp_enabled(void);                            /* smp.c: programs run on the other cores too */
+void arm_helpers_quiesce(u64 cr3);                  /* smp.c: no helper core has it loaded */
+static inline void sched_quiesce_cr3(u64 cr3) { arm_helpers_quiesce(cr3); }
 static inline void tlb_shootdown(u64 cr3) { (void)cr3; }
 void      thread_block(void);
 thread_t *thread_create_suspended(const char *name, void (*fn)(void *), void *arg, u64 cr3);

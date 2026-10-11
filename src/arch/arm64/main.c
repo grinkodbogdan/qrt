@@ -168,7 +168,9 @@ void argon_irq_tail(u64 pc);
 void arm_user_sync(void *f);
 void arm_user_irq_tail(void *f);
 int  arm_kernel_user_fault(void *f);
+void arm_helper_exception(u64 kind, u64 *frame);
 void arm_exception(u64 kind, u64 *frame) {
+    if (SYSREG_R(tpidr_el1)) { arm_helper_exception(kind, frame); return; }   /* a helper core (smp.c): its program */
     void *uf = (u8 *)frame - 528;                                 /* uentry.c's frame_t: the FP/SIMD area first */
     if (kind == 5 || kind == 9) {                                 /* IRQ: the scheduler's tick, devices */
         if (kind == 5 && thr_is_main()) {                         /* where the shell was (hal.c's watchdog) */
@@ -333,6 +335,7 @@ int arm_unpack_files(const u8 *rd, usize len) {
 void hal_arm_init(void);
 
 void arm_main(const void *dtb, u64 base) {
+    SYSREG_W(tpidr_el1, 0);                                       /* the boot core (helpers hold their index: smp.c) */
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cnt_freq));
     if (!cnt_freq) cnt_freq = 19200000;
     cnt_boot = cntvct();

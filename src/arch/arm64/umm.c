@@ -155,10 +155,16 @@ int as_move(u64 cr3, u64 from, u64 to) {
     return 1;
 }
 
-/* the present (or parked) pages of [start, end), skipping empty tables in bulk */
+/* the present (or parked) pages of [start, end), skipping empty tables in bulk.  The TLB
+ * is flushed once for the address space, not page by page (each flush goes to every
+ * core: munmap and mprotect of a big range - Ladybird's heaps - kept the boot core busy
+ * with them, 0.32.0); a permission change needs no break before make; freed frames go
+ * back only after the flush, so no core can still reach them through its TLB. */
 static void walk(u64 cr3, u64 start, u64 end, int prot, int unmap) {
     u64 va = MAX(start & ~(PAGE - 1), USER_BASE);
     end = MIN(end, USER_HIGH_END);
+    u64 freeq[64];
+    int nfree = 0, changed = 0, icache = 0;
     while (va < end) {
         u64 e0 = tbl(cr3)[(va >> 39) & 511];
         if (!(e0 & 1)) { va = (va + (1ull << 39)) & ~((1ull << 39) - 1); continue; }
@@ -168,12 +174,29 @@ static void walk(u64 cr3, u64 start, u64 end, int prot, int unmap) {
         if (!(e2 & 1)) { va = (va + (2ull << 20)) & ~((2ull << 20) - 1); continue; }
         u64 *pte = &tbl(e2)[(va >> 12) & 511];
         if (HAS(*pte)) {
-            u64 e = *pte;
-            if (unmap) { set_pte(cr3, pte, va, 0); if (!(e & D_SHARED)) pmm_free(e & D_ADDR); }
-            else set_pte(cr3, pte, va, reprotect(e, prot));
+            u64 e = *pte, n = unmap ? 0 : reprotect(e, prot);
+            if (n != e) {
+                if ((n & 1) && !(n & D_UXN) && (!(e & 1) || (e & D_UXN))) {   /* becomes executable: clean its lines */
+                    for (u64 a = n & D_ADDR; a < (n & D_ADDR) + PAGE; a += 64) __asm__ volatile("dc cvau, %0" : : "r"(a) : "memory");
+                    icache = 1;
+                }
+                *pte = n;
+                changed = 1;
+                if (unmap && !(e & D_SHARED)) {
+                    if (nfree == 64) {
+                        tlb_asid(cr3);
+                        for (int i = 0; i < nfree; i++) pmm_free(freeq[i]);
+                        nfree = 0;
+                    }
+                    freeq[nfree++] = e & D_ADDR;
+                }
+            }
         }
         va += PAGE;
     }
+    if (changed) tlb_asid(cr3);
+    if (icache) __asm__ volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
+    for (int i = 0; i < nfree; i++) pmm_free(freeq[i]);
 }
 void as_unmap_range(u64 cr3, u64 start, u64 end) { walk(cr3, start, end, 0, 1); }
 void as_protect_range(u64 cr3, u64 start, u64 end, int prot) { walk(cr3, start, end, prot, 0); }

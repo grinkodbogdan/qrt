@@ -43,6 +43,7 @@ struct thr {
     u64 wp_page[16];                 /* read-only pages this system call writes (uentry.c): 8 runs [start, end) */
     int wp_n;
     void *uw;                        /* the wait it is in (src/user/uwait.c) */
+    struct urun *urun;               /* its runs on the helper cores (smp.c) */
 };
 typedef struct sem sem_t;
 typedef struct mtx mtx_t;

@@ -25,7 +25,8 @@ static thr_t *cur = &main_thr;
 static int nthreads = 1;
 static u64 switches;
 static u64 last_switch, idle_us, idle_total;     /* k_now_us() of the last switch; time in wfi */
-static int main_boost;               /* the shell was woken: it runs next (the UI stays responsive) */
+static int main_boost;
+static volatile u64 wake_gen;        /* thr_wake()s: the idle loop looks again */               /* the shell was woken: it runs next (the UI stays responsive) */
 static void account(void) { u64 now = k_now_us(); cur->run_us += now - last_switch; last_switch = now; }
 
 thr_t *thr_self(void) { return cur; }
@@ -190,11 +191,16 @@ static void schedule_inner(void) {
         account();
         u64 gic_ticks(void);
         void gic_wake_in(u64 us);
+        u64 wg = wake_gen;
         if (gic_ticks())
-            while (k_now_us() < soonest) {                        /* the timer wakes it: the tick or sooner */
+            while (k_now_us() < soonest && wake_gen == wg) {      /* the timer wakes it: the tick or sooner; or a wakeup (a helper core's signal) */
                 u64 now = k_now_us();
                 if (soonest > now) gic_wake_in(soonest - now);
                 __asm__ volatile("wfi");
+                /* interrupts are masked here: take what woke the core by hand - a helper
+                 * core's signal (a program's run ended) wakes its thread now, not at the tick */
+                void gic_irq(void);
+                gic_irq();
             }
         else while (k_now_us() < soonest) __asm__ volatile("yield");    /* no tick (yet): watch the clock */
         u64 now = k_now_us();
@@ -209,6 +215,8 @@ static void schedule_inner(void) {
  * whole round of every ready thread (Ladybird has dozens: the shell stalled for most of a
  * second at a time, 0.30.2) - the others get one slice in turn between its frames. */
 void thr_tick(void) {
+    void arm_urun_poll(void);
+    arm_urun_poll();                                              /* runs on the helper cores that ended (smp.c) */
     u64 soonest;
     thr_t *t = pick(&soonest);
     if (t && t != cur && cur->state == T_READY) {
@@ -233,6 +241,7 @@ void thr_sleep_until(u64 us) {
 }
 void thr_wake(thr_t *t) {
     u64 f = irq_save();
+    wake_gen++;
     if (t && (t->state == T_SLEEP || t->state == T_BLOCKED)) { t->state = T_READY; if (t == &main_thr) main_boost = 1; }
     irq_restore(f);
 }
@@ -351,6 +360,13 @@ void thr_report(void) {
     klog("cpu: %llu s: shell %llu%%, idle %llu%%, %d others %llu%% (top %s %llu%%, %s %llu%%, %s %llu%%); %llu ticks, %llu switches",
          span / 1000000, shell, idle, nthreads - 1, rest, nm[0], pct[0], nm[1], pct[1], nm[2], pct[2], tk - last_ticks, sw - last_sw);
     last_ticks = tk; last_sw = sw;
+    int arm_helpers(void);
+    if (arm_helpers()) {
+        void arm_helpers_stats(u64 span_us, u64 *busy_pct, u64 *runs);
+        u64 bp, rn;
+        arm_helpers_stats(span, &bp, &rn);
+        klog("cpu: %d more cores run programs: %llu%% busy, %llu runs (each ends in a system call, a fault or a slice)", arm_helpers(), bp, rn);
+    }
     void fb_stats(u64 *frames, u64 *us);
     u64 fr, fus;
     fb_stats(&fr, &fus);

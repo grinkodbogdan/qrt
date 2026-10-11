@@ -64,17 +64,20 @@ void arm_user_frame(frame_t *f, u64 pc, u64 sp) {
     f->sp = sp;
     f->pstate = 0;                                                /* EL0t, interrupts on */
 }
+static void arm_user_continue(frame_t *f);
 /* a new program's first thread (proc.c) */
 void enter_user(u64 pc, u64 sp) {
     frame_t f;
     arm_user_frame(&f, pc, sp);
     SYSREG_W(tpidr_el0, thr_self()->fs_base);
+    arm_user_continue(&f);
     arm_enter_user(&f);
 }
 /* a new thread or a forked process: from a copy of its parent's frame */
 void enter_user_frame(frame_t *src) {
     frame_t f = *src;
     SYSREG_W(tpidr_el0, thr_self()->fs_base);
+    arm_user_continue(&f);
     arm_enter_user(&f);
 }
 
@@ -102,14 +105,14 @@ static void user_return(frame_t *f) {
     }
 }
 
-/* EL0 synchronous exceptions (arm_exception's kind 8), interrupts masked on entry */
-void arm_user_sync(frame_t *f) {
+/* an EL0 synchronous exception: a system call, a page fault - on this core, or on a
+ * helper core (smp.c) whose registers f now holds; interrupts masked on entry */
+static void user_sync(frame_t *f, u64 esr, u64 far) {
     thread_t *t = thr_self();
-    u64 esr = SYSREG_R(esr_el1), far = SYSREG_R(far_el1), ec = esr >> 26;
+    u64 ec = esr >> 26;
     proc_t *p = t->proc;
     if (!p) { klog("EL0 exception (esr %llx) in kernel thread %s", esr, t->name ? t->name : "?"); thr_park(); }
     if (t->state == T_DEAD) thr_exit();
-    t->fs_base = SYSREG_R(tpidr_el0);                             /* the program sets it itself: fork and clone copy it */
     __asm__ volatile("msr daifclr, #2" ::: "memory");
     if (ec == 0x15) {                                             /* SVC: linux.c (signals included) */
         syscall_dispatch(f);
@@ -138,10 +141,38 @@ void arm_user_sync(frame_t *f) {
     user_return(f);
     __asm__ volatile("msr daifset, #2" ::: "memory");
 }
+void arm_user_sync(frame_t *f) {
+    thr_self()->fs_base = SYSREG_R(tpidr_el0);                    /* the program sets it itself: fork and clone copy it */
+    user_sync(f, SYSREG_R(esr_el1), SYSREG_R(far_el1));
+    arm_user_continue(f);
+}
 
 /* after an interrupt taken from EL0 (the scheduler may have run others meanwhile) */
 void arm_user_irq_tail(frame_t *f) {
     user_return(f);
+    arm_user_continue(f);
+}
+
+/* Back to the program: on a helper core when there are any (smp.c) - again and again,
+ * each of its exceptions there taken here - else on this one, by the caller's return */
+u64  arm_urun(frame_t *f, u64 *esr, u64 *far);
+int  arm_helpers(void);
+static void arm_user_continue(frame_t *f) {
+    thread_t *t = thr_self();
+    while (arm_helpers() && t->proc) {
+        u64 esr, far;
+        t->in_sys = 1;                                            /* out of reach of exit_group's stop (proc.c): it comes back */
+        u64 kind = arm_urun(f, &esr, &far);
+        t->in_sys = 0;
+        if (t->state == T_DEAD) thr_exit();
+        if (t->proc->killed) {                                    /* the process is going (Stop, exit_group) */
+            __asm__ volatile("msr daifclr, #2" ::: "memory");
+            bkl_lock();
+            proc_thread_exit(137);
+        }
+        if (kind == 8) user_sync(f, esr, far);
+        else { __asm__ volatile("msr daifclr, #2" ::: "memory"); user_return(f); __asm__ volatile("msr daifset, #2" ::: "memory"); }
+    }
 }
 
 /* An abort at a program's address in the kernel (EL1): its system call touching a page

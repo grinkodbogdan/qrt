@@ -189,6 +189,32 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.32.0: programs on all eight cores
+
+Until now the Mi A1's other seven cores only helped draw the shell; everything else ran
+on one.  Now programs run on all eight.  Again only a new kernel: `fastboot boot
+qrt-0.32.0-mi-a1-boot.img` (the rootfs stays).
+
+- **The kernel stays on the boot core** - the shell, Linux's drivers, every system call
+  - exactly as it was written, for one core.  **Programs' code runs on the other seven**
+  (`src/arch/arm64/smp.c`): a thread about to go back to user mode is handed to a free
+  core, which loads its address space, thread pointer and registers and runs it until
+  it makes a system call, faults, or its 10 ms slice ends with others waiting.  The
+  registers come back to the boot core (a signal between cores), the thread takes the
+  exception there as before (`uentry.c`), and goes out again.  A round trip takes tens
+  of microseconds; meanwhile the boot core is free for the shell and Linux.
+- **Programs see eight cores** (`nproc`, `/proc/cpuinfo`, `sched_getaffinity`), so
+  Ladybird sizes its thread pools for them.
+- A stop, a signal or `exit_group` calls a running thread back from its core at once;
+  an address space is never freed while a core still has it loaded.
+- Idle cores sleep (`wfi`) until the boot core signals work.
+- munmap and mprotect of large ranges flush the TLB once instead of page by page (each
+  flush reaches every core).
+- `tests/linux/cores.c`: the same arithmetic on one thread, then split over every core.
+  In QEMU (8 emulated cores on a 4-thread host) it runs 2.6-3.7x faster split; all the
+  other ARM tests pass on 8 cores and on 1.
+- The log's `cpu:` lines now say how busy the other cores were.
+
 ## 0.31.2: waiting without looking
 
 0.31.1 on the Mi A1 browsed, but with Ladybird open everything was slow, the shell too.

@@ -305,7 +305,8 @@ static int gen_os_release(char *b, int cap) {
 static int gen_cpuinfo(char *b, int cap) {
     u64 midr;
     __asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
-    int n = 0, cores = 1 + smp_workers();
+    int arm_helpers(void);
+    int n = 0, cores = 1 + arm_helpers();                       /* every core runs programs (0.32.0) */
     /* the chip by name, first (fastfetch shows "Hardware" as the CPU, and reads one block) */
     int fdt_node(const char *path);
     const void *fdt_prop(int node, const char *name, int *len);
