@@ -85,6 +85,8 @@ static struct helper {
     volatile u64 ttbr;               /* the address space it has loaded (0: the kernel's) */
     u32 gicmask;
     volatile u64 busy_us, runs;
+    volatile u64 crash_kind, crash_esr, crash_elr, crash_far;
+    int crash_told;
 } hc[MAXCPU];
 static volatile int qlock;
 static urun_t *qhead, *qtail, *done;
@@ -101,6 +103,7 @@ void gic_cpu_init_helper(u32 me);
 u32  gic_vtimer(void);
 u64  gic_tick_count(void);
 u64  gic_cpu_base(void);
+u64  gic_dist(void);
 extern u64 kernel_l1_phys;
 
 static u64 helper_idx(void) { return SYSREG_R(tpidr_el1); }
@@ -119,8 +122,12 @@ static u64 now_us(void) {
 static volatile u32 idle_mask;
 static void helper_sleep(struct helper *h, u32 seen) {
     __atomic_fetch_or(&idle_mask, h->gicmask, __ATOMIC_SEQ_CST);
-    if (!__atomic_load_n(&qhead, __ATOMIC_SEQ_CST) && __atomic_load_n(&job.gen, __ATOMIC_SEQ_CST) == seen)
+    if (!__atomic_load_n(&qhead, __ATOMIC_SEQ_CST) && __atomic_load_n(&job.gen, __ATOMIC_SEQ_CST) == seen) {
+        /* a lost signal costs 20 ms, not the program */
+        __asm__ volatile("msr cntv_tval_el0, %0; msr cntv_ctl_el0, %1; isb" : : "r"(gic_tick_count() * 2), "r"(1ull));
         __asm__ volatile("wfi" ::: "memory");
+        htimer(0);
+    }
     __atomic_fetch_and(&idle_mask, ~h->gicmask, __ATOMIC_SEQ_CST);
     u64 cpu = gic_cpu_base();                             /* the signal: taken by hand (interrupts stay masked) */
     for (int n = 0; n < 16; n++) {
@@ -184,7 +191,16 @@ static void helper_loop(u64 idx) {
 void arm_helper_exception(u64 kind, u64 *frame) {
     struct helper *h = &hc[helper_idx()];
     urun_t *r = h->run;
-    if (kind < 8 || !r) for (;;) __asm__ volatile("wfe");
+    if (kind < 8 || !r) {                                 /* a kernel bug on this core: say so (arm_urun_poll), stop it */
+        h->crash_kind = kind ? kind : 100; h->crash_esr = SYSREG_R(esr_el1); h->crash_elr = SYSREG_R(elr_el1); h->crash_far = SYSREG_R(far_el1);
+        __atomic_fetch_and(&idle_mask, ~h->gicmask, __ATOMIC_SEQ_CST);
+        if (r) {                                          /* its program goes back, as it was before this run */
+            r->kind = 9; r->esr = r->far = 0;
+            ql(); r->state = 3; r->next = done; done = r; h->run = NULL; qu();
+        }
+        gic_sgi(boot_mask, 2);
+        for (;;) __asm__ volatile("wfi");
+    }
     u64 esr = 0, far = 0;
     if (kind == 8) { esr = SYSREG_R(esr_el1); far = SYSREG_R(far_el1); }
     else if (kind == 9) {
@@ -263,6 +279,13 @@ u64 arm_urun(frame_t *f, u64 *esr, u64 *far) {
 
 /* the boot core (SGI 2, and every tick): threads whose run ended go on */
 void arm_urun_poll(void) {
+    for (int i = 1; i < MAXCPU; i++)
+        if (hc[i].crash_kind && !hc[i].crash_told) {
+            hc[i].crash_told = 1;
+            extern char _start[];
+            klog("smp: core %llx stopped: exception %llu in the kernel at +%llx (esr %llx, address %llx); the others go on",
+                 mp[i], hc[i].crash_kind, hc[i].crash_elr - (u64)(usize)_start, hc[i].crash_esr, hc[i].crash_far);
+        }
     if (!__atomic_load_n(&done, __ATOMIC_ACQUIRE)) return;
     u64 fl = irq_save();
     ql();
@@ -308,15 +331,29 @@ void arm_helpers_stats(u64 span_us, u64 *busy_pct, u64 *runs) {
     last_busy = b; last_runs = n;
 }
 
+/* the boot core's word to each core: 1 run programs, 2 stay parked (it answered too late,
+ * or the signals between cores do not reach it) */
+static volatile int go[MAXCPU];
+static volatile u32 sgi_seen[MAXCPU];
 static void secondary_main(u64 idx) {
     SYSREG_W(tpidr_el1, idx);
     SYSREG_W(cntkctl_el1, SYSREG_R(cntkctl_el1) | 2);             /* programs read the virtual counter (as mmu.c's core) */
-    speed[idx] = time_loop();
     hc[idx].gicmask = gic_my_mask();
     gic_cpu_init_helper(hc[idx].gicmask);
-    alive[idx] = 1;
+    alive[idx] = 1;                                               /* first: a slow clock must not look like a dead core */
     __asm__ volatile("dsb sy; sev" ::: "memory");
-    while (!__atomic_load_n(&nhelpers, __ATOMIC_ACQUIRE)) __asm__ volatile("wfe" ::: "memory");          /* until the boot core has seen them all */
+    speed[idx] = time_loop();
+    /* the signal test: the boot core sends SGI 3; this core answers with SGI 2 */
+    u64 cpu = gic_cpu_base();
+    while (!__atomic_load_n(&go[idx], __ATOMIC_ACQUIRE)) {
+        u32 iar = R32(cpu + 0x0c), id = iar & 0x3ff;
+        if (id < 1020) {
+            W32(cpu + 0x10, iar);
+            if (id == 3 && !sgi_seen[idx]) { __atomic_store_n(&sgi_seen[idx], 1, __ATOMIC_RELEASE); gic_sgi(boot_mask, 2); }
+        }
+        __asm__ volatile("wfe" ::: "memory");
+    }
+    if (go[idx] != 1) for (;;) __asm__ volatile("wfi");          /* parked for good */
     helper_loop(idx);
 }
 
@@ -355,16 +392,18 @@ int arm_smp_start(void) {
     me &= 0xff00ffffffull;
     u64 ttbr, tcr, mair, sctlr;
     __asm__ volatile("mrs %0, ttbr0_el1; mrs %1, tcr_el1; mrs %2, mair_el1; mrs %3, sctlr_el1" : "=r"(ttbr), "=r"(tcr), "=r"(mair), "=r"(sctlr));
-    int listed = 0, started = 0;
-    for (int c = fdt_find_compatible(-1, "arm,cortex-a53"); c >= 0 && listed < MAXCPU; c = fdt_find_compatible(c, "arm,cortex-a53")) {
+    int listed = 0, started = 0, slots = 0;
+    int good[MAXCPU];
+    boot_mask = gic_my_mask();
+    for (int c = fdt_find_compatible(-1, "arm,cortex-a53"); c >= 0 && listed < 16; c = fdt_find_compatible(c, "arm,cortex-a53")) {
         const u8 *r = fdt_prop(c, "reg", &len);
         if (!r || (len != 4 && len != 8)) continue;
         u64 mpidr = 0;
         for (int i = 0; i < len; i++) mpidr = mpidr << 8 | r[i];
         listed++;
         if (mpidr == me) continue;
-        int idx = started + 1;
-        if (idx >= MAXCPU) break;
+        if (slots + 1 >= MAXCPU) break;
+        int idx = slots + 1;                                  /* a core PSCI started keeps its slot, answering or not */
         u8 *stack = kalloc(16384);
         u8 *exc = kalloc(32768);
         hc[idx].exc_top = (u8 *)(((usize)exc + 32768) & ~(usize)15);
@@ -374,37 +413,59 @@ int arm_smp_start(void) {
         clean((const void *)&alive[idx], 4);
         long rc = psci_call(0xc4000003, mpidr, (u64)(usize)secondary_entry, (u64)(usize)&ctx[idx]);   /* CPU_ON (64-bit) */
         if (rc) { klog("smp: core %llx did not start (PSCI %ld)", mpidr, rc); continue; }
-        for (int t = 0; t < 100000 && !alive[idx]; t++) __asm__ volatile("isb");
-        if (!alive[idx]) {
-            u64 t0 = k_now_ms();
-            while (!alive[idx] && k_now_ms() - t0 < 200) __asm__ volatile("yield");
-        }
-        if (!alive[idx]) { klog("smp: core %llx started but never answered", mpidr); continue; }
-        started++;
+        slots++;
+        u64 t0 = k_now_ms();
+        while (!alive[idx] && k_now_ms() - t0 < 1500) __asm__ volatile("yield");
+        if (!alive[idx]) { klog("smp: core %llx started but did not answer within 1.5 s - it stays parked", mpidr); go[idx] = 2; continue; }
         mp[idx] = mpidr;
+        good[started++] = idx;
     }
-    /* only cores about as fast as this one take drawing work */
+    /* the signals between cores, both ways: without them a program would wait forever
+     * (interrupts masked here: the boot core looks at its pending signal itself) */
+    u64 fm = irq_save();
+    int ok = 0;
+    for (int i = 0; i < started; i++) {
+        int idx = good[i];
+        u64 t0 = k_now_ms();
+        while (!speed[idx] && k_now_ms() - t0 < 1000) __asm__ volatile("yield");
+        W32(gic_dist() + 0xf10, 0xffu << 16);                   /* GICD_CPENDSGIR: SGI 2, from anyone - cleared first */
+        gic_sgi(hc[idx].gicmask, 3);
+        t0 = k_now_ms();
+        while (!sgi_seen[idx] && k_now_ms() - t0 < 200) { gic_sgi(hc[idx].gicmask, 3); for (int k = 0; k < 2000; k++) __asm__ volatile("yield"); }
+        int back = 0;
+        t0 = k_now_ms();
+        while (sgi_seen[idx] && !back && k_now_ms() - t0 < 200) back = (R32(gic_dist() + 0xf20) >> 16) & 0xff;   /* GICD_SPENDSGIR: SGI 2 pending here */
+        if (!sgi_seen[idx] || !back) {
+            klog("smp: core %llx: %s - it stays parked", mp[idx], !sgi_seen[idx] ? "the boot core's signal does not reach it" : "its signal does not reach the boot core");
+            go[idx] = 2;
+            continue;
+        }
+        W32(gic_dist() + 0xf10, 0xffu << 16);                   /* the test's SGI 2: not pending any more */
+        good[ok++] = idx;
+    }
+    irq_restore(fm);
+    __asm__ volatile("dsb sy" ::: "memory");
+    /* only cores about as fast as this one take drawing work; all of them run programs */
     u64 f = irq_save();
     u64 mine = time_loop();                                           /* not interrupted */
     irq_restore(f);
     u64 best = mine;                                                  /* against the fastest core */
-    for (int i = 1; i <= started; i++) if (speed[i] && speed[i] < best) best = speed[i];
-    char line[160] = "";
+    for (int i = 0; i < ok; i++) if (speed[good[i]] && speed[good[i]] < best) best = speed[good[i]];
+    char line[200] = "";
     int fast = 0;
     fmt(line, sizeof line, " boot:%llu%%", best * 100 / mine);
-    for (int i = 1; i <= started; i++) {
-        u64 sp = speed[i];
-        int ok = sp && sp * 10 <= best * 13;                          /* within 30 % of the fastest */
+    for (int i = 0; i < ok; i++) {
+        int idx = good[i];
+        u64 sp = speed[idx];
         usize l = strlen(line);
-        fmt(line + l, sizeof line - l, " %llx:%llu%%", mp[i], sp ? best * 100 / sp : 0);
-        if (ok) { use[i] = 1; fast++; }
+        fmt(line + l, sizeof line - l, " %llx:%llu%%", mp[idx], sp ? best * 100 / sp : 0);
+        if (sp && sp * 10 <= best * 13) { use[idx] = 1; fast++; }    /* within 30 % of the fastest */
     }
-    __asm__ volatile("dsb sy; sev" ::: "memory");
     nworkers = fast;
-    boot_mask = gic_my_mask();
-    __atomic_store_n(&nhelpers, started, __ATOMIC_RELEASE);   /* every core runs programs */
+    for (int i = 0; i < ok; i++) __atomic_store_n(&go[good[i]], 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&nhelpers, ok, __ATOMIC_RELEASE);
     __asm__ volatile("dsb sy; sev" ::: "memory");
-    klog("smp: %d core(s) in the tree, %d started; speed against the fastest:%s", listed ? listed : 1, started, line);
-    klog("smp: %d run programs, %d of them help with drawing", started, fast);
+    klog("smp: %d core(s) in the tree, %d started, %d answer signals; speed against the fastest:%s", listed ? listed : 1, started, ok, line);
+    klog("smp: %d run programs, %d of them help with drawing", ok, fast);
     return fast;
 }

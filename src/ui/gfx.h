@@ -29,6 +29,7 @@ rect_t   rect_union(rect_t a, rect_t b);      /* empty rects are ignored */
 rect_t   rect_intersect(rect_t a, rect_t b);
 
 void gfx_fill(canvas_t *c, rect_t r, u32 color);             /* alpha-blended */
+extern int gfx_corner_cap;                                    /* corners at most this round */
 void gfx_rrect(canvas_t *c, rect_t r, int radius, u32 color);
 void gfx_rrect_outline(canvas_t *c, rect_t r, int radius, int width, u32 color);
 void gfx_shadow(canvas_t *c, rect_t r, int radius, int spread, u32 color);

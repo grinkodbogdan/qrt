@@ -189,6 +189,53 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.33.0: steady on eight cores, and Catacomb's look
+
+0.32.0 on the Mi A1: only four of the eight cores ran, and touching Ladybird took the
+whole system down.  This time both the kernel and the rootfs change - Ladybird's toolbar
+has the new look:
+
+    fastboot flash system_b qrt-rootfs-arm64.img     (from dist/qrt-0.33.0-rootfs-arm64.zip;
+                                                      system_a if current-slot says b)
+    fastboot reboot                                   (back to the fastboot screen), then
+    fastboot boot qrt-0.33.0-mi-a1-boot.img
+
+**The cores**
+- **The likely cause of the crash**: a core that took longer than 200 ms to answer after
+  PSCI started it (the second cluster, at its boot-time clock) was written off and its
+  slot given to the next core - while it went on starting with that slot.  Two cores then
+  shared one stack and one record, and the first program run on them wrecked both.  Every
+  core PSCI starts now keeps its own slot; it has 1.5 s to answer (it says so before
+  timing anything), and one that never does stays parked.
+- **A self-test of the signals between cores**, both ways, before any program runs on a
+  core: one that cannot be signalled (or cannot signal back) stays parked, said in the
+  log, instead of leaving a program waiting forever.  `smp:` lines in the log list how
+  many cores started and answer.
+- An idle core also wakes every 20 ms on its own: a lost signal costs that, not the
+  program.  A kernel fault on one of these cores is logged (`smp: core ... stopped`) and
+  its program goes back to the boot core; the others go on.
+- QRT's own threads still go first on the boot core, but a program waits 20 ms at most:
+  a Linux driver that keeps retrying (the GPU's deferred probes in the 0.32.0 log) can no
+  longer stop the programs.
+
+**The look** - after Catacomb's mobile desktop (Kumo, Epitaph, Tzompantli; their colours
+are taken from their configuration defaults): flat `#181818`, square tiles in `#282828`,
+thin white line icons, one dark red accent (`#752a2a`, the first of the accent colours).
+- **The top bar** (Epitaph's): the day at the left, the time in the middle, battery,
+  network and volume at the right.  **Pull it down** (or tap it) for the quick settings:
+  brightness and volume as full-width sliders, then square toggles - Wi-Fi, Bluetooth,
+  rotation, the keyboard, Settings, Power; the handle at the bottom pushes it back up.
+- **The home screen** is the clock and every app as a grid of square tiles
+  (Tzompantli's), tapped to open; swiping up still shows the open apps.
+- **The dock** is a flat bar along its edge with the accent line, white icons, and a
+  short bar under each open app.
+- Windows have a flat header: the title at the left, square minimise and close buttons
+  (Kumo's).  The launcher's search, the open apps, the power menu, the volume indicator,
+  buttons, chips and cards follow - every corner square (`gfx_corner_cap`).
+- **Ladybird's toolbar** in the same colours, its address field a flat tile, the accent
+  line beneath (`ports/ladybird/0008-*.patch`).
+- `tools/qemu-test.py` taps where things now are; the x86-64 test passes in full.
+
 ## 0.32.0: programs on all eight cores
 
 Until now the Mi A1's other seven cores only helped draw the shell; everything else ran

@@ -1,0 +1,85 @@
+From 5a8c31f57c0f01b712018000ed19e6253a575faa Mon Sep 17 00:00:00 2001
+From: grinkodbogdan <grinkod.bogdan@gmail.com>
+Date: Sun, 11 Oct 2026 18:59:36 +0000
+Subject: [PATCH] UI/QRT: the toolbar in Catacomb's colours: flat, square, a
+ dark red line
+
+---
+ UI/QRT/BrowserWindow.cpp | 34 +++++++++++++++++++---------------
+ 1 file changed, 19 insertions(+), 15 deletions(-)
+
+diff --git a/UI/QRT/BrowserWindow.cpp b/UI/QRT/BrowserWindow.cpp
+index 46879eb5..ea152d5a 100644
+--- a/UI/QRT/BrowserWindow.cpp
++++ b/UI/QRT/BrowserWindow.cpp
+@@ -21,15 +21,16 @@
+ 
+ namespace Ladybird {
+ 
+-// the toolbar, in the shell's colours (src/ui/theme)
+-static constexpr u32 toolbar_bg = 0x2b2b2b;
+-static constexpr u32 toolbar_line = 0x3c3c3c;
+-static constexpr u32 button_fg = 0xe8e8e8;
+-static constexpr u32 button_off = 0x6a6a6a;
+-static constexpr u32 field_bg = 0x1e1e1e;
+-static constexpr u32 field_edit = 0x3a5a8c;
+-static constexpr u32 text_fg = 0xf0f0f0;
+-static constexpr u32 text_dim = 0x9a9a9a;
++// the toolbar, in the shell's colours - Catacomb's (Kumo's): near black, square tiles a shade
++// lighter, thin white lines, one dark red accent
++static constexpr u32 toolbar_bg = 0x181818;
++static constexpr u32 toolbar_line = 0x752a2a;
++static constexpr u32 button_fg = 0xffffff;
++static constexpr u32 button_off = 0x666666;
++static constexpr u32 field_bg = 0x282828;
++static constexpr u32 field_edit = 0x333333;
++static constexpr u32 text_fg = 0xffffff;
++static constexpr u32 text_dim = 0xbfbfbf;
+ 
+ // toolbar geometry, at a scale of 1: four buttons, then the address
+ static constexpr int base_button_w = 48;
+@@ -204,12 +205,12 @@ void BrowserWindow::draw_toolbar()
+     auto* b = &m_buffer;
+     int h = content_top();
+     qrt_fill(b, 0, 0, b->w, h, toolbar_bg);
+-    qrt_fill(b, 0, h - 1, b->w, 1, toolbar_line);
++    qrt_fill(b, 0, h - max(2, scaled(1.5f)), b->w, max(2, scaled(1.5f)), toolbar_line);
+ 
+     int cy = h / 2;
+     auto button_x = [this](int i) { return m_pad + i * m_button_w + m_button_w / 2; };
+     auto S = [this](float v) { return scaled(v); };
+-    int stroke = max(3, S(2.6f));
++    int stroke = max(2, S(1.6f));
+     bool can_back = m_view && m_view->navigate_back_action().enabled();
+     bool can_forward = m_view && m_view->navigate_forward_action().enabled();
+ 
+@@ -236,19 +237,22 @@ void BrowserWindow::draw_toolbar()
+ 
+     // the keyboard
+     int kx = button_x(3);
+-    qrt_round_rect(b, kx - S(13), cy - S(9), S(26), S(18), S(3), m_keyboard ? field_edit : button_fg);
++    if (m_keyboard)
++        qrt_fill(b, kx - m_button_w / 2 + S(2), m_pad, m_button_w - S(4), h - 2 * m_pad, field_bg);
++    qrt_round_rect(b, kx - S(13), cy - S(9), S(26), S(18), 0, button_fg);
++    qrt_round_rect(b, kx - S(12), cy - S(8), S(24), S(16), 0, m_keyboard ? field_bg : toolbar_bg);
+     for (int row = 0; row < 3; ++row)
+         for (int col = 0; col < 4; ++col)
+-            qrt_fill(b, kx - S(10) + S(col * 6), cy - S(6) + S(row * 5), S(3), S(3), toolbar_bg);
++            qrt_fill(b, kx - S(10) + S(col * 6), cy - S(6) + S(row * 5), S(3), S(2), button_fg);
+ 
+     // the address field
+     int ax = address_x();
+     int fw = b->w - ax - m_pad;
+     int fh = h - 2 * m_pad - S(4);
+-    qrt_round_rect(b, ax, m_pad + S(2), fw, fh, fh / 2, m_editing_address ? field_edit : field_bg);
++    qrt_round_rect(b, ax, m_pad + S(2), fw, fh, 0, m_editing_address ? field_edit : field_bg);
+     int size = m_ui >= 1.3f ? QRT_TEXT_TITLE : QRT_TEXT_BODY;
+     int th = qrt_text_height(size);
+-    int tx = ax + fh / 2, ty = (h - th) / 2;
++    int tx = ax + S(10), ty = (h - th) / 2;
+     ByteString shown = m_address;
+     if (m_editing_address && !m_replace_address)
+         shown = ByteString::formatted("{}|", m_address);
+-- 
+2.43.0
+

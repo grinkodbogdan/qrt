@@ -123,8 +123,10 @@ void gfx_blit_rounded(canvas_t *dst, int dx, int dy, const canvas_t *src, int ra
     }
 }
 
+/* the shell's look: corners at most this round (0: square, as Catacomb's) */
+int gfx_corner_cap = 1 << 20;
 void gfx_rrect(canvas_t *c, rect_t r, int radius, u32 color) {
-    radius = MIN(radius, MIN(r.w, r.h) / 2);
+    radius = MIN(MIN(radius, gfx_corner_cap), MIN(r.w, r.h) / 2);
     if (radius <= 0) { gfx_fill(c, r, color); return; }
     rect_t cl = intersect(r, c->clip);
     u32 a = color >> 24;
@@ -147,7 +149,7 @@ void gfx_rrect(canvas_t *c, rect_t r, int radius, u32 color) {
 }
 
 void gfx_rrect_outline(canvas_t *c, rect_t r, int radius, int width, u32 color) {
-    radius = MIN(radius, MIN(r.w, r.h) / 2);
+    radius = MIN(MIN(radius, gfx_corner_cap), MIN(r.w, r.h) / 2);
     rect_t cl = intersect(r, c->clip);
     u32 a = color >> 24;
     float rad = (float)radius;
@@ -167,6 +169,7 @@ void gfx_rrect_outline(canvas_t *c, rect_t r, int radius, int width, u32 color) 
 }
 
 void gfx_shadow(canvas_t *c, rect_t r, int radius, int spread, u32 color) {
+    radius = MIN(radius, gfx_corner_cap);
     rect_t box = { r.x - spread, r.y - spread, r.w + 2 * spread, r.h + 2 * spread };
     rect_t cl = intersect(box, c->clip);
     u32 a = color >> 24;

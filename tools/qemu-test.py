@@ -348,7 +348,7 @@ def native_test(q, shots):
         progs.append("Ladybird (a page rendered by its processes)")
         # Ladybird as the shell's browser (L6): the dock's Browser opens its window; a URL
         # typed into its address bar loads and paints; the title reaches the shell
-        q.tap(1226, 246, settle=2)
+        q.tap(1244, 212, settle=2)
         for _ in range(120):
             if "ladybird (pid" in slog() and "opened window" in slog().split("browser: started Ladybird")[-1]:
                 break
@@ -396,8 +396,8 @@ def native_test(q, shots):
         shots.append(q.shot("09-ladybird-video"))
         if "sound: output USB audio" in slog():
             AUDIO_EXPECTED.append((660, 4))
-        q.tap(1141, 66, settle=4)                    # close it: QRT_EV_CLOSE, Ladybird exits
-        q.tap(1226, 170, settle=2)                   # back to the Terminal
+        q.tap(1180, 64, settle=4)                    # close it: QRT_EV_CLOSE, Ladybird exits
+        q.tap(1244, 141, settle=2)                   # back to the Terminal
         progs.append("Ladybird in the shell (dock, address bar, a page, the keyboard for a text field, 6000 functions, a video with sound)")
     q.keys(*"hello-window", settle=0.2)
     q.keys("ret", settle=1)
@@ -410,11 +410,11 @@ def native_test(q, shots):
     q.keys("h", "i", settle=0.8)
     q.drag([(200 + i * 40, 600 + (i % 4) * 25) for i in range(15)], settle=1)
     shots.append(q.shot("05-native-window"))
-    q.tap(1141, 66, settle=2.5)                    # close: the program gets QRT_EV_CLOSE and exits
+    q.tap(1180, 64, settle=2.5)                    # close: the program gets QRT_EV_CLOSE and exits
     if not any("proc: hello-window (pid" in l and "exited with 0," in l for l in slog().splitlines()):
         raise RuntimeError("native: hello-window did not close cleanly")
     print("native: %s and a window (tap, keys, drawing, close) work" % " and ".join(progs))
-    q.tap(1226, 170, settle=1.5)                   # back to the Terminal
+    q.tap(1244, 141, settle=1.5)                   # back to the Terminal
 
 
 def desk_test(q, shots, dock):
@@ -429,7 +429,7 @@ def desk_test(q, shots, dock):
         q.cmd("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
     for i in range(10):
         mouse_to(300 + i * 92, 600 - i * 50); time.sleep(0.05)
-    mouse_to(1226, dock["files"]); time.sleep(0.5)
+    mouse_to(1244, dock["files"]); time.sleep(0.5)
     mouse_button(True); time.sleep(0.15); mouse_button(False); time.sleep(1.5)
     shots.append(q.shot("21-mouse-files"))
     q.keys("esc", settle=1.0)
@@ -471,10 +471,13 @@ def default_script(q, shots):
     hanging from y 47; the keyboard is centred in the 1172 px content area;
     app windows have a 57 px header bar from y 38, the app area from y 95)."""
     # pinned apps; the launcher button follows them while only they are in the dock
-    dock = {"files": 94, "terminal": 170, "browser": 246, "wifi": 322, "sketch": 398, "settings": 474, "launcher": 564}
+    # 0.33.0: the dock is a flat bar the height of the screen, 71 px wide, a 71 px cell per app
+    # from under the 35 px top bar, the launcher at the bottom; the content area is 1209 px
+    # wide, so the keyboard sits 18 px further right than it did (+18 below)
+    dock = {"files": 70, "terminal": 141, "browser": 212, "wifi": 283, "sketch": 354, "settings": 425, "launcher": 764}
 
     def dock_tap(name, settle=1.2):
-        q.tap(1226, dock[name], settle=settle)
+        q.tap(1244, dock[name], settle=settle)
 
     def launch(name, settle=1.5):
         """Type on the home screen (opens the launcher search), Enter opens the first hit."""
@@ -486,17 +489,17 @@ def default_script(q, shots):
     dock_tap("launcher")
     shots.append(q.shot("02-launcher"))
     q.tap(631, 90)                         # search field -> keyboard
-    for x, y in [(541, 563), (364, 563), (453, 563)]:   # t, e, r
+    for x, y in [(559, 563), (382, 563), (471, 563)]:   # t, e, r
         q.tap(x, y, settle=0.3)
     shots.append(q.shot("03-launcher-search"))
-    q.tap(904, 752, settle=1.5)            # Enter -> Terminal
+    q.tap(922, 752, settle=1.5)            # Enter -> Terminal
     # Terminal: type "ls /bin" on the on-screen keyboard, then run programs over serial
     q.tap(500, 400)                        # the console -> keyboard
-    for x, y in [(939, 627), (320, 627), (585, 752), (375, 752), (674, 690), (806, 563), (761, 690)]:
+    for x, y in [(957, 627), (338, 627), (603, 752), (393, 752), (692, 690), (824, 563), (779, 690)]:
         q.tap(x, y, settle=0.3)            # l s space / b i n
-    q.tap(904, 752, settle=5)              # Enter
+    q.tap(922, 752, settle=5)              # Enter
     shots.append(q.shot("04-terminal-osk"))
-    q.tap(1011, 752, settle=1)             # hide the keyboard
+    q.tap(1029, 752, settle=1)             # hide the keyboard
     for cmd in ["hello", "uname -a"]:
         q.keys(*[c if c != " " else "spc" for c in cmd], settle=0.2)
         q.keys("ret", settle=6.0)
@@ -604,9 +607,9 @@ def default_script(q, shots):
     q.drag([(640, 700)] + [(640, 700 - i * 30) for i in range(1, 10)], settle=1.2)   # swipe up to unlock
     shots.append(q.shot("13-home"))
     # the dock: drag it to the bottom edge (screenshot mid-drag), then left, then back right
-    q._pkt("d", 1226, 300); time.sleep(0.1)
+    q._pkt("d", 1244, 480); time.sleep(0.1)                # an empty stretch of the bar
     for i in range(1, 11):
-        q.move(1226 - i * 60, 300 + i * 45); time.sleep(0.05)
+        q.move(1244 - i * 60, 480 + i * 27); time.sleep(0.05)
     time.sleep(1.0)
     shots.append(q.shot("18-dock-dragging"))
     q._pkt("u", 626, 750); time.sleep(1.2)

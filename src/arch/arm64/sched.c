@@ -125,18 +125,23 @@ static thr_t *pick(u64 *soonest) {
      * sound, the network - then programs': a busy page in Ladybird (dozens of threads)
      * kept a Linux thread holding Linux's CPU waiting for its turn, and the shell behind
      * it for seconds (0.31.1) */
-    thr_t *user = NULL;
+    /* ... but a program waits 20 ms at most: a Linux driver that keeps retrying (the GPU's
+     * deferred probes, 0.32.0) must not stop the programs altogether */
+    static u64 user_turn;
+    thr_t *user = NULL, *kern = NULL;
     for (int i = 0; i < nthreads; i++, t = t->next) {
         if (t->state == T_SLEEP) {
             if (t->wake_at <= now) t->state = T_READY;
             else if (t->wake_at < *soonest) *soonest = t->wake_at;
         }
         if (t->state == T_READY) {
-            if (!t->proc) return t;
-            if (!user) user = t;
+            if (!t->proc) { if (!kern) kern = t; }
+            else if (!user) user = t;
         }
     }
-    return user;
+    if (user && (!kern || now - user_turn > 20000)) { user_turn = now; return user; }
+    if (!user) user_turn = now;
+    return kern;
 }
 
 /* interrupts masked: run the next ready thread (maybe the current one); with none, idle
