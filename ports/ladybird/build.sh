@@ -23,6 +23,14 @@ if [ "${QRT_ARCH:-x64}" = arm64 ]; then
     TOOLCHAIN=$SDK/qrt-a64.cmake
     RUST_TARGET=aarch64-unknown-linux-musl
     EXTRA="-DCMAKE_CROSSCOMPILING_EMULATOR=$(command -v qemu-aarch64-static || command -v qemu-aarch64)"
+    # Rust programs the build runs (flapc, the bytecode generator) are built for ARM too:
+    # the kernel runs them through qemu-aarch64 (binfmt_misc, from qemu-user-static)
+    if [ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+        [ -e /proc/sys/fs/binfmt_misc/register ] || mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+        cat /usr/lib/binfmt.d/qemu-aarch64.conf > /proc/sys/fs/binfmt_misc/register
+    fi
+    # rustc links ARM programs with clang (CMake's C compiler): lld, not the host's ld
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=-fuse-ld=lld"
 else
     OUT=$root/build/ladybird
     SDK=$root/build/sdk
