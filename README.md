@@ -189,6 +189,14 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.30.1: the boot image boots
+
+0.30.0 on the Mi A1: `fastboot boot` sent the image, then "Status read failed" - aboot
+died before starting QRT.  It copies the ramdisk to the address the boot image names;
+that was 16 MB into RAM, and the 62 MB ramdisk (Ladybird) reached the secure world's
+qseecom region at 0x84a00000.  The ramdisk now goes to 0x96000000, where ~160 MB are
+free (`tools/mkbootimg.py`).
+
 ## 0.30.0: Ladybird on the phone
 
 The web browser the tablet runs - Ladybird, with its own engine, JavaScript and
