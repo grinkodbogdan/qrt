@@ -3,7 +3,7 @@ fetch() { fetch_git https://github.com/FFmpeg/FFmpeg n$VERSION; }
 # Ladybird's component set (its vcpkg overlay port, "ladybird-components"), with its library suffix
 build() {
     mkdir -p "$B" && cd "$B"
-    "$S/configure" --prefix=/usr --libdir=/usr/lib --enable-cross-compile --target-os=linux --arch=x86_64 \
+    "$S/configure" --prefix=/usr --libdir=/usr/lib --enable-cross-compile --target-os=linux --arch=$CPU \
         --cc="$CC" --cxx="$CXX" --ar=$AR --ranlib=$RANLIB --nm=$NM --strip=$STRIP --pkg-config=pkg-config \
         --extra-ldflags="$LDSTATIC" --enable-static --disable-shared --enable-pic --disable-doc --disable-programs \
         --enable-runtime-cpudetect --disable-autodetect --enable-pthreads --build-suffix=-ladybird \

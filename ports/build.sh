@@ -6,36 +6,58 @@
 # The order is ports/ORDER.  A port that is built is not built again (build/ports/done/).
 #
 # Needs the C and C++ SDK (sdk/build.sh, sdk/build-cxx.sh).
+#
+# QRT_ARCH=arm64: the same libraries for 64-bit ARM programs (the Mi A1), into the ARM
+# SDK's sysroot (sdk/build-arm64.sh, sdk/build-arm64-cxx.sh); static PIE.  The sources are
+# shared, the build records are separate (build/ports/done-arm64).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
-SDK=${SDK:-$root/build/sdk}
-SYS="$SDK/sysroot"
+QRT_ARCH=${QRT_ARCH:-x64}
 W="$root/build/ports"
-mkdir -p "$W/src" "$W/build" "$W/done" "$W/dl"
 JOBS=$(nproc)
 
 # ---- the cross toolchain ----------------------------------------------------------------
-TARGET=x86_64-linux-musl
-LDSTATIC="-static -fuse-ld=lld -rtlib=compiler-rt -unwindlib=libunwind"
-export CC="clang-20 --target=$TARGET --sysroot=$SYS -D__QRT__"
-export CXX="clang++-20 --target=$TARGET --sysroot=$SYS -D__QRT__ -stdlib=libc++"
+if [ "$QRT_ARCH" = arm64 ]; then
+    SDK=${SDK:-$root/build/sdk-arm64}
+    TARGET=aarch64-linux-musl
+    CPU=aarch64                                   # meson's cpu_family, ffmpeg's --arch
+    TOOLCHAIN="$SDK/qrt-a64.cmake"
+    DONE="$W/done-arm64"; BUILD="$W/build-arm64"
+    # (no -static-pie here: these flags link shared libraries too, which projects build
+    # beside the static ones; programs get it from the toolchain file)
+    LDSTATIC="-fuse-ld=lld -rtlib=compiler-rt -unwindlib=libunwind"
+    XFLAGS="--gcc-toolchain=$SDK/nogcc -fPIE"
+else
+    SDK=${SDK:-$root/build/sdk}
+    TARGET=x86_64-linux-musl
+    CPU=x86_64
+    TOOLCHAIN="$SDK/qrt.cmake"
+    DONE="$W/done"; BUILD="$W/build"
+    LDSTATIC="-static -fuse-ld=lld -rtlib=compiler-rt -unwindlib=libunwind"
+    XFLAGS=""
+fi
+SYS="$SDK/sysroot"
+mkdir -p "$W/src" "$BUILD" "$DONE" "$W/dl"
+export CC="clang-20 --target=$TARGET --sysroot=$SYS -D__QRT__ $XFLAGS"
+export CXX="clang++-20 --target=$TARGET --sysroot=$SYS -D__QRT__ $XFLAGS -stdlib=libc++"
 export AR=llvm-ar-20 RANLIB=llvm-ranlib-20 NM=llvm-nm-20 STRIP=llvm-strip-20
 export CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC" LDFLAGS="$LDSTATIC -stdlib=libc++"
 export PKG_CONFIG_LIBDIR="$SYS/usr/lib/pkgconfig:$SYS/usr/share/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR="$SYS"
 export PKG_CONFIG_PATH=""
 
-cat > "$SDK/qrt-meson.ini" <<EOF
+MESON_INI="$SDK/qrt-meson.ini"
+cat > "$MESON_INI" <<EOF
 [binaries]
-c = ['clang-20', '--target=$TARGET', '--sysroot=$SYS', '-D__QRT__']
-cpp = ['clang++-20', '--target=$TARGET', '--sysroot=$SYS', '-D__QRT__', '-stdlib=libc++']
+c = ['clang-20', '--target=$TARGET', '--sysroot=$SYS', '-D__QRT__'$( [ -n "$XFLAGS" ] && echo ", '--gcc-toolchain=$SDK/nogcc', '-fPIE'")]
+cpp = ['clang++-20', '--target=$TARGET', '--sysroot=$SYS', '-D__QRT__'$( [ -n "$XFLAGS" ] && echo ", '--gcc-toolchain=$SDK/nogcc', '-fPIE'"), '-stdlib=libc++']
 ar = 'llvm-ar-20'
 strip = 'llvm-strip-20'
 pkg-config = 'pkg-config'
 [built-in options]
-c_link_args = ['-static', '-fuse-ld=lld', '-rtlib=compiler-rt', '-unwindlib=libunwind']
-cpp_link_args = ['-static', '-fuse-ld=lld', '-rtlib=compiler-rt', '-unwindlib=libunwind', '-stdlib=libc++']
+c_link_args = ['$(echo $LDSTATIC | sed "s/ /', '/g")']
+cpp_link_args = ['$(echo $LDSTATIC | sed "s/ /', '/g")', '-stdlib=libc++']
 default_library = 'static'
 prefix = '/usr'
 libdir = 'lib'
@@ -44,8 +66,8 @@ sys_root = '$SYS'
 pkg_config_libdir = '$SYS/usr/lib/pkgconfig:$SYS/usr/share/pkgconfig'
 [host_machine]
 system = 'linux'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
+cpu_family = '$CPU'
+cpu = '$CPU'
 endian = 'little'
 EOF
 
@@ -70,7 +92,7 @@ fetch_tar() {
 cmake_build() {
     local sub="${1:-.}"; shift || true
     rm -rf "$B"
-    cmake -G Ninja -S "$S/$sub" -B "$B" -DCMAKE_TOOLCHAIN_FILE="$SDK/qrt.cmake" -DCMAKE_BUILD_TYPE=Release \
+    cmake -G Ninja -S "$S/$sub" -B "$B" -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DBUILD_TESTING=OFF "$@" >"$B.log" 2>&1 || { tail -30 "$B.log"; return 1; }
     ninja -C "$B" -j"$JOBS" >>"$B.log" 2>&1 || { grep -E "error|FAILED" "$B.log" | head -20; return 1; }
@@ -94,8 +116,8 @@ autotools_build() {
 
 build_port() {
     local name=$1
-    [ -f "$W/done/$name" ] && return 0
-    S="$W/src/$name"; B="$W/build/$name"
+    [ -f "$DONE/$name" ] && return 0
+    S="$W/src/$name"; B="$BUILD/$name"
     unset -f build; VERSION=""
     # shellcheck disable=SC1090
     source "$here/$name.sh"
@@ -106,7 +128,7 @@ build_port() {
     ( set -e; cd "$W"; build ); local rc=$?
     set -e
     if [ $rc = 0 ]; then
-        echo "$VERSION" > "$W/done/$name"
+        echo "$VERSION" > "$DONE/$name"
         echo "ok ($((SECONDS - t0)) s)"
         rm -rf "$B"                                   # the build tree is not kept (disk)
     else

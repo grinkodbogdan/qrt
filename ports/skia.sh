@@ -31,9 +31,12 @@ build() {
     sed -i "s|\"/usr/include/harfbuzz\"|\"$SYS/usr/include/harfbuzz\"|" "$S/third_party/harfbuzz/BUILD.gn"
     # -march: the tablet's Atom (Airmont: SSE4.2, SSSE3, no AVX); Skia's raster pipeline
     # picks its SSE4.1 code at compile time, so the x86-64 baseline (SSE2) leaves it out
-    local common="\"--target=$TARGET\", \"--sysroot=$SYS\", \"-D__QRT__\", \"-fPIC\", \"-march=silvermont\", \"-I$SYS/usr/include/freetype2\""
+    # (ARM: the Mi A1's Cortex-A53, with the crypto and CRC extensions)
+    local march="\"-march=silvermont\"" gcpu=x64
+    [ "$CPU" = aarch64 ] && { march="\"-mcpu=cortex-a53+crypto+crc\", \"--gcc-toolchain=$SDK/nogcc\", \"-fPIE\""; gcpu=arm64; }
+    local common="\"--target=$TARGET\", \"--sysroot=$SYS\", \"-D__QRT__\", \"-fPIC\", $march, \"-I$SYS/usr/include/freetype2\""
     gn gen "$B/out" --root="$S" --args="
-        target_cpu=\"x64\" target_os=\"linux\" is_official_build=true is_component_build=false
+        target_cpu=\"$gcpu\" target_os=\"linux\" is_official_build=true is_component_build=false
         cc=\"clang\" cxx=\"clang++\" ar=\"llvm-ar-20\"
         extra_cflags=[$common] extra_cflags_cc=[\"-stdlib=libc++\"] extra_ldflags=[\"-fuse-ld=lld\", \"-stdlib=libc++\"]
         skia_enable_android_utils=false skia_enable_spirv_validation=false skia_enable_tools=false

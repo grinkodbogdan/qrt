@@ -98,7 +98,7 @@ build/BOOTX64.EFI: $(X64_OBJ) tools/symtab.py
 	$(LINK) $(LDFLAGS) -machine:x64 -map:build/BOOTX64.map -out:$@ $(X64_OBJ) build/x64/sym/symtab.o
 
 # ---- 64-bit ARM (QEMU virt, Xiaomi Mi A1): build/arm64/Image, a Linux-style arm64 kernel image ----
-ARM_SHARED := src/kernel/rt.c src/kernel/vfs.c src/kernel/sound.c src/kernel/time.c \
+ARM_SHARED := src/kernel/rt.c src/kernel/vfs.c src/kernel/inflate.c src/kernel/sound.c src/kernel/time.c \
               src/ui/gfx.c src/ui/shell.c src/ui/clientwin.c src/ui/fontdata.c src/ui/osk.c \
               src/apps/clock.c src/apps/sketch.c src/apps/files.c src/apps/system.c src/apps/settings.c src/apps/life.c \
               src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/apps/browser.c src/apps/bluetooth.c src/apps/html.c \
@@ -170,10 +170,13 @@ build/arm64/rootfs/bin/%: tests/linux/%.c build/sdk-arm64/.stamp
 build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null) $(ARM_PROGS)
 	@mkdir -p build/arm64/rootfs
 	$(PYTHON) tools/mkcpio.py src/arch/arm64/rootfs build/arm64/rootfs $@
-build/arm64/qrt-mi-a1-boot.img: build/arm64/Image build/arm64/tissot.dtb build/arm64/ramdisk.cpio
+# the ramdisk gzip'd (the kernel unpacks it: src/kernel/inflate.c)
+build/arm64/ramdisk.cpio.gz: build/arm64/ramdisk.cpio
+	gzip -9nc $< > $@
+build/arm64/qrt-mi-a1-boot.img: build/arm64/Image build/arm64/tissot.dtb build/arm64/ramdisk.cpio.gz
 	gzip -9nc build/arm64/Image > build/arm64/Image.gz
 	cat build/arm64/Image.gz build/arm64/tissot.dtb > build/arm64/Image.gz-dtb
-	$(PYTHON) tools/mkbootimg.py build/arm64/Image.gz-dtb build/arm64/ramdisk.cpio $@ "qrt"
+	$(PYTHON) tools/mkbootimg.py build/arm64/Image.gz-dtb build/arm64/ramdisk.cpio.gz $@ "qrt"
 mi-a1: build/arm64/qrt-mi-a1-boot.img
 
 # Linux programs shipped in /bin (run by the native kernel's Linux layer)

@@ -13,7 +13,7 @@
 #include "../ui/shell.h"
 #include "../net/http.h"
 #include "html.h"
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 #include "../ui/clientwin.h"
 #endif
 
@@ -398,7 +398,7 @@ static void draw_page(canvas_t *c, rect_t a) {
  * When the image has Ladybird (/bin/ladybird, a native QRT program), the Browser in the
  * dock is Ladybird: opening it starts the program, or brings its window back.  This
  * built-in text browser is what remains without it (the 32-bit kernel, small images). */
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 static struct { int pid; u64 started; char err[96]; } LB;
 
 static int ladybird_running(void) {
@@ -450,7 +450,7 @@ static void draw(canvas_t *c, rect_t a) {
         gfx_text_center(c, ui.title, m, "Starting Ladybird", ui.text);
         rect_t n = { a.x, a.y + a.h / 2, a.w, dp(30) };
         gfx_text_center(c, ui.body, n, "the web browser, running natively on QRT", ui.text2);
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
         /* taking long: say what its processes are doing (a photo of this tells what went wrong) */
         if (k_now_ms() - LB.started > 15000) {
             thread_t *all[256];

@@ -404,8 +404,23 @@ void arm_main(const void *dtb, u64 base) {
     klog("display: %s, %u x %u", fb_what, k.fb_w, k.fb_h);
     k.graphics_up = 0;
     if (initrd_end > initrd_start) {
-        int files = load_cpio((const u8 *)(usize)initrd_start, (const u8 *)(usize)initrd_end);
-        klog("ramdisk: %d files (%llu KB)", files, (initrd_end - initrd_start) >> 10);
+        const u8 *rd = (const u8 *)(usize)initrd_start, *rd_end = (const u8 *)(usize)initrd_end;
+        u8 *unz = NULL;
+        usize unz_pages = 0;
+        if (rd_end - rd > 18 && rd[0] == 0x1f && rd[1] == 0x8b) {     /* gzip'd (inflate.c) */
+            usize gzip_size(const u8 *in, usize inlen);
+            isize gunzip(const u8 *in, usize inlen, u8 *out, usize outcap);
+            usize n = gzip_size(rd, (usize)(rd_end - rd));
+            unz_pages = (n + 4095) / 4096;
+            unz = n ? (u8 *)(usize)pmm_alloc_contig(unz_pages) : NULL;
+            u64 t0 = k_now_us();
+            isize got = unz ? gunzip(rd, (usize)(rd_end - rd), unz, n) : -1;
+            klog("ramdisk: %llu KB gzip'd -> %lld KB in %llu ms", (u64)(rd_end - rd) >> 10, (long long)(got >> 10), (k_now_us() - t0) / 1000);
+            if (got > 0) { rd = unz; rd_end = unz + got; }
+        }
+        int files = load_cpio(rd, rd_end);
+        klog("ramdisk: %d files (%llu KB)", files, (u64)(rd_end - rd) >> 10);
+        for (usize i = 0; unz && i < unz_pages; i++) pmm_free((u64)(usize)unz + i * 4096);   /* the files have their own copies */
     }
     void vfs_add_synthetic(void);
     vfs_add_synthetic();                                            /* /proc, /etc: what Linux programs read */

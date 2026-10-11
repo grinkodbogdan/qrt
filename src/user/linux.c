@@ -903,7 +903,9 @@ static void syscall_dispatch_locked(frame_t *f) {
     /* native QRT programs: QRT's own numbers (sdk/syscalls.txt); the QRT-only calls,
      * and the rest mapped onto the kernel service with the same semantics */
 #ifdef __aarch64__
-    if (0) {
+    if (nr >= 1024 && nr < 1040) {                          /* QRT's own calls (windows, input): libqrt */
+        r = qrt_call(p, nr, a0, a1, a2, a3, a4);
+        nr = ~0ull;
 #else
     if (nr >= 1040 && nr <= 1057) {                         /* the Linux driver host (lkldev.c) */
         i64 lkl_call(proc_t *p, u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4);

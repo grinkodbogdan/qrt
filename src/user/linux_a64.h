@@ -7,7 +7,8 @@
  * or flags differ the arguments are converted on the way in and the results on the way
  * out: struct stat (AArch64 has the generic layout), struct epoll_event (not packed on
  * AArch64), the O_ flags that differ (O_DIRECTORY, O_NOFOLLOW, O_DIRECT, O_LARGEFILE),
- * and clone's argument order (tls before child_tid).
+ * and clone's argument order (tls before child_tid).  QRT's own calls (windows, input:
+ * 1024 and up, sdk/syscalls.txt) have the same numbers as for x86-64's native programs.
  */
 #include "a64_nr.h"
 
@@ -53,6 +54,7 @@ static u64 a64_in(proc_t *p, a64_call_t *c, u64 nr, u64 *a) {
     thread_t *me = thread_current();
     c->nr = nr; c->user = 0; c->kb = NULL;
     u64 x = nr < ARRAY_LEN(a64_nr) && a64_nr[nr] != 0xffff ? a64_nr[nr] : 0x10000 | nr;
+    if (nr >= 1024 && nr < 1040) return nr;                              /* QRT's own (sdk/syscalls.txt) */
     switch (nr) {
     case 56: a[2] = a64_oflags_in(a[2]); break;                          /* openat */
     case 25: if (a[1] == 4) a[2] = a64_oflags_in(a[2]); break;           /* fcntl F_SETFL */

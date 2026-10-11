@@ -58,7 +58,7 @@ set(CMAKE_RANLIB /usr/bin/llvm-ranlib-20)
 set(CMAKE_C_FLAGS_INIT "-D__QRT__ -fPIE --gcc-toolchain=$out/nogcc")
 set(CMAKE_CXX_FLAGS_INIT "-D__QRT__ -fPIE --gcc-toolchain=$out/nogcc -stdlib=libc++")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_EXE_LINKER_FLAGS_INIT "-static-pie -fuse-ld=lld --rtlib=libgcc")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "$(if [ -f "$out/.cxxstamp" ]; then echo "-static-pie -fuse-ld=lld -rtlib=compiler-rt -unwindlib=libunwind -stdlib=libc++"; else echo "-static-pie -fuse-ld=lld --rtlib=libgcc"; fi)")
 set(CMAKE_FIND_ROOT_PATH "$sys")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
@@ -68,5 +68,11 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "static only")
 set(ENV{PKG_CONFIG_LIBDIR} "$sys/usr/lib/pkgconfig:$sys/usr/share/pkgconfig")
 set(ENV{PKG_CONFIG_SYSROOT_DIR} "$sys")
 EOS
+# libqrt: QRT's windows and input (the same calls as the x86-64 SDK's, sdk/libqrt)
+python3 "$here/libqrt/genfont.py" "$root/assets/Inter-Regular.ttf" "$out/src/qrt_font.c"
+cp "$here/libqrt/qrt.h" "$sys/usr/include/qrt.h"
+"$out/bin/qrt-a64-cc" -O2 -Wall -c "$here/libqrt/qrt.c" -o "$out/src/qrt.o"
+"$out/bin/qrt-a64-cc" -O2 -c "$out/src/qrt_font.c" -o "$out/src/qrt_font.o"
+llvm-ar rcs "$sys/usr/lib/libqrt.a" "$out/src/qrt.o" "$out/src/qrt_font.o"
 touch "$out/.stamp"
 echo "QRT SDK for ARM in $out (qrt-a64-cc: $out/bin/qrt-a64-cc)"
