@@ -189,6 +189,19 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.28.5: where a transition frame's time goes
+
+0.28.4 on the Mi A1: the GPU drew the transitions, but ~0.2 s a frame - three frames in
+ten seconds, and the shell waited each time ("stalled ~330 ms").
+
+- **The GPU's clock**: devfreq judges its load from the last few milliseconds, and the
+  short bursts of a transition left it at its lowest step (19.2 MHz, ~30 times below its
+  top) - its minimum is set to its top while it draws.
+- **Four pixels an invocation**, read and written 16 bytes at a time: a quarter of the
+  memory accesses.
+- **The 10 s line says where the time goes**: mapping the pictures, the cache
+  write-back, the wait for the refresh, the submit, the GPU's own work - and the clock.
+
 ## 0.28.4: a stall is not a broken GPU
 
 0.28.3 on the Mi A1: the checks passed and the GPU drew the transitions - until Wi-Fi

@@ -286,8 +286,7 @@ static u32 g_frames, g_us;               /* since the last gpu_stats() */
 #define SLOT_BYTES 8192                  /* NSLOT of them fill cmd (64 KB) */
 static u32 slot_fence[NSLOT], nsub;
 static u64 st_t0, st_clean, st_submit, st_block;
-static u32 st_n, st_behind, last_fence, st_tn;
-static u64 st_tus, st_vwait;
+static u32 st_n, st_behind, last_fence;
 u64 fb32_back(void);
 extern u64 fb32_base;
 int fb32_flip_pending(void);
@@ -736,7 +735,7 @@ static int test_trans(void) {
     u64 bu[3] = { a.iova, b.iova, o.iova };
     u32 by[3] = { 4096, 4096, 4096 };
     u32 push[12] = { 64, 16, 64, 64, 3, 100, 0, 0, 0, 0, 64, 16 };
-    u32 s = cs_run(K_TRANS, bu, by, 3, push, 1, 16);
+    u32 s = cs_run(K_TRANS, bu, by, 3, push, 1, 16);         /* 64 x 16: 16 quads a row, one group */
     const struct bo *x[3] = { &a, &b, &o };
     long r = cjob_submit(slot, s, x, 3);
     int done = r >= 0 && seq_wait(s, 2000);
@@ -849,14 +848,30 @@ void gpu_screen_sync(void) {
 /* the shell's transition frame (shell.c trans_rows) on the GPU, straight into the screen;
  * 0: the CPU does it.  from/to stay the same during a transition - written back from the
  * CPU's cache once, when gen changes */
+/* a sysfs number (devfreq's frequencies), or 0 */
+static u64 rdnum(const char *path) {
+    long f = S(NR_OPENAT, AT_FDCWD, path, 0, 0, 0);
+    if (f < 0) return 0;
+    char b[32];
+    long n = S(NR_READ, f, b, sizeof b - 1, 0, 0);
+    S(NR_CLOSE, f, 0, 0, 0, 0);
+    u64 v = 0;
+    for (long i = 0; i < n && b[i] >= '0' && b[i] <= '9'; i++) v = v * 10 + (u64)(b[i] - '0');
+    return v;
+}
+#define DEVFREQ "/sys/class/devfreq/1c00000.gpu/"
+/* where a transition frame's time goes (0.28.4: ~0.2 s a frame, cause unknown) */
+static struct { u32 n; u64 map, clean, vwait, submit, gpu, total, worst; } ts;
 int gpu_transition(const u32 *from, const u32 *to, int stride, int w, int h, int kind, int t, int shift,
                    int cax, int cay, int caw, int cah, u32 gen) {
     static u32 last_gen = ~0u;
     if (!g_compute || logview_active() || w != (int)k.fb_w || h != (int)k.fb_h || ((usize)from & 63) || ((usize)to & 63)) return 0;
+    if ((w | stride | cax | caw) & 3) return 0;          /* the program does four pixels at a time */
     u64 t0 = k_now_us();
     u64 len = (u64)stride * 4 * (u64)h;
     u64 fa = frame_iova(from, len), ta = frame_iova(to, len);
     if (!fa || !ta) return 0;
+    u64 t1 = k_now_us();
     if (gen != last_gen) {
         const u32 *c[2] = { from, to };
         for (int i = 0; i < 2; i++) {
@@ -866,22 +881,23 @@ int gpu_transition(const u32 *from, const u32 *to, int stride, int w, int h, int
         }
         last_gen = gen;
     }
+    u64 t2 = k_now_us();
     /* the hidden screen, once the pipe has left it (the last flip taken at a refresh) */
     u64 back = fb32_back(), dst = fb_iova;
     if (back) {
-        u64 tw = k_now_us();
-        while (fb32_flip_pending() && k_now_us() - tw < 25000) thr_yield();
-        st_vwait += k_now_us() - tw;
+        while (fb32_flip_pending() && k_now_us() - t2 < 25000) thr_yield();
         dst = fb_iova + (back - fb32_base);
     }
+    u64 t3 = k_now_us();
     u32 slot;
     if (!cjob_begin(&slot)) { g_compute = 0; LOG("off: a transition frame never finished - the CPU draws them"); return 0; }
     u64 bu[3] = { fa, ta, dst };
     u32 by[3] = { (u32)len, (u32)len, fb_pitch * (u32)h };
     u32 push[12] = { (u32)w, (u32)h, (u32)stride, fb_pitch / 4, (u32)kind, (u32)t, (u32)shift, 0, (u32)cax, (u32)cay, (u32)caw, (u32)cah };
-    u32 s = cs_run(K_TRANS, bu, by, 3, push, ((u32)w + 63) / 64, (u32)h);
+    u32 s = cs_run(K_TRANS, bu, by, 3, push, ((u32)w / 4 + 63) / 64, (u32)h);
     if (cjob_submit(slot, s, NULL, 0) < 0) { g_compute = 0; LOG("off: a transition frame could not be submitted"); return 0; }
     screen_seq = s;
+    u64 t4 = k_now_us();
     if (back) {                          /* drawn: shown from the next refresh */
         /* a slow frame is not a broken GPU: Wi-Fi's start in the secure world stalls the
          * whole phone for a third of a second (0.28.3 gave up after 100 ms, for good) -
@@ -889,14 +905,20 @@ int gpu_transition(const u32 *from, const u32 *to, int stride, int w, int h, int
         if (!seq_wait(s, 2000)) { g_compute = 0; LOG("off: a transition frame did not finish in 2 s - the CPU draws them"); return 0; }
         fb32_flip();
     }
-    st_tn++; st_tus += k_now_us() - t0;
+    u64 t5 = k_now_us();
+    ts.n++; ts.map += t1 - t0; ts.clean += t2 - t1; ts.vwait += t3 - t2; ts.submit += t4 - t3; ts.gpu += t5 - t4;
+    ts.total += t5 - t0;
+    if (t5 - t0 > ts.worst) ts.worst = t5 - t0;
     static u64 tlog;
     if (!tlog) tlog = t0;
     if (t0 - tlog >= 10000000) {
-        LOG("10 s: %u transition frames drawn by the GPU, %llu us each (%llu us of it waiting for the refresh)", st_tn, st_tus / st_tn, st_vwait / st_tn);
-        st_tn = 0; st_tus = 0; st_vwait = 0; tlog = t0;
+        u32 n = ts.n;
+        LOG("10 s: %u transition frames by the GPU, %llu us each (worst %llu): map %llu, cache write-back %llu, refresh wait %llu, submit %llu, GPU %llu; clock %llu MHz",
+            n, ts.total / n, ts.worst, ts.map / n, ts.clean / n, ts.vwait / n, ts.submit / n, ts.gpu / n, rdnum(DEVFREQ "cur_freq") / 1000000);
+        memset(&ts, 0, sizeof ts);
+        tlog = t0;
     }
-    fb_gpu_presented(0, 0, w, h, k_now_us() - t0);
+    fb_gpu_presented(0, 0, w, h, t5 - t0);
     return 1;
 }
 
@@ -928,6 +950,15 @@ static void own_commands(long fd) {
         /* the GPU stays powered: waking it (its microcode and zap shader again, through the
          * secure world) took 0.3 s - the first frames of every transition stuttered */
         wr("/sys/bus/platform/devices/1c00000.gpu/power/control", "on");
+        /* and at its top clock: devfreq judges the load from the last few ms, and the short
+         * bursts of a transition left it at 19.2 MHz - 30 times slower */
+        u64 top = rdnum(DEVFREQ "max_freq");
+        if (top) {
+            char num[24];
+            fmt(num, sizeof num, "%llu", top);
+            wr(DEVFREQ "min_freq", num);
+        }
+        LOG("the GPU stays powered, clock %llu MHz (top %llu)", rdnum(DEVFREQ "cur_freq") / 1000000, top / 1000000);
         g_compute = 1;
         fmt(state + strlen(state), sizeof state - strlen(state), "; draws the transitions");
         LOG("the GPU draws the shell's transitions from now on (qrt.nogpuanim: the CPU)");
