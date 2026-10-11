@@ -685,8 +685,13 @@ static int cjob_begin(u32 *slot) {
     return 1;
 }
 static long cjob_submit(u32 slot, u32 s, const struct bo *const *x, int nx) {
+    /* the programs' code is listed too: the driver maps a buffer for the GPU only while a
+     * submit lists it (0.28.1 left it out - the GPU faulted fetching the instructions) */
+    const struct bo *all[6] = { &kbo };
+    int n = 1;
+    for (int i = 0; i < nx && n < 6; i++) all[n++] = x[i];
     u32 f;
-    long r = submitc(&ccmd, slot * CSLOT_BYTES, (u32)((u8 *)cp - (u8 *)(ccmd.cpu + slot * (CSLOT_BYTES / 4))), x, nx, &f);
+    long r = submitc(&ccmd, slot * CSLOT_BYTES, (u32)((u8 *)cp - (u8 *)(ccmd.cpu + slot * (CSLOT_BYTES / 4))), all, n, &f);
     if (r >= 0) { cslot_seq[slot] = s; ncjob++; }
     return r;
 }

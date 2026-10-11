@@ -189,6 +189,14 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.28.2: the programs' code mapped for the GPU
+
+0.28.1 on the Mi A1: QRT's commands ran (the first one in 308 ms), the 2D copy too - and
+the test program never finished: the GPU's IOMMU faulted at 0x1074000, 0x1074040, ...
+in 64-byte steps, the GPU fetching the program's instructions from the buffer that holds
+them.  Linux's driver maps a buffer's pages for the GPU only while a submit lists it, and
+that buffer was not listed.  Every program job lists it now.
+
 ## 0.28.1: when the GPU's first job does not come back
 
 0.28.0 on the Mi A1: QRT's very first command stream (one CP_MEM_WRITE - 28 ms in
