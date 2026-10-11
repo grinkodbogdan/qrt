@@ -30,7 +30,7 @@ if [ "${QRT_ARCH:-x64}" = arm64 ]; then
         cat /usr/lib/binfmt.d/qemu-aarch64.conf > /proc/sys/fs/binfmt_misc/register
     fi
     # rustc links ARM programs with clang (CMake's C compiler): lld, not the host's ld
-    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=-fuse-ld=lld -C link-arg=--target=aarch64-linux-musl"
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=-fuse-ld=lld -C link-arg=--target=aarch64-linux-musl -C link-arg=-L$SDK/sysroot/usr/lib"
     # cargo runs in the build tree, outside the source's rust-toolchain.toml: name the toolchain
     export RUSTUP_TOOLCHAIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$SRC/rust-toolchain.toml")
 else
