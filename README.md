@@ -189,6 +189,49 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.31.0: the kernel and the files apart
+
+The phone's boot image now holds just the kernel and a small ramdisk (~15 MB); everything
+else - Ladybird, its resources, fonts, certificates, the tools - lives on a partition of
+its own, flashed once.  A new rootfs is one `fastboot flash`; a new kernel is one
+`fastboot boot`, and neither needs the other.
+
+**Flashing (Mi A1)** - the phone is an A/B device: Android runs from one slot, and the
+other slot's `system` partition is spare.  Nothing of the slot Android uses is touched.
+
+1. Power off; hold **volume down + power** for the fastboot screen; connect USB.
+2. `fastboot getvar current-slot` - say it answers `a`: the spare one is `b` (and the
+   other way round).
+3. Unzip `dist/qrt-0.31.0-rootfs-arm64.zip` (Explorer's "Extract all" does) and flash the
+   image in it to the spare slot's system partition:
+   `fastboot flash system_b qrt-rootfs-arm64.img`
+4. `fastboot boot qrt-0.31.0-mi-a1-boot.img`
+
+Next time only what changed: a new rootfs is step 3 then `fastboot reboot`, back to the
+fastboot screen and step 4; a new kernel is step 4 alone.  An Android system update
+writes the spare slot too: then flash the rootfs again.
+
+To start QRT without a computer, the kernel can go to the spare slot as well:
+`fastboot flash boot_b qrt-0.31.0-mi-a1-boot.img`, then `fastboot --set-active=b` and
+`fastboot reboot`.  Android comes back with `fastboot --set-active=a`.  The bootloader
+counts boots that Android did not confirm and may switch back to slot `a` by itself after
+several; `--set-active=b` again brings QRT back.
+
+- **At boot** QRT mounts the phone's partitions read-only (as before) and the one marked
+  `/etc/qrt-rootfs` is copied into its in-memory file tree on a thread of its own: 153 MB
+  in about 3 s in QEMU, the shell running meanwhile.  Files take the pages they were read
+  into (no second copy).  Tapping Browser before that waits for it ("Loading the
+  browser"); with no rootfs partition after a minute it falls back to 0.30.2's download.
+- **Built with** `make rootfs-arm64` (`tools/mkrootfs.sh`: the ramdisk's files and the
+  browser's, an ext4 image of them, written as an Android sparse image by
+  `tools/img2simg.py` so fastboot sends only what is used).
+- **The freeze after unpacking the browser** (0.30.2): the unpacking (150 MB through the
+  gzip decoder) ran on the shell's own thread, so nothing - touch, the screen - moved
+  until it ended.  It now runs on a thread of its own.  And the shell waited on Linux
+  every frame for the first minute, looking for a Wi-Fi card behind whatever Linux was
+  busy with (reading the rootfs: half a second at a time); that looking is now done on a
+  thread too.  A "shell: stalled" line in the log says where the shell waited.
+
 ## 0.30.2: the browser comes over Wi-Fi
 
 0.30.1 failed the same way, and a boot image without the browser (19 MB) booted: the Mi

@@ -197,6 +197,10 @@ build/arm64/browser.cpio.gz: $(ARM_LADYBIRD)
 	gzip -9nc build/arm64/browser.cpio > $@
 	rm -f build/arm64/browser.cpio
 browser-arm64: build/arm64/browser.cpio.gz
+# everything but the kernel, for a spare partition (tools/mkrootfs.sh; README: flashing)
+build/arm64/qrt-rootfs.img: build/arm64/ramdisk.cpio $(ARM_LADYBIRD) tools/mkrootfs.sh tools/img2simg.py
+	sh tools/mkrootfs.sh $@ src/arch/arm64/rootfs build/arm64/rootfs $(if $(ARM_LADYBIRD),$(A))
+rootfs-arm64: build/arm64/qrt-rootfs.img
 build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null) $(ARM_PROGS)
 	@mkdir -p build/arm64/rootfs
 	$(PYTHON) tools/mkcpio.py src/arch/arm64/rootfs build/arm64/rootfs $@

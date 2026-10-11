@@ -382,9 +382,21 @@ static int pkt_open(void) {
 }
 
 /* ---- the backend ---- */
+/* A card Linux found (USB, hwsim) is looked for on a thread of its own: the shell asks every
+ * frame, and Linux may be busy for seconds with another thread's work (the root file
+ * system copied in) - the shell waited for it (0.30.2) */
+static volatile int probe_seen, probe_busy;
+static u64 probe_at;
+static void probe_work(void *a) { (void)a; if (find_wlan()) probe_seen = 1; probe_busy = 0; }
 static int lw_present(void) {
     if (!linux_running()) return 0;
-    return fdt_find_compatible(-1, "qcom,pronto-v3-pil") >= 0 || fdt_find_compatible(-1, "qcom,pronto") >= 0 || find_wlan();
+    if (fdt_find_compatible(-1, "qcom,pronto-v3-pil") >= 0 || fdt_find_compatible(-1, "qcom,pronto") >= 0) return 1;
+    if (!probe_seen && !probe_busy && k_now_ms() - probe_at >= 1000) {
+        probe_at = k_now_ms();
+        probe_busy = 1;
+        thr_create("wifi probe", probe_work, NULL, 32 << 10);
+    }
+    return probe_seen;
 }
 
 /* ---- QEMU: a test access point on hwsim's second radio (qrt.wifitest) ----

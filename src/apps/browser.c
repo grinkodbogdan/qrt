@@ -414,7 +414,18 @@ static int ladybird_running(void) {
  * archive of /bin/ladybird and its resources, published with each release - and
  * unpacks it into the file tree (it lasts until power-off). */
 #define PACK_URL "https://raw.githubusercontent.com/grinkodbogdan/qrt/claude/dell-venue-custom-os-td9opx/dist/qrt-browser-arm64.cpio.gz"
-static struct { http_t *req; int state; char err[200]; u64 started; } PK;   /* state: 0 -, 1 downloading, 2 unpacking, 3 failed */
+static struct { http_t *req; volatile int state; char err[200]; u64 started; volatile int unpacked; } PK;
+/* state: 0 -, 1 downloading, 2 unpacking, 3 failed, 4 waiting for the rootfs partition
+ * (linux.c copies QRT's files from it - the usual way: then nothing is downloaded) */
+int arm_rootfs_state(void);
+static void unpack_thread(void *arg) {
+    (void)arg;
+    usize len;
+    const u8 *b = http_body(PK.req, &len);
+    int arm_unpack_files(const u8 *p, usize n);
+    PK.unpacked = len ? arm_unpack_files(b, len) : -1;
+    PK.state = 5;                                          /* done: pack_tick() takes it from here */
+}
 static void pack_start(void) {
     PK.req = http_get(PACK_URL);
     http_set_limit(PK.req, 256u << 20);
@@ -424,11 +435,15 @@ static void pack_start(void) {
 static int ladybird_open(void);
 /* the download, from tick(): 1 = redraw */
 static int pack_tick(void) {
-    if (PK.state == 2) {                               /* drawn "Unpacking" once: now do it */
-        usize len;
-        const u8 *b = http_body(PK.req, &len);
-        int arm_unpack_files(const u8 *p, usize n);
-        int files = len ? arm_unpack_files(b, len) : -1;
+    if (PK.state == 4) {                               /* the rootfs partition: copied yet? */
+        int rs = arm_rootfs_state();
+        if (vfs_lookup("/bin/ladybird") && rs != 1) { PK.state = 0; ladybird_open(); return 1; }
+        if ((rs == 0 && k_now_ms() > 60000) || rs == 2) { pack_start(); return 1; }   /* no partition, or no browser on it: download it */
+        return 0;
+    }
+    if (PK.state == 2) return 0;                       /* unpacking, on its own thread */
+    if (PK.state == 5) {
+        int files = PK.unpacked;
         http_free(PK.req); PK.req = NULL;
         if (files <= 0 || !vfs_lookup("/bin/ladybird")) { PK.state = 3; strlcpy(PK.err, "the browser pack did not unpack", sizeof PK.err); return 1; }
         klog("browser: browser pack unpacked (%d files) after %llu s", files, (k_now_ms() - PK.started) / 1000);
@@ -442,7 +457,7 @@ static int pack_tick(void) {
     u64 mb = http_received(PK.req) >> 20;
     int redraw = mb != last_mb;
     last_mb = mb;
-    if (r == 1 && http_code(PK.req) == 200) { PK.state = 2; return 1; }
+    if (r == 1 && http_code(PK.req) == 200) { PK.state = 2; thr_create("unpack", unpack_thread, NULL, 32 << 10); return 1; }
     if (r != 0) {
         PK.state = 3;
         if (r == 1) fmt(PK.err, sizeof PK.err, "the server answered %d", http_code(PK.req));
@@ -456,24 +471,29 @@ static int pack_tick(void) {
 static void pack_draw(canvas_t *c, rect_t a) {
     gfx_fill(c, a, ui.window);
     char line[200];
-    const char *title = PK.state == 3 ? "Could not get the browser" : PK.state == 2 ? "Unpacking the browser" : "Getting the browser";
+    const char *title = PK.state == 3 ? "Could not get the browser" : PK.state == 2 || PK.state == 5 ? "Unpacking the browser" :
+                        PK.state == 4 ? "Loading the browser" : "Getting the browser";
     gfx_text_center(c, ui.title, (rect_t){ a.x, a.y + a.h / 2 - dp(60), a.w, dp(40) }, title, ui.text);
     if (PK.state == 1) {
         if (PK.req && http_received(PK.req) > 4096) fmt(line, sizeof line, "%llu MB of about 60, over Wi-Fi", (u64)(http_received(PK.req) >> 20));
         else strlcpy(line, PK.req ? http_progress(PK.req) : "", sizeof line);
-    } else if (PK.state == 2) strlcpy(line, "a few seconds", sizeof line);
+    } else if (PK.state == 2 || PK.state == 5) strlcpy(line, "a few seconds", sizeof line);
+    else if (PK.state == 4) strlcpy(line, arm_rootfs_state() == 1 ? "from the phone's storage" : "looking for QRT's files on the phone", sizeof line);
     else fmt(line, sizeof line, "%s - tap to try again", PK.err);
     gfx_text_center(c, ui.body, (rect_t){ a.x + dp(16), a.y + a.h / 2 - dp(10), a.w - dp(32), dp(30) }, line, ui.text2);
     gfx_text_center(c, ui.body, (rect_t){ a.x + dp(16), a.y + a.h / 2 + dp(30), a.w - dp(32), dp(30) },
-                    "Ladybird comes over Wi-Fi, once per boot", ui.text3);
+                    PK.state == 4 ? "flash QRT's rootfs partition once: see the README" : "Ladybird comes over Wi-Fi, once per boot", ui.text3);
 }
 #endif
 
 /* 1: Ladybird takes over (its window is shown now, or will be once it has started) */
 static int ladybird_open(void) {
 #if defined(__aarch64__)
-    if (!vfs_lookup("/bin/ladybird")) {                /* the browser pack first */
-        if (PK.state != 1 && PK.state != 2) pack_start();
+    if (!vfs_lookup("/bin/ladybird") || arm_rootfs_state() == 1) {   /* its files first */
+        if (PK.state == 0 || PK.state == 3) {
+            if (arm_rootfs_state() || k_now_ms() < 60000) PK.state = 4;   /* from the rootfs partition */
+            else pack_start();                         /* none: over Wi-Fi */
+        }
         return 1;
     }
 #endif

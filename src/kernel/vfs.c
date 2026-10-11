@@ -471,6 +471,15 @@ void vfs_relocate(void) { if (root) root = deep_copy(root, NULL); }
 /* ARM's ramdisk: a big file (a program) goes into whole pages of its own, outside the
  * heap - as deep_copy does on x86-64 - so exec maps its read-only segments from here,
  * shared by every process running it (load_elf) */
+/* a file whose contents are already in whole pages of their own (cap bytes from
+ * pmm_alloc_contig): the file takes them, nothing is copied */
+vnode_t *vfs_adopt_pages(const char *path, void *data, u64 size, u64 cap) {
+    vnode_t *n = vfs_create(path, 0);
+    if (!n) return NULL;
+    n->data = data; n->cap = cap; n->size = size;
+    total_bytes += size;
+    return n;
+}
 vnode_t *vfs_create_pages(const char *path, const void *data, u64 size) {
     u64 pmm_alloc_contig(usize pages);
     vnode_t *n = vfs_create(path, 0);

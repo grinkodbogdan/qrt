@@ -837,6 +837,7 @@ static void firmware_from(const struct amnt *m) {
         klog("argon: %s (%s): %s", nm, fw, st);
     }
 }
+static void rootfs_check(const struct amnt *m);
 static void storage_scan(void) {
     long fd = l_open("/sys/class/block", 0200000);
     if (fd < 0) return;
@@ -869,9 +870,81 @@ static void storage_scan(void) {
         namnt++;
         vfs_mount_remote(tp, m);
         klog("argon: %s (%s, %s) at %s, read-only", dev, m->name, got, tp);
+        rootfs_check(m);
         if (!strncmp(m->name, "modem", 5)) firmware_from(m);
     }
 }
+/* ---- QRT's own files on a partition (the "rootfs": tools/mkrootfs.sh) ----
+ * The boot image stays small - aboot does not take a big one (0.30.0) - and the rest of
+ * the file tree (Ladybird...) lives on a partition flashed with fastboot, marked by
+ * /etc/qrt-rootfs.  Found among the partitions storage_scan mounts, it is copied into the
+ * in-memory tree on this thread, file by file (a program into whole pages of its own, as
+ * from the ramdisk), so a new rootfs is just "fastboot flash" and the kernel stays. */
+static volatile int rootfs_state;                    /* 0 none (yet), 1 copying, 2 copied */
+static char rootfs_from[56];
+int arm_rootfs_state(void) { return rootfs_state; }
+const char *arm_rootfs_where(void) { return rootfs_from; }
+static long rootfs_files, rootfs_bytes;
+static void import_tree(const char *src, const char *dst) {
+    long fd = l_open(src, 0200000);
+    if (fd < 0) return;
+    char *d = kalloc(8192);
+    long n;
+    while ((n = sys(NR_GETDENTS64, fd, (long)d, 8192, 0, 0)) > 0)
+        for (long o = 0; o < n; o += *(u16 *)(d + o + 16)) {
+            const char *nm = d + o + 19;
+            if (!strcmp(nm, ".") || !strcmp(nm, "..") || !strcmp(nm, "lost+found")) continue;
+            char sp[256], dp[256];
+            fmt(sp, sizeof sp, "%s/%s", src, nm);
+            fmt(dp, sizeof dp, "%s/%s", dst, nm);
+            u8 st[128] = { 0 };
+            if (sys(NR_NEWFSTATAT, AT_FDCWD, (long)sp, (long)st, 0x100, 0) < 0) continue;
+            u32 mode = *(u32 *)(st + 16);
+            u64 size = *(u64 *)(st + 48);
+            if ((mode & 0170000) == 0040000) {
+                if (!vfs_lookup(dp)) vfs_create(dp, 1);
+                import_tree(sp, dp);
+                continue;
+            }
+            if ((mode & 0170000) != 0100000) continue;
+            long f = l_open(sp, 0);
+            if (f < 0) continue;
+            usize pages = (size + 4095) / 4096;
+            u8 *buf = pages ? (u8 *)(usize)pmm_alloc_contig(pages) : NULL;
+            if (pages && !buf) { l_close((int)f); klog("rootfs: no memory for %s", sp); continue; }
+            u64 got = 0;
+            while (got < size) {
+                long r = l_read((int)f, buf + got, (long)MIN(size - got, (u64)(1u << 20)));
+                if (r <= 0) break;
+                got += (u64)r;
+            }
+            l_close((int)f);
+            vnode_t *vfs_adopt_pages(const char *path, void *data, u64 size, u64 cap);
+            if (vfs_lookup(dp)) vfs_unlink(dp, 0);
+            vnode_t *v = NULL;
+            if (got >= (1u << 20)) v = vfs_adopt_pages(dp, buf, got, (u64)pages * 4096);   /* the pages become the file's */
+            else if ((v = vfs_create(dp, 0))) vfs_write(v, 0, buf, got);
+            if (!v || got < (1u << 20)) for (usize i = 0; i < pages; i++) pmm_free((u64)(usize)buf + i * 4096);
+            rootfs_files++; rootfs_bytes += (long)got;
+        }
+    l_close((int)fd);
+    kfree(d);
+}
+static void rootfs_check(const struct amnt *m) {
+    if (rootfs_state) return;
+    char marker[96];
+    fmt(marker, sizeof marker, "%s/etc/qrt-rootfs", m->lpath);
+    u8 st[128];
+    if (sys(NR_NEWFSTATAT, AT_FDCWD, (long)marker, (long)st, 0, 0) < 0) return;
+    rootfs_state = 1;
+    strlcpy(rootfs_from, m->name, sizeof rootfs_from);
+    klog("rootfs: QRT's files on %s (%s): copying them in", m->name, m->lpath);
+    u64 t0 = k_now_us();
+    import_tree(m->lpath, "");
+    rootfs_state = 2;
+    klog("rootfs: %ld files, %ld MB in %llu ms", rootfs_files, rootfs_bytes >> 20, (k_now_us() - t0) / 1000);
+}
+
 static int scans;
 static void storage_loop(void *a) {
     (void)a;

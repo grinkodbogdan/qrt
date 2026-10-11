@@ -60,9 +60,24 @@ int hal_poll(event_t *out, int max) {
     void thr_longest(const char **name, u64 *us);
     const char *nm; u64 us;
     thr_longest(&nm, &us);                                    /* since the last poll */
+    if (!(last_poll && nowp - last_poll > 250)) {
+        void thr_main_off(u64 *blocked, u64 *sleeping, u64 *waiting, u64 *site);
+        u64 a, b, c, d[8];
+        thr_main_off(&a, &b, &c, d);                              /* counts start afresh each poll */
+    }
     if (last_poll && nowp - last_poll > 250) {
         static int said;
-        if (said++ < 20) klog("shell: stalled %llu ms (longest run without a switch: %s, %llu ms)", nowp - last_poll, nm, us / 1000);
+        if (said++ < 20) {
+            void thr_main_off(u64 *blocked, u64 *sleeping, u64 *waiting, u64 *site);
+            u64 bl, sl, wt, site[8];
+            thr_main_off(&bl, &sl, &wt, site);
+            extern char _start[];
+            u64 b0 = (u64)(usize)_start;
+            char at[96] = "";                                     /* where it waited, for addr2line */
+            if (bl) fmt(at, sizeof at, " at +%llx +%llx +%llx +%llx", site[0] - b0, site[1] - b0, site[2] - b0, site[3] - b0);
+            klog("shell: stalled %llu ms (longest run without a switch: %s, %llu ms); off the CPU: blocked %llu ms%s, asleep %llu, waiting %llu",
+                 nowp - last_poll, nm, us / 1000, bl / 1000, at, sl / 1000, wt / 1000);
+        }
     }
     last_poll = nowp;
     static u64 report_at;
@@ -93,7 +108,10 @@ void hal_wait_frame_ms(u32 ms) { thr_sleep_us((u64)ms * 1000); }
 void hal_wait_frame(void) {
     static u64 next;
     u64 now = k_now_us();
-    if (next > now && next - now <= 10000) thr_sleep_until(next); else thr_yield();
+    /* late: straight on - a yield sent the shell behind every ready thread, a whole round
+     * of slices (with Ladybird's dozens of threads, most of a second); the tick gives the
+     * others their turns (sched.c) */
+    if (next > now && next - now <= 10000) thr_sleep_until(next);
     next = MAX(now, next) + 10000;
 }
 

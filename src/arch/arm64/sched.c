@@ -64,8 +64,26 @@ void thr_longest(const char **name, u64 *us) {
     long_us = 0; long_name = NULL;
     irq_restore(f);
 }
+/* where the shell's time off the CPU went since the last call: blocked (and where), asleep,
+ * or ready but waiting - for the "shell: stalled" line (hal.c) */
+static u64 main_off_at, main_off_state, main_t[3], main_site[8];
+void thr_main_off(u64 *blocked, u64 *sleeping, u64 *waiting, u64 *site) {
+    u64 f = irq_save();
+    *blocked = main_t[2]; *sleeping = main_t[1]; *waiting = main_t[0];
+    for (int i = 0; i < 8; i++) site[i] = main_site[i];
+    main_t[0] = main_t[1] = main_t[2] = 0;
+    irq_restore(f);
+}
 static void sw(thr_t *t) {
     thr_t *prev = cur;
+    if (prev == &main_thr) {
+        main_off_at = k_now_us();
+        main_off_state = prev->state == T_BLOCKED ? 2 : prev->state == T_SLEEP ? 1 : 0;
+        if (main_off_state == 2) {                                 /* the callers that blocked it */
+            u64 *fp = __builtin_frame_address(0);
+            for (int i = 0; i < 8 && fp; i++) { main_site[i] = fp[1]; fp = (u64 *)fp[0]; }
+        }
+    } else if (t == &main_thr && main_off_at) main_t[main_off_state] += k_now_us() - main_off_at;
     u64 daif;
     __asm__ volatile("mrs %0, daif" : "=r"(daif));
     account();
@@ -178,10 +196,16 @@ static void schedule_inner(void) {
 }
 
 /* the timer tick (gic.c, interrupts masked): another ready thread gets the CPU */
+/* The shell preempted in the middle of a frame comes back at the next tick, not after a
+ * whole round of every ready thread (Ladybird has dozens: the shell stalled for most of a
+ * second at a time, 0.30.2) - the others get one slice in turn between its frames. */
 void thr_tick(void) {
     u64 soonest;
     thr_t *t = pick(&soonest);
-    if (t && t != cur && cur->state == T_READY) sw(t);
+    if (t && t != cur && cur->state == T_READY) {
+        if (cur == &main_thr) main_boost = 1;
+        sw(t);
+    }
 }
 
 void thr_yield(void) { u64 f = irq_save(); schedule(); irq_restore(f); }
