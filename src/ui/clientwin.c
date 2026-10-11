@@ -70,6 +70,7 @@ static void push(cwin_t *w, qrt_event_t e) {
     else if (e.type == QRT_EV_MOVE) { /* full: drop movement */ }
     else w->q[(w->qh + QLEN - 1) % QLEN] = e;                    /* keep the latest important one */
     if (w->owner && w->owner->qrt_events) eventfd_signal(w->owner->qrt_events);
+    if (w->owner) { void uw_kick(const void *key); uw_kick(w->owner); }   /* event_wait (qrtcall.c) */
     UNLOCK;
 }
 

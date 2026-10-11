@@ -10,6 +10,7 @@
  */
 #include "lfile.h"
 #include "uarch.h"
+#include "uwait.h"
 #include "../kernel/sound.h"
 
 enum { EINTR = 4, EBADF = 9, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EEXIST = 17, EINVAL = 22, ENOTTY = 25, ENOENT = 2, EPERM = 1, ELOOP = 40 };
@@ -205,6 +206,7 @@ void eventfd_signal(kobj_t *o) {
     u64 fl = irq_save();
     ((eventfd_t *)o)->count++;
     irq_restore(fl);
+    uw_kick(o);
 }
 
 static i64 eventfd_read(proc_t *p, ufile_t *f, eventfd_t *e, u64 buf, u64 len) {
@@ -216,13 +218,16 @@ static i64 eventfd_read(proc_t *p, ufile_t *f, eventfd_t *e, u64 buf, u64 len) {
             u64 v = e->semaphore ? 1 : e->count;
             e->count -= v;
             irq_restore(fl);
+            uw_kick(e);                                       /* room for a writer */
             *(u64 *)(usize)buf = v;
             return 8;
         }
         irq_restore(fl);
         if (f->flags & O_NONBLOCK) return -EAGAIN;
         if (proc_interrupted(p)) return -EINTR;
-        thread_sleep_ms(1);
+        uwait_t w;
+        uw_begin(&w); uw_note(e);
+        if (!e->count) uw_sleep(&w, ~0ull); else uw_end();
     }
 }
 
@@ -233,11 +238,13 @@ static i64 eventfd_write(proc_t *p, ufile_t *f, eventfd_t *e, u64 buf, u64 len) 
     if (v == ~0ull) return -EINVAL;
     for (;;) {
         u64 fl = irq_save();
-        if (e->count + v >= e->count && e->count + v < ~0ull) { e->count += v; irq_restore(fl); return 8; }
+        if (e->count + v >= e->count && e->count + v < ~0ull) { e->count += v; irq_restore(fl); uw_kick(e); return 8; }
         irq_restore(fl);
         if (f->flags & O_NONBLOCK) return -EAGAIN;
         if (proc_interrupted(p)) return -EINTR;
-        thread_sleep_ms(1);
+        uwait_t w;
+        uw_begin(&w); uw_note(e);
+        uw_sleep(&w, ~0ull);
     }
 }
 
@@ -291,6 +298,7 @@ i64 timerfd_settime(proc_t *p, kobj_t *o, int flags, u64 nv, u64 ov) {
         t->next_us = k_now_us() + (target > now_clock ? target - now_clock : 0);
         if (!t->next_us) t->next_us = 1;
     } else t->next_us = k_now_us() + MAX(val, (u64)1);
+    uw_kick(o);                                                   /* its waiters' deadline moved */
     return 0;
 }
 
@@ -302,8 +310,10 @@ static i64 timerfd_read(proc_t *p, ufile_t *f, timerfd_t *t, u64 buf, u64 len) {
         if (t->ticks) { *(u64 *)(usize)buf = t->ticks; t->ticks = 0; return 8; }
         if (f->flags & O_NONBLOCK) return -EAGAIN;
         if (proc_interrupted(p)) return -EINTR;
-        u64 now = k_now_us();
-        thread_sleep_ms(t->next_us > now ? MIN((t->next_us - now) / 1000 + 1, (u64)10) : 10);
+        uwait_t w;
+        uw_begin(&w); uw_note(t);                                 /* settime kicks it */
+        if (t->next_us) uw_deadline(t->next_us);
+        uw_sleep(&w, ~0ull);
     }
 }
 
@@ -343,7 +353,9 @@ static i64 signalfd_read(proc_t *p, ufile_t *f, signalfd_t *s, u64 buf, u64 len)
         if (done) return (i64)done;
         if (f->flags & O_NONBLOCK) return -EAGAIN;
         if (p->killed || (sig_deliverable(p) & ~s->mask)) return -EINTR;
-        thread_sleep_ms(5);
+        uwait_t w;
+        uw_begin(&w);                                             /* notes the process: sig_post kicks it */
+        if (!signalfd_ready(p, s)) uw_sleep(&w, ~0ull); else uw_end();
     }
 }
 
@@ -446,11 +458,12 @@ i64 epoll_wait(proc_t *p, kobj_t *o, u64 events, int max, i64 timeout_ms) {
     if (!UOK(events, (u64)max * 12)) return -EFAULT;
     u64 end = timeout_ms < 0 ? ~0ull : k_now_ms() + (u64)timeout_ms;
     for (;;) {
+        uwait_t w;
+        uw_begin(&w);
         int n = epoll_scan(p, e, (u8 *)(usize)events, max);
-        if (n || k_now_ms() >= end) return n;
-        if (proc_interrupted(p)) return -EINTR;
-        u64 left = end - k_now_ms();
-        thread_sleep_ms(MIN(left, (u64)2));
+        if (n || k_now_ms() >= end) { uw_end(); return n; }
+        if (proc_interrupted(p)) { uw_end(); return -EINTR; }
+        uw_sleep(&w, end == ~0ull ? ~0ull : end * 1000);
     }
 }
 
@@ -570,7 +583,7 @@ i64 kobj_write(proc_t *p, ufile_t *f, u64 buf, u64 len) {
     switch (o->kind) {
     case KO_EVENTFD: return eventfd_write(p, f, (eventfd_t *)o, buf, len);
     case KO_UNIX: return unix_sendto(p, f, buf, len, 0, 0, 0);
-    case KO_DSP: return dsp_write(p, f, (dsp_t *)o, buf, len);
+    case KO_DSP: uw_deadline(k_now_us() + 5000); return dsp_write(p, f, (dsp_t *)o, buf, len);
     case KO_SHM: {
         if (!UOK(buf, len)) return -EFAULT;
         i64 r = shm_rw(o, f->off, (void *)(usize)buf, len, 1);
@@ -584,8 +597,8 @@ i64 kobj_write(proc_t *p, ufile_t *f, u64 buf, u64 len) {
 int kobj_poll(proc_t *p, ufile_t *f, int events) {
     kobj_t *o = f->obj;
     switch (o->kind) {
-    case KO_EVENTFD: { eventfd_t *e = (eventfd_t *)o; return ((e->count ? POLLIN : 0) | (e->count < ~0ull - 1 ? POLLOUT : 0)) & events; }
-    case KO_TIMERFD: { timerfd_t *t = (timerfd_t *)o; timer_update(t); return t->ticks ? POLLIN & events : 0; }
+    case KO_EVENTFD: { eventfd_t *e = (eventfd_t *)o; uw_note(o); return ((e->count ? POLLIN : 0) | (e->count < ~0ull - 1 ? POLLOUT : 0)) & events; }
+    case KO_TIMERFD: { timerfd_t *t = (timerfd_t *)o; timer_update(t); uw_note(o); if (t->next_us) uw_deadline(t->next_us); return t->ticks ? POLLIN & events : 0; }
     case KO_SIGNALFD: return signalfd_ready(p, (signalfd_t *)o) ? POLLIN & events : 0;
     case KO_EPOLL: return epoll_scan(p, (epoll_t *)o, NULL, 1) ? POLLIN & events : 0;
     case KO_UNIX: return unix_poll(p, f, events);

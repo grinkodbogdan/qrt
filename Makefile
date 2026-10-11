@@ -33,7 +33,7 @@ LDFLAGS := -subsystem:efi_application -entry:efi_main -nodefaultlib
 
 # the native kernel (ExitBootServices, own MM/interrupts/SMP) is 64-bit only
 X64_SRC := src/arch/x64/mm.c src/arch/x64/cpu.c src/arch/x64/apic.c src/arch/x64/native.c \
-           src/arch/x64/sched.c src/arch/x64/smp_native.c src/user/proc.c src/user/linux.c src/arch/x64/irq.c src/user/lsock.c src/user/signal.c src/user/lfile.c src/user/unix.c src/user/qrtcall.c src/arch/x64/lkldev.c
+           src/arch/x64/sched.c src/arch/x64/smp_native.c src/user/proc.c src/user/linux.c src/arch/x64/irq.c src/user/lsock.c src/user/signal.c src/user/lfile.c src/user/unix.c src/user/qrtcall.c src/user/uwait.c src/arch/x64/lkldev.c
 X64_ASM := src/arch/x64/isr.S src/arch/x64/entry.S src/arch/x64/trampoline.S src/drivers/iwn/fw.S
 
 IA32_OBJ := $(SRC:src/%.c=build/ia32/%.o)
@@ -105,7 +105,7 @@ ARM_SHARED := src/kernel/rt.c src/kernel/vfs.c src/kernel/inflate.c src/kernel/s
               src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c \
               src/net/wlan.c src/net/netstack.c src/drivers/hidparse.c src/drivers/hidmouse.c \
               src/drivers/bt/hci.c src/drivers/bt/l2cap.c src/drivers/bt/a2dp.c src/drivers/bt/sbc.c \
-              src/user/proc.c src/user/linux.c src/user/signal.c src/user/lfile.c src/user/unix.c src/user/lsock.c src/user/qrtcall.c
+              src/user/proc.c src/user/linux.c src/user/signal.c src/user/lfile.c src/user/unix.c src/user/lsock.c src/user/qrtcall.c src/user/uwait.c
 ARM_SRC    := $(wildcard src/arch/arm64/*.c)
 ARM_OBJ    := $(ARM_SHARED:src/%.c=build/arm64/%.o) $(ARM_SRC:src/%.c=build/arm64/%.o) build/arm64/arch/arm64/boot.o build/arm64/arch/arm64/switch.o
 ARM_CFLAGS := -target aarch64-none-elf -fpie -mno-outline-atomics -mstrict-align

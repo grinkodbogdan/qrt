@@ -120,14 +120,22 @@ static thr_t *pick(u64 *soonest) {
      * threads between (Linux's timer thread, behind a busy Linux thread) never run */
     thr_t *t = (cur == &main_thr && rr_from) ? rr_from->next : cur->next;
     rr_from = NULL;
+    /* QRT's own threads first - Linux's (its drivers: Wi-Fi, the display, storage), the
+     * sound, the network - then programs': a busy page in Ladybird (dozens of threads)
+     * kept a Linux thread holding Linux's CPU waiting for its turn, and the shell behind
+     * it for seconds (0.31.1) */
+    thr_t *user = NULL;
     for (int i = 0; i < nthreads; i++, t = t->next) {
         if (t->state == T_SLEEP) {
             if (t->wake_at <= now) t->state = T_READY;
             else if (t->wake_at < *soonest) *soonest = t->wake_at;
         }
-        if (t->state == T_READY) return t;
+        if (t->state == T_READY) {
+            if (!t->proc) return t;
+            if (!user) user = t;
+        }
     }
-    return NULL;
+    return user;
 }
 
 /* interrupts masked: run the next ready thread (maybe the current one); with none, idle

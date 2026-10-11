@@ -75,6 +75,7 @@ void sig_post(proc_t *p, thread_t *t, int sig, int code, int pid, u64 val) {
     if (t) t->sig_pending |= BIT(sig); else p->sig_pending |= BIT(sig);
     p->sig_info[sig] = (ksiginfo_t){ code, pid, (int)val, val };
     irq_restore(fl);
+    { void uw_kick(const void *key); uw_kick(p); }               /* signalfd's waiters (the signal may be blocked) */
     /* sleeping threads look again (blocking calls return -EINTR) */
     thread_t *all[64];
     int n = sched_threads(all, 64);

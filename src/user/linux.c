@@ -14,6 +14,7 @@
 #include "native_sys.h"
 #include "../net/crypto.h"
 #include "uarch.h"
+#include "uwait.h"
 
 enum { EPERM = 1, ENOENT = 2, EINTR = 4, EBADF = 9, ECHILD = 10, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EBUSY = 16, EEXIST = 17,
        ENOTDIR = 20, EISDIR = 21, EINVAL = 22, EMFILE = 24, ENOTTY = 25, ESPIPE = 29, ERANGE = 34,
@@ -164,6 +165,7 @@ static void pipe_unref(upipe_t *pp, int wr) {
     if (wr) pp->writers--; else pp->readers--;
     int gone = pp->readers <= 0 && pp->writers <= 0;
     irq_restore(fl);
+    uw_kick(pp);                                         /* the other end: end of file, or EPIPE */
     if (gone) { kfree(pp->buf); kfree(pp); }
 }
 
@@ -176,6 +178,7 @@ static i64 pipe_read(proc_t *p, upipe_t *pp, u8 *dst, u64 len, int nonblock) {
             for (u64 i = 0; i < n; i++) dst[i] = pp->buf[(pp->tail + i) % PIPE_SIZE];
             pp->tail += (u32)n;
             irq_restore(fl);
+            uw_kick(pp);                                 /* room for a writer */
             return (i64)n;
         }
         int eof = pp->writers <= 0;
@@ -183,7 +186,9 @@ static i64 pipe_read(proc_t *p, upipe_t *pp, u8 *dst, u64 len, int nonblock) {
         if (eof) return 0;
         if (nonblock) return -EAGAIN;
         if (proc_interrupted(p)) return -EINTR;
-        thread_sleep_ms(1);
+        uwait_t w;
+        uw_begin(&w); uw_note(pp);
+        if (pp->head == pp->tail && pp->writers > 0) uw_sleep(&w, ~0ull); else uw_end();
     }
 }
 
@@ -197,11 +202,14 @@ static i64 pipe_write(proc_t *p, upipe_t *pp, const u8 *src, u64 len, int nonblo
         for (u64 i = 0; i < n; i++) pp->buf[(pp->head + i) % PIPE_SIZE] = src[done + i];
         pp->head += (u32)n;
         irq_restore(fl);
+        if (n) uw_kick(pp);                              /* data for a reader */
         done += n;
         if (done < len) {
             if (nonblock) return done ? (i64)done : -EAGAIN;
             if (proc_interrupted(p)) return done ? (i64)done : -EINTR;
-            thread_sleep_ms(1);
+            uwait_t w;
+            uw_begin(&w); uw_note(pp);
+            if (pp->head - pp->tail >= PIPE_SIZE && pp->readers > 0) uw_sleep(&w, ~0ull); else uw_end();
         }
     }
     return (i64)done;
@@ -341,6 +349,7 @@ static int fd_ready(proc_t *p, int fd, int events) {
     int rev = 0;
     switch (p->fd[fd].type) {
     case F_SOCK: {
+        uw_note(uw_net_key);
         int hup = 0;
         if ((events & POLLIN) && lsock_readable(p, fd, &hup)) rev |= POLLIN;
         if (hup) rev |= POLLHUP;
@@ -350,6 +359,7 @@ static int fd_ready(proc_t *p, int fd, int events) {
     case F_TTY: rev = events & POLLOUT; break;            /* no keyboard input for programs */
     case F_PIPE: {
         upipe_t *pp = p->fd[fd].pipe;
+        uw_note(pp);
         if (p->fd[fd].flags & 1) { if (pp->readers <= 0) rev |= POLLERR; else if (pp->head - pp->tail < PIPE_SIZE) rev |= events & POLLOUT; }
         else { if (pp->head != pp->tail) rev |= events & POLLIN; if (pp->writers <= 0) rev |= POLLHUP; }
         break;
@@ -366,6 +376,8 @@ static i64 do_poll(proc_t *p, u64 ufds, u64 n, i64 timeout_ms) {
     u64 end = timeout_ms < 0 ? ~0ull : k_now_ms() + (u64)timeout_ms;
     for (;;) {
         int count = 0;
+        uwait_t w;
+        uw_begin(&w);
         for (u64 i = 0; i < n; i++) {
             u8 *e = (u8 *)(usize)(ufds + i * 8);
             int fd = *(i32 *)e;
@@ -374,9 +386,9 @@ static i64 do_poll(proc_t *p, u64 ufds, u64 n, i64 timeout_ms) {
             *(i16 *)(e + 6) = rev;
             if (rev) count++;
         }
-        if (count || k_now_ms() >= end) return count;
-        if (proc_interrupted(p)) return -EINTR;
-        thread_sleep_ms(5);
+        if (count || k_now_ms() >= end) { uw_end(); return count; }
+        if (proc_interrupted(p)) { uw_end(); return -EINTR; }
+        uw_sleep(&w, end == ~0ull ? ~0ull : end * 1000);
     }
 }
 
@@ -392,21 +404,24 @@ static i64 do_select(proc_t *p, int nfds, u64 rfds, u64 wfds, u64 efds, i64 time
     for (;;) {
         u64 rout[MAX_FDS / 64] = { 0 }, wout[MAX_FDS / 64] = { 0 };
         int count = 0;
+        uwait_t w;
+        uw_begin(&w);
         for (int fd = 0; fd < nfds; fd++) {
             int want = ((rin[fd / 64] >> (fd % 64)) & 1 ? POLLIN : 0) | ((win[fd / 64] >> (fd % 64)) & 1 ? POLLOUT : 0);
             if (!want) continue;
             int rev = fd_ready(p, fd, want);
-            if (rev & POLLNVAL) return -EBADF;
+            if (rev & POLLNVAL) { uw_end(); return -EBADF; }
             if (rev & (POLLIN | POLLHUP)) { rout[fd / 64] |= 1ull << (fd % 64); count++; }
             if (rev & POLLOUT) { wout[fd / 64] |= 1ull << (fd % 64); count++; }
         }
         if (count || k_now_ms() >= end) {
             if (rfds && bytes) memcpy((void *)(usize)rfds, rout, bytes);
             if (wfds && bytes) memcpy((void *)(usize)wfds, wout, bytes);
+            uw_end();
             return count;
         }
-        if (proc_interrupted(p)) return -EINTR;
-        thread_sleep_ms(5);
+        if (proc_interrupted(p)) { uw_end(); return -EINTR; }
+        uw_sleep(&w, end == ~0ull ? ~0ull : end * 1000);
     }
 }
 
@@ -877,6 +892,7 @@ void syscall_dispatch(frame_t *f) {
     thread_t *me = thread_current();
     if (me->state == T_DEAD || !me->proc || me->proc->exited) thread_exit();   /* stopped while it waited for the lock */
     syscall_dispatch_locked(f);
+    me->uw = NULL;                                          /* no wait outlives its call (uwait.c) */
     bkl_unlock();
 }
 
@@ -1289,7 +1305,7 @@ static void syscall_dispatch_locked(frame_t *f) {
         r = 0;
         while (k_now_ms() < end) {                              /* in steps, so Stop works */
             if (proc_interrupted(p)) { r = -EINTR; break; }
-            thread_sleep_ms(MIN(end - k_now_ms(), (u64)20));
+            thread_sleep_ms(MIN(end - k_now_ms(), (u64)1000));   /* a signal or Stop wakes it (thread_wake) */
         }
         break;
     }

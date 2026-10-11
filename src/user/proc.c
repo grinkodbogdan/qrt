@@ -20,6 +20,7 @@
  * through SYSCALL (linux.c).
  */
 #include "proc.h"
+#include "uwait.h"
 #include "lsock.h"
 #include "../net/netstack.h"
 
@@ -878,7 +879,7 @@ void proc_exit(int code) {
     for (int i = 0; i < n; i++) {
         thread_t *t = all[i];
         if (t == me || t->proc != p || t->state == T_DEAD || t->in_sys) continue;
-        thread_stop(t);
+        uw_drop(t); thread_stop(t);
         p->nthreads--;
     }
     if (--p->nthreads > 0) thread_exit();
@@ -915,7 +916,7 @@ static void kill_locked(proc_t *p) {
         thread_t *t = all[i];
         if (t->proc != p || t->state == T_DEAD) continue;
         if (t->in_sys) { left++; thread_wake(t); continue; }
-        thread_stop(t);
+        uw_drop(t); thread_stop(t);
         p->nthreads--;
     }
     if (!left && p->nthreads <= 0) {
@@ -977,7 +978,7 @@ i64 proc_exec(proc_t *p, frame_t *f, const char *path, char **argv, int argc, ch
     thread_t *all[64];
     int nt = sched_threads(all, 64);
     for (int i = 0; i < nt; i++)
-        if (all[i] != me && all[i]->proc == p && all[i]->state != T_DEAD) { thread_stop(all[i]); p->nthreads--; }
+        if (all[i] != me && all[i]->proc == p && all[i]->state != T_DEAD) { uw_drop(all[i]); thread_stop(all[i]); p->nthreads--; }
     irq_restore(fl);
 
     /* build the new image beside the old one */

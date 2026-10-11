@@ -29,6 +29,7 @@ typedef struct thread {
     int sig_suspended;
     u64 alt_sp, alt_size;       /* sigaltstack */
     int alt_flags;
+    void *uw;                   /* the wait it is in (src/user/uwait.c) */
     struct thread *next;
     u8 fpu[512] __attribute__((aligned(16)));
 } thread_t;

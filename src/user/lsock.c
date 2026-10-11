@@ -10,6 +10,7 @@
 #include "../net/netstack.h"
 #include "uarch.h"
 #include "lfile.h"
+#include "uwait.h"
 
 enum { EBADF = 9, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EINVAL = 22, EMFILE = 24, ENOTSOCK = 88, EDESTADDRREQ = 89,
        EMSGSIZE = 90, EPROTONOSUPPORT = 93, EOPNOTSUPP = 95, EAFNOSUPPORT = 97, EADDRINUSE = 98, ENETUNREACH = 101,
@@ -142,7 +143,12 @@ static int wait_for(proc_t *p, lsock_t *s, cond_fn c, u64 ms) {
         if (ok) return 0;
         if (proc_interrupted(p)) return -EINTR;
         if (k_now_ms() >= end) return -ETIMEDOUT;
-        thread_sleep_ms(5);
+        uwait_t w;
+        uw_begin(&w); uw_note(uw_net_key);                         /* netstack_poll kicks it */
+        net_lock();
+        ok = c(s);
+        net_unlock();
+        if (!ok) uw_sleep(&w, ms ? end * 1000 : ~0ull); else uw_end();
     }
 }
 

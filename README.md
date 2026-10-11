@@ -189,6 +189,25 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.31.2: waiting without looking
+
+0.31.1 on the Mi A1 browsed, but with Ladybird open everything was slow, the shell too.
+The watchdog's log showed why: the shell waited 2.3 s for Linux, Linux's thread waited
+for a turn on the one core, and the core went round ~120 Ladybird threads - nearly all
+of them waiting (in `ppoll` and `futex`) yet waking every 1-5 ms to look again: ~11,000
+switches a second with the page doing nothing.  Again only a new kernel: `fastboot boot
+qrt-0.31.2-mi-a1-boot.img` (the rootfs stays).
+
+- **Waits sleep until something happens** (`src/user/uwait.c`): poll, select, epoll,
+  pipes, Unix and IP sockets, eventfd, timerfd, signalfd and QRT's window events note
+  what they wait on and sleep until it changes, a timerfd is due, their timeout, or a
+  signal.  Whoever changes a pipe, socket or counter wakes just its waiters.  In QEMU,
+  with Ladybird open and idle, the core is now 82% idle (47% before).
+- **QRT's own threads go first** (ARM): Linux's (Wi-Fi, the display, storage), sound,
+  the network, then programs' - a busy page can no longer keep a Linux thread, and the
+  shell waiting on it, from running.
+- `nanosleep` sleeps through instead of waking every 20 ms.
+
 ## 0.31.1: a watchdog for the shell
 
 0.31.0 on the Mi A1: Ladybird opened google.com and the phone stopped responding with

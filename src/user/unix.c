@@ -12,6 +12,7 @@
  */
 #include "lfile.h"
 #include "uarch.h"
+#include "uwait.h"
 
 enum { EPERM = 1, ENOENT = 2, EINTR = 4, EBADF = 9, EAGAIN = 11, ENOMEM = 12, EFAULT = 14, EINVAL = 22, EMFILE = 24,
        EPIPE = 32, ENOTSOCK = 88, EMSGSIZE = 90, EPROTOTYPE = 91, EOPNOTSUPP = 95, EADDRINUSE = 98, EISCONN = 106,
@@ -77,7 +78,7 @@ static void msg_free(umsg_t *m) {
 void unix_release(kobj_t *o) {
     usock_t *s = (usock_t *)o;
     u64 fl = irq_save();
-    if (s->peer) { s->peer->peer = NULL; s->peer->peer_closed = 1; s->peer = NULL; }
+    if (s->peer) { uw_kick(s->peer); s->peer->peer = NULL; s->peer->peer_closed = 1; s->peer = NULL; }
     for (int i = 0; i < MAX_BOUND; i++) if (bound[i] == s) bound[i] = NULL;
     irq_restore(fl);
     for (umsg_t *m = s->head, *n; m; m = n) { n = m->next; msg_free(m); }
@@ -186,7 +187,9 @@ static i64 wait_until(proc_t *p, ufile_t *f, int flags, int (*ready)(usock_t *),
         if (ready(s)) return 0;
         if ((f->flags & O_NONBLOCK) || (flags & MSG_DONTWAIT)) return -EAGAIN;
         if (proc_interrupted(p)) return -EINTR;
-        thread_sleep_ms(1);
+        uwait_t w;
+        uw_begin(&w); uw_note(s);
+        if (!ready(s)) uw_sleep(&w, ~0ull); else uw_end();
     }
 }
 
@@ -240,6 +243,7 @@ i64 unix_connect(proc_t *p, ufile_t *f, u64 addr, u64 len) {
     srv->connected = s->connected = 1;
     t->backlog[t->nback++] = srv;
     irq_restore(fl);
+    uw_kick(t);                                                    /* accept() and poll() on the listener */
     return 0;
 }
 
@@ -268,7 +272,9 @@ static i64 do_send(proc_t *p, ufile_t *f, usock_t *s, const u64 *iov, u64 niov, 
         if (dst->rxbytes == 0 || dst->rxbytes + total <= RCV_LIMIT || (s->type == ST_STREAM && dst->rxbytes < RCV_LIMIT)) break;
         if ((f->flags & O_NONBLOCK) || (flags & MSG_DONTWAIT)) return -EAGAIN;
         if (proc_interrupted(p)) return -EINTR;
-        thread_sleep_ms(1);
+        uwait_t w;
+        uw_begin(&w); uw_note(s); uw_note(dst);                    /* the receiver taking some kicks both */
+        if (dst->rxbytes && dst->rxbytes + total > RCV_LIMIT) uw_sleep(&w, ~0ull); else uw_end();
     }
     u64 n = total;
     if (s->type == ST_STREAM && dst->rxbytes && dst->rxbytes + n > RCV_LIMIT) n = RCV_LIMIT - dst->rxbytes;   /* a partial write */
@@ -298,6 +304,7 @@ static i64 do_send(proc_t *p, ufile_t *f, usock_t *s, const u64 *iov, u64 niov, 
     dst->tail = m;
     dst->rxbytes += m->len;
     irq_restore(fl);
+    uw_kick(dst);
     return (i64)n;
 pipe:
     if (!(flags & MSG_NOSIGNAL)) sig_post(p, thread_current(), 13, 0, p->pid, 0);   /* SIGPIPE */
@@ -379,7 +386,7 @@ static i64 do_recv(proc_t *p, ufile_t *f, usock_t *s, const u64 *iov, u64 niov, 
         }
         if (s->type != ST_STREAM) {
             if (n < avail) { *mflags |= MSG_TRUNC; if (flags & MSG_TRUNC) copied = avail; }
-            if (!(flags & MSG_PEEK)) { s->head = m->next; if (!s->head) s->tail = NULL; s->rxbytes -= m->len; irq_restore(fl); msg_free(m); }
+            if (!(flags & MSG_PEEK)) { s->head = m->next; if (!s->head) s->tail = NULL; s->rxbytes -= m->len; irq_restore(fl); msg_free(m); uw_kick(s); }
             else irq_restore(fl);
             return (i64)copied;
         }
@@ -389,6 +396,7 @@ static i64 do_recv(proc_t *p, ufile_t *f, usock_t *s, const u64 *iov, u64 niov, 
             if (m->off == m->len) { s->head = m->next; if (!s->head) s->tail = NULL; irq_restore(fl); msg_free(m); fl = irq_save(); }
         }
         irq_restore(fl);
+        if (!(flags & MSG_PEEK)) { uw_kick(s); if (s->peer) uw_kick(s->peer); }   /* room for the sender */
         if (copied >= want || took_fds || (flags & MSG_PEEK)) return (i64)copied;
         if (!(flags & MSG_WAITALL) && !s->head) return (i64)copied;
     }
@@ -467,6 +475,8 @@ i64 unix_shutdown(proc_t *p, ufile_t *f, int how) {
     if (!s->connected && s->type != ST_DGRAM) return -ENOTCONN;
     if (how == 0 || how == 2) s->shut_rd = 1;
     if (how == 1 || how == 2) { s->shut_wr = 1; if (s->peer) s->peer->peer_closed = 1; }
+    uw_kick(s);
+    if (s->peer) uw_kick(s->peer);
     return 0;
 }
 
@@ -510,6 +520,8 @@ int unix_poll(proc_t *p, ufile_t *f, int events) {
     (void)p;
     usock_t *s = us_of(f);
     if (!s) return POLLERR;
+    uw_note(s);
+    if (s->peer) uw_note(s->peer);                                 /* writable once it takes some */
     int rev = 0;
     if (s->listening) return s->nback ? (events & POLLIN) : 0;
     if (s->head) rev |= POLLIN;

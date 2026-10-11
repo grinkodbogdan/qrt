@@ -46,6 +46,9 @@ void netstack_poll(void) {
 #endif
     net_poll();
     net_unlock();
+#if defined(__aarch64__) || defined(__x86_64__)
+    { void uw_kick(const void *key); extern const char uw_net_key[]; uw_kick(uw_net_key); }   /* sockets' waiters look again */
+#endif
     net_time_http_poll();
 }
 

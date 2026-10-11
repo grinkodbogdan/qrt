@@ -6,6 +6,7 @@
 #include "lfile.h"
 #include "native_sys.h"
 #include "../ui/clientwin.h"
+#include "uwait.h"
 
 enum { EINTR = 4, EFAULT = 14, EINVAL = 22, ENOSYS = 38 };
 #define UOK(a, n) proc_user_ok(p, (u64)(a), (u64)(n))
@@ -29,7 +30,9 @@ static i64 event_wait(proc_t *p, u64 uev, i64 timeout_ms) {
         if (cw_next_event(p, &e)) { memcpy((void *)(usize)uev, &e, sizeof e); return 1; }
         if (k_now_ms() >= end) return 0;
         if (proc_interrupted(p)) return -EINTR;
-        thread_sleep_ms(2);
+        uwait_t w;
+        uw_begin(&w);                                              /* notes the process: clientwin.c kicks it */
+        if (!cw_has_event(p)) uw_sleep(&w, end == ~0ull ? ~0ull : end * 1000); else uw_end();
     }
 }
 
