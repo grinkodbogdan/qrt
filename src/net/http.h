@@ -37,4 +37,6 @@ int  http_secure(http_t *h);                /* fetched over TLS */
 const char *http_date(http_t *h);           /* the server's Date: header, "" if none */
 long long http_date_parse(const char *s);  /* "Sun, 06 Nov 1994 08:49:37 GMT" -> Unix time, -1 = bad */
 void http_free(http_t *h);
+void http_set_limit(http_t *h, usize max_body);   /* call right after http_get: bigger downloads (8 MB otherwise) */
+usize http_received(http_t *h);              /* bytes so far (headers included) */
 #endif

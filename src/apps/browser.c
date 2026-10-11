@@ -408,8 +408,75 @@ static int ladybird_running(void) {
     return 1;
 }
 
+#if defined(__aarch64__)
+/* The phone's boot image cannot carry Ladybird (150 MB: aboot fails on a boot image that
+ * big - 0.30.0), so the first open fetches the browser pack over Wi-Fi - a gzip'd cpio
+ * archive of /bin/ladybird and its resources, published with each release - and
+ * unpacks it into the file tree (it lasts until power-off). */
+#define PACK_URL "https://raw.githubusercontent.com/grinkodbogdan/qrt/claude/dell-venue-custom-os-td9opx/dist/qrt-browser-arm64.cpio.gz"
+static struct { http_t *req; int state; char err[200]; u64 started; } PK;   /* state: 0 -, 1 downloading, 2 unpacking, 3 failed */
+static void pack_start(void) {
+    PK.req = http_get(PACK_URL);
+    http_set_limit(PK.req, 256u << 20);
+    PK.state = 1; PK.err[0] = 0; PK.started = k_now_ms();
+    klog("browser: fetching the browser pack (%s)", PACK_URL);
+}
+static int ladybird_open(void);
+/* the download, from tick(): 1 = redraw */
+static int pack_tick(void) {
+    if (PK.state == 2) {                               /* drawn "Unpacking" once: now do it */
+        usize len;
+        const u8 *b = http_body(PK.req, &len);
+        int arm_unpack_files(const u8 *p, usize n);
+        int files = len ? arm_unpack_files(b, len) : -1;
+        http_free(PK.req); PK.req = NULL;
+        if (files <= 0 || !vfs_lookup("/bin/ladybird")) { PK.state = 3; strlcpy(PK.err, "the browser pack did not unpack", sizeof PK.err); return 1; }
+        klog("browser: browser pack unpacked (%d files) after %llu s", files, (k_now_ms() - PK.started) / 1000);
+        PK.state = 0;
+        ladybird_open();
+        return 1;
+    }
+    if (PK.state != 1) return 0;
+    static u64 last_mb = ~0ull;
+    int r = http_poll(PK.req);
+    u64 mb = http_received(PK.req) >> 20;
+    int redraw = mb != last_mb;
+    last_mb = mb;
+    if (r == 1 && http_code(PK.req) == 200) { PK.state = 2; return 1; }
+    if (r != 0) {
+        PK.state = 3;
+        if (r == 1) fmt(PK.err, sizeof PK.err, "the server answered %d", http_code(PK.req));
+        else strlcpy(PK.err, http_error(PK.req), sizeof PK.err);
+        klog("browser: browser pack: %s", PK.err);
+        http_free(PK.req); PK.req = NULL;
+        return 1;
+    }
+    return redraw;
+}
+static void pack_draw(canvas_t *c, rect_t a) {
+    gfx_fill(c, a, ui.window);
+    char line[200];
+    const char *title = PK.state == 3 ? "Could not get the browser" : PK.state == 2 ? "Unpacking the browser" : "Getting the browser";
+    gfx_text_center(c, ui.title, (rect_t){ a.x, a.y + a.h / 2 - dp(60), a.w, dp(40) }, title, ui.text);
+    if (PK.state == 1) {
+        if (PK.req && http_received(PK.req) > 4096) fmt(line, sizeof line, "%llu MB of about 60, over Wi-Fi", (u64)(http_received(PK.req) >> 20));
+        else strlcpy(line, PK.req ? http_progress(PK.req) : "", sizeof line);
+    } else if (PK.state == 2) strlcpy(line, "a few seconds", sizeof line);
+    else fmt(line, sizeof line, "%s - tap to try again", PK.err);
+    gfx_text_center(c, ui.body, (rect_t){ a.x + dp(16), a.y + a.h / 2 - dp(10), a.w - dp(32), dp(30) }, line, ui.text2);
+    gfx_text_center(c, ui.body, (rect_t){ a.x + dp(16), a.y + a.h / 2 + dp(30), a.w - dp(32), dp(30) },
+                    "Ladybird comes over Wi-Fi, once per boot", ui.text3);
+}
+#endif
+
 /* 1: Ladybird takes over (its window is shown now, or will be once it has started) */
 static int ladybird_open(void) {
+#if defined(__aarch64__)
+    if (!vfs_lookup("/bin/ladybird")) {                /* the browser pack first */
+        if (PK.state != 1 && PK.state != 2) pack_start();
+        return 1;
+    }
+#endif
     if (!vfs_lookup("/bin/ladybird")) return 0;
     if (ladybird_running()) {
         const app_t *a = cw_app_of(LB.pid);
@@ -442,6 +509,9 @@ static const app_t *ladybird_window(void) { return NULL; }
 #endif
 
 static void draw(canvas_t *c, rect_t a) {
+#if defined(__aarch64__)
+    if (PK.state) { pack_draw(c, a); return; }
+#endif
     const app_t *lw = ladybird_window();
     if (lw) { lw->draw(c, a); return; }
     if (ladybird_starting()) {                         /* until its window opens (it opens itself) */
@@ -519,6 +589,10 @@ static int hit_box(rect_t a, int x, int y) {
 }
 
 static int event(const event_t *e, rect_t a) {
+#if defined(__aarch64__)
+    if (PK.state == 3 && e->type == EV_UP) { pack_start(); shell_damage(a); return 1; }   /* try again */
+    if (PK.state) return 0;
+#endif
     const app_t *lw = ladybird_window();
     if (lw) return lw->event(e, a);
     if (ladybird_starting()) return 0;
@@ -609,6 +683,9 @@ static void page_arrived(void) {
 
 static int tick(u64 now) {
     (void)now;
+#if defined(__aarch64__)
+    if (PK.state) { int r = pack_tick(); if (r) shell_damage(shell_app_area()); return r; }
+#endif
     if (ladybird_starting() || ladybird_window()) return 0;
     int redraw = 0;
     rect_t a = shell_app_area();

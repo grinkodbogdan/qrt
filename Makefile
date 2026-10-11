@@ -168,8 +168,11 @@ build/arm64/rootfs/bin/%: tests/linux/%.c build/sdk-arm64/.stamp
 	@mkdir -p $(dir $@)
 	build/sdk-arm64/bin/qrt-a64-cc -O2 -w $< -o $@ -lpthread
 # Ladybird for ARM (QRT_ARCH=arm64 ports/ladybird/build.sh Ladybird), when built: the
-# browser, its resources, fonts, fontconfig and the root certificates
-A := build/arm64/rootfs
+# browser, its resources, fonts, fontconfig and the root certificates - not in the boot
+# image (aboot fails on one that big) but a pack of their own, which the Browser app
+# fetches over Wi-Fi (src/apps/browser.c): build/arm64/browser.cpio.gz, published as
+# dist/qrt-browser-arm64.cpio.gz
+A := build/arm64/browser-root
 ARM_LADYBIRD := $(if $(wildcard build/ladybird-arm64/bin/Ladybird),$(A)/bin/ladybird $(A)/share/Lagom/.stamp $(A)/share/fonts/.stamp \
                 $(A)/etc/fonts/fonts.conf $(A)/etc/ssl/certs/ca-certificates.crt)
 $(A)/bin/ladybird: build/ladybird-arm64/bin/Ladybird
@@ -189,7 +192,12 @@ $(A)/etc/fonts/fonts.conf: build/rootfs/etc/fonts/fonts.conf
 $(A)/etc/ssl/certs/ca-certificates.crt: build/rootfs/etc/ssl/certs/ca-certificates.crt
 	@mkdir -p $(dir $@)
 	cp $< $@
-build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null) $(ARM_PROGS) $(ARM_LADYBIRD)
+build/arm64/browser.cpio.gz: $(ARM_LADYBIRD)
+	$(PYTHON) tools/mkcpio.py $(A) build/arm64/browser.cpio
+	gzip -9nc build/arm64/browser.cpio > $@
+	rm -f build/arm64/browser.cpio
+browser-arm64: build/arm64/browser.cpio.gz
+build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null) $(ARM_PROGS)
 	@mkdir -p build/arm64/rootfs
 	$(PYTHON) tools/mkcpio.py src/arch/arm64/rootfs build/arm64/rootfs $@
 # the ramdisk gzip'd (the kernel unpacks it: src/kernel/inflate.c)

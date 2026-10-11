@@ -189,6 +189,19 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.30.2: the browser comes over Wi-Fi
+
+0.30.1 failed the same way, and a boot image without the browser (19 MB) booted: the Mi
+A1's aboot does not take a 73 MB boot image.  So Ladybird is no longer in it:
+
+- **The browser pack**: Ladybird, its resources, fonts and the root certificates as a
+  gzip'd cpio archive (60 MB), published with each release as
+  `dist/qrt-browser-arm64.cpio.gz` (`make browser-arm64`).
+- **The first tap on Browser fetches it** over Wi-Fi from the repository (HTTPS, QRT's own
+  client), shows how much has arrived, unpacks it into the file tree and starts Ladybird;
+  it lasts until power-off.  A failed download says why; tapping tries again.
+- The boot image is back to ~15 MB.
+
 ## 0.30.1: the boot image boots
 
 0.30.0 on the Mi A1: `fastboot boot` sent the image, then "Status read failed" - aboot

@@ -210,6 +210,7 @@ struct http {
     u64 phase_ms;
     const u8 *body; usize body_len;
     char *post;                           /* form body; dropped after a 301/302/303 redirect */
+    usize max_body;                       /* MAX_BODY unless http_set_limit() */
 };
 
 static int io_send(void *ctx, const u8 *d, usize n) {
@@ -250,6 +251,7 @@ static void start(http_t *h) {
 http_t *http_post(const char *url, const char *form_body) {
     http_t *h = kalloc(sizeof *h);
     h->sock = -1;
+    h->max_body = MAX_BODY;
     if (form_body) {
         usize n = strlen(form_body);
         h->post = kalloc(n + 1);
@@ -264,11 +266,14 @@ http_t *http_post(const char *url, const char *form_body) {
 }
 
 http_t *http_get(const char *url) { return http_post(url, NULL); }
+/* a download bigger than a page (the phone's browser pack: tens of MB) */
+void http_set_limit(http_t *h, usize max_body) { h->max_body = max_body; }
+usize http_received(http_t *h) { return h->len; }
 
 static void add_bytes(http_t *h, const u8 *d, usize n) {
     if (h->len + n > h->cap) {
         usize cap = MAX(h->cap * 2, h->len + n + 16384);
-        cap = MIN(cap, (usize)MAX_BODY + 65536);
+        cap = MIN(cap, h->max_body + 65536);
         if (h->len + n > cap) return;
         u8 *p = kalloc(cap);
         if (h->len) memcpy(p, h->buf, h->len);
@@ -410,7 +415,7 @@ int http_poll(http_t *h) {
             if (n <= 0) break;
             add_bytes(h, tmp, (usize)n);
             h->phase_ms = now;
-            if (h->len > MAX_BODY) { eof = 1; break; }
+            if (h->len > h->max_body) { eof = 1; break; }
         }
         if (h->state == H_FAILED) break;
         fmt(h->progress, sizeof h->progress, "Receiving from %s: %u KB", h->u.host, (u32)(h->len / 1024));
