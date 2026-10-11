@@ -189,6 +189,22 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.28.3: transitions without the stutter and the tearing
+
+0.28.2 on the Mi A1: the GPU draws the transitions - fast, but each one stuttered and
+crackled before it ran smoothly.
+
+- **The GPU stays powered** while it draws (`power/control` = on): an idle GPU was
+  suspended, and waking it - its microcode and zap shader loaded again, through the
+  secure world - took ~0.3 s, at the start of every transition.
+- **Two screens** (`fb.c`, `main.c`: 2 x 8 MB reserved): the GPU drew straight into the
+  screen being scanned out, so a refresh showed half of one frame and half of the next.
+  Now it draws a whole frame into the hidden one, QRT waits for that job (its sequence
+  number), and the pipe moves to it at the next refresh (its CTL FLUSH bit clears then);
+  the next frame goes into the screen the pipe just left.  The CPU always draws into the
+  one shown.  The 10 s line says how long a frame took and how much of it was waiting
+  for the refresh.
+
 ## 0.28.2: the programs' code mapped for the GPU
 
 0.28.1 on the Mi A1: QRT's commands ran (the first one in 308 ms), the 2D copy too - and

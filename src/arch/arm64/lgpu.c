@@ -287,7 +287,11 @@ static u32 g_frames, g_us;               /* since the last gpu_stats() */
 static u32 slot_fence[NSLOT], nsub;
 static u64 st_t0, st_clean, st_submit, st_block;
 static u32 st_n, st_behind, last_fence, st_tn;
-static u64 st_tus;
+static u64 st_tus, st_vwait;
+u64 fb32_back(void);
+extern u64 fb32_base;
+int fb32_flip_pending(void);
+void fb32_flip(void);
 static int behind;
 
 static long info(u32 handle, u32 what, u64 *value, u32 len) {
@@ -862,18 +866,33 @@ int gpu_transition(const u32 *from, const u32 *to, int stride, int w, int h, int
         }
         last_gen = gen;
     }
+    /* the hidden screen, once the pipe has left it (the last flip taken at a refresh) */
+    u64 back = fb32_back(), dst = fb_iova;
+    if (back) {
+        u64 tw = k_now_us();
+        while (fb32_flip_pending() && k_now_us() - tw < 25000) thr_yield();
+        st_vwait += k_now_us() - tw;
+        dst = fb_iova + (back - fb32_base);
+    }
     u32 slot;
     if (!cjob_begin(&slot)) { g_compute = 0; LOG("off: a transition frame never finished - the CPU draws them"); return 0; }
-    u64 bu[3] = { fa, ta, fb_iova };
+    u64 bu[3] = { fa, ta, dst };
     u32 by[3] = { (u32)len, (u32)len, fb_pitch * (u32)h };
     u32 push[12] = { (u32)w, (u32)h, (u32)stride, fb_pitch / 4, (u32)kind, (u32)t, (u32)shift, 0, (u32)cax, (u32)cay, (u32)caw, (u32)cah };
     u32 s = cs_run(K_TRANS, bu, by, 3, push, ((u32)w + 63) / 64, (u32)h);
     if (cjob_submit(slot, s, NULL, 0) < 0) { g_compute = 0; LOG("off: a transition frame could not be submitted"); return 0; }
     screen_seq = s;
+    if (back) {                          /* drawn: shown from the next refresh */
+        if (!seq_wait(s, 100)) { g_compute = 0; LOG("off: a transition frame took over 100 ms - the CPU draws them"); return 0; }
+        fb32_flip();
+    }
     st_tn++; st_tus += k_now_us() - t0;
     static u64 tlog;
     if (!tlog) tlog = t0;
-    if (t0 - tlog >= 10000000) { LOG("10 s: %u transition frames drawn by the GPU, %llu us of CPU each", st_tn, st_tus / st_tn); st_tn = 0; st_tus = 0; tlog = t0; }
+    if (t0 - tlog >= 10000000) {
+        LOG("10 s: %u transition frames drawn by the GPU, %llu us each (%llu us of it waiting for the refresh)", st_tn, st_tus / st_tn, st_vwait / st_tn);
+        st_tn = 0; st_tus = 0; st_vwait = 0; tlog = t0;
+    }
     fb_gpu_presented(0, 0, w, h, k_now_us() - t0);
     return 1;
 }
@@ -903,6 +922,9 @@ static void own_commands(long fd) {
     if (fb32_base && fb_switch_32() && (fb_iova = map_phys(fb32_base, fb32_size))) fb_pitch = fb32_pitch();
     if (cok && fb_iova && !(args && strstr(args, "qrt.nogpuanim"))) {
         __asm__ volatile("dmb ish" ::: "memory");
+        /* the GPU stays powered: waking it (its microcode and zap shader again, through the
+         * secure world) took 0.3 s - the first frames of every transition stuttered */
+        wr("/sys/bus/platform/devices/1c00000.gpu/power/control", "on");
         g_compute = 1;
         fmt(state + strlen(state), sizeof state - strlen(state), "; draws the transitions");
         LOG("the GPU draws the shell's transitions from now on (qrt.nogpuanim: the CPU)");

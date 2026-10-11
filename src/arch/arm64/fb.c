@@ -245,6 +245,31 @@ int fb_switch_32(void) {
     klog("display: the pipe now scans a 32-bit buffer at %llx (rows of %u bytes)", fb32_base, pitch);
     return 1;
 }
+/* two screens (0.28.3): the GPU draws a whole frame into the one not shown, and the pipe
+ * moves to it at the next refresh - no frame shown half drawn.  The CPU always draws into
+ * the one shown (fb). */
+static int front;
+u64 fb32_one(void) { return ((u64)fb32_pitch() * k.fb_h + 0x1fffff) & ~0x1fffffull; }
+static u64 fb32_buf(int i) { return fb32_base + (u64)i * fb32_one(); }
+/* the hidden screen's address, or 0 (one screen only, or not 32-bit) */
+u64 fb32_back(void) {
+    if (!fb32_base || bpp != 4 || fb32_size < 2 * fb32_one() || (u64)(usize)fb != fb32_buf(front)) return 0;
+    return fb32_buf(front ^ 1);
+}
+/* the pipe has not taken the last flip yet (its CTL FLUSH bit clears at the refresh) */
+int fb32_flip_pending(void) { return mdp_flush_reg && (R32(mdp_flush_reg) & mdp_flush_bit); }
+void fb32_flip(void) {
+    u64 f = irq_save();
+    front ^= 1;
+    u64 a = fb32_buf(front);
+    W32(mdp_pipe + 0x14, (u32)a);                                     /* SRC0_ADDR */
+    __asm__ volatile("dsb sy" ::: "memory");
+    W32(mdp_flush_reg, mdp_flush_bit);
+    fb = (u8 *)(usize)a;
+    k.fb_base = a;
+    irq_restore(f);
+    if (kick) fb_dirty = 1;
+}
 /* the GPU copies straight into the screen: the present path only notes the time and
  * kicks a command-mode panel */
 void fb_gpu_presented(int x, int y, int w, int h, u64 us) {

@@ -377,7 +377,7 @@ void arm_main(const void *dtb, u64 base) {
         int fb_wants_32(void);
         u32 fb32_pitch(void);
         extern u64 fb32_base, fb32_size;
-        u64 need = ((u64)fb32_pitch() * k.fb_h + 0x1fffff) & ~0x1fffffull;
+        u64 need = 2 * (((u64)fb32_pitch() * k.fb_h + 0x1fffff) & ~0x1fffffull);   /* two: the GPU draws into the hidden one */
         u64 b = (hi - need) & ~0x1fffffull;
         if (fb_wants_32() && b + need <= (4ull << 30) && b > lo + (128ull << 20)) {
             fb32_base = b; fb32_size = need; hi = b;
