@@ -171,6 +171,10 @@ int  arm_kernel_user_fault(void *f);
 void arm_exception(u64 kind, u64 *frame) {
     void *uf = (u8 *)frame - 528;                                 /* uentry.c's frame_t: the FP/SIMD area first */
     if (kind == 5 || kind == 9) {                                 /* IRQ: the scheduler's tick, devices */
+        if (kind == 5 && thr_is_main()) {                         /* where the shell was (hal.c's watchdog) */
+            extern u64 arm_main_irq_at[3];
+            arm_main_irq_at[0] = frame[31]; arm_main_irq_at[1] = frame[30]; arm_main_irq_at[2] = frame[29];
+        }
         gic_irq();
         argon_irq_tail(frame[31]);                                /* Linux's own interrupts, as a CPU takes them */
         if (kind == 9) arm_user_irq_tail(uf);                     /* back to a program: its signals */

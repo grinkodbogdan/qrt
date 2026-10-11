@@ -77,6 +77,7 @@ void  thr_tick(void);                /* the timer interrupt (gic.c) */
 u64   thr_switches(void);
 thr_t *thr_create_suspended(const char *name, void (*fn)(void *), void *arg, usize stack);   /* runs after thr_wake() */
 void  thr_block(void);               /* until thr_wake() */
+thr_t *bkl_owner_thr(void);          /* the big lock's holder (the watchdog's report) */
 void  thr_stop(thr_t *t);            /* never runs again (a stopped program's thread) */
 int   thr_list(thr_t **out, int max);/* the live threads */
 void  bkl_lock(void);                /* the big lock of the user-mode layer: kept across preemption, */

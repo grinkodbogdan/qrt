@@ -18,15 +18,20 @@ void net_lock(void) {
         if (k.native) thread_yield(); else
 #endif
 #if defined(__aarch64__)
-        __asm__ volatile("yield");
+        /* let the holder run - through the scheduler, which also gives up the big lock:
+         * spinning with it held (a program's system call) kept out whoever needed it */
+        { void thr_yield(void); thr_yield(); }
 #else
         __asm__ volatile("pause");
 #endif
     }
 #if defined(__x86_64__)
     if (k.native) owner = thread_current();
+#elif defined(__aarch64__)
+    { void *thr_self(void); owner = thr_self(); }
 #endif
 }
+void *net_lock_owner(void) { return lock ? owner : NULL; }
 void net_unlock(void) { owner = NULL; __atomic_store_n(&lock, 0, __ATOMIC_RELEASE); }
 
 /* a thread stopped in the middle of a system call (a kernel fault, proc.c) gives the lock back */

@@ -164,6 +164,7 @@ void bkl_unlock(void) {
     irq_restore(f);
 }
 int bkl_held(void) { return bkl_owner == cur; }
+thr_t *bkl_owner_thr(void) { return bkl_owner; }
 
 /* a thread that blocks, sleeps or yields gives the big lock up meanwhile (the tick's
  * preemption does not: the holder is in the middle of something) */

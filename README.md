@@ -189,6 +189,26 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.31.1: a watchdog for the shell
+
+0.31.0 on the Mi A1: Ladybird opened google.com and the phone stopped responding with
+the page still blank.  Only a new kernel this time - the rootfs stays
+(`dist/qrt-0.31.0-rootfs-arm64.zip`, already flashed): `fastboot boot
+qrt-0.31.1-mi-a1-boot.img`.
+
+- **The network lock** no longer spins in place on ARM.  A program's system call waiting
+  for it kept the big lock meanwhile (on ARM the big lock stays with a thread that is
+  merely preempted), so whoever needed the big lock to let the network lock go could not
+  run.  A waiter now goes through the scheduler, which gives the big lock up.  The lock
+  also records its holder on ARM, so a program stopped inside a network call releases it
+  (it did on x86-64 only).
+- **The watchdog**: when the shell has not come round its loop for 3 s, a thread logs
+  where it was (the address the last tick interrupted, and its callers), what it was
+  waiting for, who holds the network lock and the big lock, and every thread's state
+  and system call.  The log is kept across a reset: if the phone freezes again, hold
+  power until it restarts, `fastboot boot` the same image, and the last boot's log opens
+  by itself - a photo of its end (the `watchdog:` lines) says what froze.
+
 ## 0.31.0: the kernel and the files apart
 
 The phone's boot image now holds just the kernel and a small ramdisk (~15 MB); everything

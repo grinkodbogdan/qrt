@@ -54,9 +54,61 @@ static int serial_keys(event_t *out, int max) {
     return n;
 }
 
+/* ---- the shell's watchdog: when the shell has not come back for 3 s, the log (kept
+ * across a reset: System -> the last boot's log) says where it is and who holds what ---- */
+u64 arm_main_irq_at[3];                                       /* pc, lr, fp at the last tick that interrupted it */
+static volatile u64 last_poll;
+static void watchdog(void *a) {
+    (void)a;
+    int told = 0;
+    extern char _start[];
+    u64 b0 = (u64)(usize)_start;
+    for (;;) {
+        thr_sleep_us(1000000);
+        u64 lp = last_poll, now = k_now_ms();
+        if (!lp || now - lp < 3000) { told = 0; continue; }
+        if (told++ >= 2) continue;                            /* twice per stall: the second shows if it moved */
+        thr_t *all[96];
+        int n = thr_list(all, 96);
+        thr_t *m = all[0];                                    /* the ring starts at the shell's */
+        char chain[160] = "";
+        usize cl = 0;
+        u64 fp = arm_main_irq_at[2];
+        for (int i = 0; i < 6 && fp >= 0x40000000 && (fp & 7) == 0 && cl + 20 < sizeof chain; i++) {
+            u64 *f = (u64 *)(usize)fp;
+            cl += (usize)fmt(chain + cl, sizeof chain - cl, " +%llx", f[1] - b0);
+            fp = f[0];
+        }
+        void *net_lock_owner(void);
+        thr_t *no = net_lock_owner();
+        thr_t *bo = bkl_owner_thr();
+        klog("watchdog: the shell has not run its loop for %llu ms; state %d; last interrupted at +%llx (lr +%llx;%s); "
+             "network lock: %s; big lock: %s", now - lp, m->state, arm_main_irq_at[0] - b0, arm_main_irq_at[1] - b0, chain,
+             no ? thr_name(no) : "free", bo ? thr_name(bo) : "free");
+        void thr_main_off(u64 *blocked, u64 *sleeping, u64 *waiting, u64 *site);
+        u64 bl, sl, wt, site[8];
+        thr_main_off(&bl, &sl, &wt, site);
+        if (bl) klog("watchdog: the shell blocked %llu ms at +%llx +%llx +%llx +%llx", bl / 1000, site[0] - b0, site[1] - b0, site[2] - b0, site[3] - b0);
+        char ln[200];
+        usize l = 0;
+        int idle = 0;
+        for (int i = 0; i < n; i++) {                         /* every thread: name, state, system call */
+            thr_t *t = all[i];
+            if (t->state == T_BLOCKED && !t->in_sys && !strcmp(thr_name(t), "linux")) { idle++; continue; }   /* Linux's idle workers */
+            char one[64];
+            int k2 = fmt(one, sizeof one, " %s:%d", thr_name(t), t->state);
+            if (t->in_sys) k2 += fmt(one + k2, sizeof one - (usize)k2, "/sys%u", t->sys_nr);
+            if (l + (usize)k2 + 1 >= sizeof ln) { klog("watchdog:%s", ln); l = 0; }
+            memcpy(ln + l, one, (usize)k2 + 1); l += (usize)k2;
+        }
+        if (l) klog("watchdog:%s (and %d idle Linux threads)", ln, idle);
+    }
+}
+
 int hal_poll(event_t *out, int max) {
-    static u64 last_poll;                                     /* the shell's loop came back late */
     u64 nowp = k_now_ms();
+    static int wd;
+    if (!wd++) thr_create("watchdog", watchdog, NULL, 16 << 10);
     void thr_longest(const char **name, u64 *us);
     const char *nm; u64 us;
     thr_longest(&nm, &us);                                    /* since the last poll */
