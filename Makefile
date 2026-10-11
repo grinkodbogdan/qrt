@@ -167,7 +167,29 @@ build/arm64/rootfs/bin/BUSYBOX.txt: tools/BUSYBOX-arm64.txt
 build/arm64/rootfs/bin/%: tests/linux/%.c build/sdk-arm64/.stamp
 	@mkdir -p $(dir $@)
 	build/sdk-arm64/bin/qrt-a64-cc -O2 -w $< -o $@ -lpthread
-build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null) $(ARM_PROGS)
+# Ladybird for ARM (QRT_ARCH=arm64 ports/ladybird/build.sh Ladybird), when built: the
+# browser, its resources, fonts, fontconfig and the root certificates
+A := build/arm64/rootfs
+ARM_LADYBIRD := $(if $(wildcard build/ladybird-arm64/bin/Ladybird),$(A)/bin/ladybird $(A)/share/Lagom/.stamp $(A)/share/fonts/.stamp \
+                $(A)/etc/fonts/fonts.conf $(A)/etc/ssl/certs/ca-certificates.crt)
+$(A)/bin/ladybird: build/ladybird-arm64/bin/Ladybird
+	@mkdir -p $(dir $@)
+	llvm-strip-20 -o $@ $<
+$(A)/share/Lagom/.stamp: build/ladybird-arm64/bin/Ladybird
+	rm -rf $(A)/share/Lagom; mkdir -p $(A)/share
+	cp -r build/ladybird-arm64/share/Lagom $(A)/share/Lagom
+	touch $@
+$(A)/share/fonts/.stamp: build/rootfs/share/fonts/.stamp
+	@mkdir -p $(dir $@)
+	cp build/rootfs/share/fonts/* $(dir $@)
+	touch $@
+$(A)/etc/fonts/fonts.conf: build/rootfs/etc/fonts/fonts.conf
+	@mkdir -p $(dir $@)
+	cp $< $@
+$(A)/etc/ssl/certs/ca-certificates.crt: build/rootfs/etc/ssl/certs/ca-certificates.crt
+	@mkdir -p $(dir $@)
+	cp $< $@
+build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null) $(ARM_PROGS) $(ARM_LADYBIRD)
 	@mkdir -p build/arm64/rootfs
 	$(PYTHON) tools/mkcpio.py src/arch/arm64/rootfs build/arm64/rootfs $@
 # the ramdisk gzip'd (the kernel unpacks it: src/kernel/inflate.c)
