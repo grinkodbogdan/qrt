@@ -208,7 +208,8 @@ in user mode (EL0), as the x86-64 kernel has since 0.5.
   PIE programs).  BusyBox is built from source with it (`ports/busybox-arm64.sh`) and
   ships in `/bin` with the Linux-layer tests (`hello`, `threads`, `procs`, `signals`,
   `memory`, `events`) - all pass on QEMU, with Linux's drivers running beside them.
-- **The Terminal works on the phone**: `ls`, pipes, `busybox sh`, the tests.
+- **The Terminal runs them**: `ls`, pipes, `busybox sh`, the tests (checked on QEMU; the
+  phone is next).
 - `qrt.run=/bin/a,/bin/b` on the kernel command line runs programs at boot and puts their
   output in the log.
 
