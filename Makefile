@@ -197,9 +197,13 @@ build/arm64/browser.cpio.gz: $(ARM_LADYBIRD)
 	gzip -9nc build/arm64/browser.cpio > $@
 	rm -f build/arm64/browser.cpio
 browser-arm64: build/arm64/browser.cpio.gz
+# NetSurf for ARM (ports/netsurf.sh), when built: the small browser, staged with its
+# resources, fonts and the root certificates - on the rootfs partition beside Ladybird
+NS := build/netsurf-arm64/root
+ARM_NETSURF := $(wildcard $(NS)/bin/netsurf)
 # everything but the kernel, for a spare partition (tools/mkrootfs.sh; README: flashing)
-build/arm64/qrt-rootfs.img: build/arm64/ramdisk.cpio $(ARM_LADYBIRD) tools/mkrootfs.sh tools/img2simg.py
-	sh tools/mkrootfs.sh $@ src/arch/arm64/rootfs build/arm64/rootfs $(if $(ARM_LADYBIRD),$(A))
+build/arm64/qrt-rootfs.img: build/arm64/ramdisk.cpio $(ARM_LADYBIRD) $(ARM_NETSURF) tools/mkrootfs.sh tools/img2simg.py
+	sh tools/mkrootfs.sh $@ src/arch/arm64/rootfs build/arm64/rootfs $(if $(ARM_LADYBIRD),$(A)) $(if $(ARM_NETSURF),$(NS))
 rootfs-arm64: build/arm64/qrt-rootfs.img
 build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null) $(ARM_PROGS)
 	@mkdir -p build/arm64/rootfs
@@ -225,6 +229,12 @@ LADYBIRD += $(if $(wildcard build/ladybird/bin/Ladybird),build/rootfs/bin/ladybi
             build/rootfs/share/fonts/.stamp build/rootfs/etc/fonts/fonts.conf build/rootfs/share/tests/page.html build/rootfs/share/tests/fps.html build/rootfs/share/tests/functions.html build/rootfs/share/tests/video.html build/rootfs/share/tests/video.webm build/rootfs/share/tests/render.sh \
             build/rootfs/etc/ssl/certs/ca-certificates.crt)
 FONT_DIRS := /usr/share/fonts/truetype/liberation /usr/share/fonts/truetype/dejavu
+# NetSurf, the small browser (QRT_ARCH=x64 ports/netsurf.sh), shipped when it has been
+# built: /bin/netsurf, /share/netsurf, and the fonts and root certificates it reads
+NETSURF := $(if $(wildcard build/netsurf-x64/root/bin/netsurf),build/rootfs/share/netsurf/.stamp)
+build/rootfs/share/netsurf/.stamp: build/netsurf-x64/root/bin/netsurf ports/netsurf/Choices
+	cp -a build/netsurf-x64/root/. build/rootfs/
+	touch $@
 # the Linux driver host: ports/lkl.sh builds Linux as a library (build/linuxdrv/lkl.o),
 # then src/linuxdrv is linked with it into /bin/linuxdrv
 LINUXDRV := $(if $(wildcard build/linuxdrv/lkl.o),build/rootfs/bin/linuxdrv build/rootfs/etc/linuxdrv.conf)
@@ -241,7 +251,7 @@ build/rootfs/bin/linuxdrv: build/linuxdrv/linuxdrv
 	cp $< $@
 
 ROOTFS := $(LINUXDRV) build/rootfs/bin/hello build/rootfs/bin/hello-musl build/rootfs/bin/busybox \
-          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/play build/rootfs/bin/hello-window build/rootfs/bin/cxx-test $(RUST_HELLO) $(LADYBIRD) build/rootfs/lib64/ld-linux-x86-64.so.2
+          build/rootfs/bin/dynhello build/rootfs/bin/threads build/rootfs/bin/cxx build/rootfs/bin/procs build/rootfs/bin/signals build/rootfs/bin/memory build/rootfs/bin/events build/rootfs/bin/native-test build/rootfs/bin/play build/rootfs/bin/hello-window build/rootfs/bin/cxx-test $(RUST_HELLO) $(LADYBIRD) $(NETSURF) build/rootfs/lib64/ld-linux-x86-64.so.2
 
 # Dynamically linked programs and the host's glibc / libstdc++ they run with
 # (ld.so in /lib64, the libraries in /lib/x86_64-linux-gnu, as on Debian/Ubuntu)

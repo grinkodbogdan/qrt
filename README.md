@@ -189,6 +189,55 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.34.0: NetSurf, and two looks to choose from
+
+0.33.0 made Catacomb's look the only one, and Ladybird - 150 MB, a dozen processes -
+was still the only real browser.  Now:
+
+    fastboot flash system_b qrt-rootfs-arm64.img     (from dist/qrt-0.34.0-rootfs-arm64.zip;
+                                                      system_a if current-slot says b)
+    fastboot reboot                                   (back to the fastboot screen), then
+    fastboot boot qrt-0.34.0-mi-a1-boot.img
+
+**NetSurf is the Browser** ([netsurf-browser.org](https://www.netsurf-browser.org)) -
+an independent browser with its own HTML and CSS engine (not WebKit, not Blink, not
+Gecko), and JavaScript through Duktape: one 13 MB program in one process, a tenth
+of Ladybird.  It is on the rootfs partition beside Ladybird (and in the PC image),
+and the dock's Browser opens it; **Settings → Appearance → Web browser** switches to
+Ladybird (complete, heavy) and back.  Its front-end is QRT's own, after Kumo
+(Catacomb's browser):
+- **the bar along the bottom**, where the thumb is: back, the address, reload; the
+  page gets the rest of the window.  It sits above the on-screen keyboard while that
+  is up.
+- **The first tap into the address selects all of it** (highlighted): typing replaces
+  it, as on a phone; a second tap places the caret.  The keyboard comes up for the
+  address bar and for every text field on a page, and goes away after Enter.
+- **Touch**: a tap is a click where the finger went down; a drag scrolls the page (or
+  whatever scrollable box is under the finger), so links do not fire while scrolling.
+- Sized by the shell's density: the bar as tall as the dock's buttons, pages scaled
+  to match.  Thin white line icons (Kumo's), flat dark colours.
+- How it is built: `ports/netsurf.sh` (`QRT_ARCH=x64` for the PC) clones NetSurf and
+  its libraries at fixed commits, adds QRT's libnsfb surface (`ports/netsurf/qrt.c`: a
+  QRT window, touch and keys in, frames out) and the front-end patch, and stages
+  `/bin/netsurf`, `/share/netsurf`, the fonts and the root certificates.
+- **Ladybird** has the same bar along the bottom now (`ports/ladybird/0009`).
+
+**The shell: Classic or Catacomb** - **Settings → Appearance → Style**, at once, kept
+across restarts:
+- **Classic** (the default again): the friendly look from before 0.33.0 - rounded
+  cards and buttons, coloured app icons, the blue accent - refined: a calmer
+  wallpaper, semibold labels, quieter cards and lines.  The quick settings drawer
+  (pull the top bar down, or tap it) and the home screen's app grid stay.
+- **Catacomb**: 0.33.0's flat, square, dark-red look.
+
+**Also**
+- The PC image is `dist/qrt-0.34.0.img.xz` now (xz, not gzip: the gzip'd one is over
+  GitHub's 100 MB limit) - `xz -dc dist/qrt-0.34.0.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync`.
+- Programs started from the kernel command line (`qrt.run=`) take up to 16 arguments.
+- `tools/qemu-test.py` opens NetSurf from the dock on the PC image, types the host's
+  address into its bar, and checks that the page and then its link were fetched over
+  the network; then switches to Ladybird in Settings for Ladybird's tests.
+
 ## 0.33.0: steady on eight cores, and Catacomb's look
 
 0.32.0 on the Mi A1: only four of the eight cores ran, and touching Ladybird took the

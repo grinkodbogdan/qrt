@@ -1,6 +1,15 @@
 /* Settings: a preferences page in the style of GNOME Settings.  Everything
  * is kept in UEFI NVRAM and survives reboots. */
 #include "../ui/shell.h"
+
+/* Appearance's rows: 64-bit QRT also picks its web browser (NetSurf or Ladybird: browser.c) */
+#if defined(__aarch64__) || defined(__x86_64__)
+#define LOOK_ROWS 4
+int browser_engine(void);
+void browser_set_engine(int e);
+#else
+#define LOOK_ROWS 3
+#endif
 #include "../kernel/sound.h"
 #include "../drivers/backlight.h"
 #include "../drivers/ish.h"
@@ -49,7 +58,7 @@ typedef struct {
     int x, w;                                   /* the clamped column */
     int y_look, y_power, y_sound, y_time, y_start, y_system, y_about;
     rect_t outsel[5]; int nout; const char *outname[4];
-    rect_t accent[N_ACCENTS], rot[5], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], cores[2], power[3], tz[2], test, install;
+    rect_t accent[N_ACCENTS], rot[5], style[2], web[2], sleep[N_SLEEP], kern[2], gpu[2], ext[2], desk[2], cores[2], power[3], tz[2], test, install;
     rect_t bright, vol;                         /* slider tracks */
     rect_t autob;                               /* the brightness label: automatic on/off (a light sensor) */
     rect_t g_look, g_power, g_sound, g_time, g_start, g_system, g_about;   /* group boxes */
@@ -68,11 +77,16 @@ static lay_t layout(rect_t a) {
 
     /* Appearance: accent, rotation */
     L.y_look = y; y += title;
-    L.g_look = (rect_t){ x, y, w, 2 * ROW_H };
+    L.g_look = (rect_t){ x, y, w, LOOK_ROWS * ROW_H };
     int dot = dp(30), dx = x + w - pad - N_ACCENTS * (dot + dp(10)) + dp(10);
     for (int i = 0; i < N_ACCENTS; i++) L.accent[i] = (rect_t){ dx + i * (dot + dp(10)), y + (ROW_H - dot) / 2, dot, dot };
     int segw = MIN(dp(70), (w * 3 / 5) / 5);
     for (int i = 0; i < 5; i++) L.rot[i] = (rect_t){ x + w - pad - 5 * segw + i * segw, y + ROW_H + dp(11), segw, ROW_H - dp(22) };
+    int stw = MIN(dp(110), (w * 3 / 5) / 2);              /* the shell's style: Classic, Catacomb */
+    for (int i = 0; i < 2; i++) L.style[i] = (rect_t){ x + w - pad - 2 * stw + i * stw, y + 2 * ROW_H + dp(11), stw, ROW_H - dp(22) };
+#if LOOK_ROWS > 3
+    for (int i = 0; i < 2; i++) L.web[i] = (rect_t){ x + w - pad - 2 * stw + i * stw, y + 3 * ROW_H + dp(11), stw, ROW_H - dp(22) };
+#endif
     y += L.g_look.h + dp(24);
 
     /* Power: sleep, brightness */
@@ -172,7 +186,15 @@ static void draw(canvas_t *c, rect_t a) {
     rect_t old = c->clip;
     gfx_clip(c, a);
 
-    group(c, L.g_look, L.y_look, "Appearance", 2);
+    group(c, L.g_look, L.y_look, "Appearance", LOOK_ROWS);
+#if LOOK_ROWS > 3
+    row_label(c, L.g_look, 3, "Web browser", browser_engine() ? "Ladybird: complete, heavy" : "NetSurf: small and quick");
+    segment(c, L.web[0], "NetSurf", !browser_engine(), 1, 0);
+    segment(c, L.web[1], "Ladybird", browser_engine(), 0, 1);
+#endif
+    row_label(c, L.g_look, 2, "Style", shell_style() ? "Flat and square" : "Rounded and colourful");
+    segment(c, L.style[0], "Classic", !shell_style(), 1, 0);
+    segment(c, L.style[1], "Catacomb", shell_style(), 0, 1);
     row_label(c, L.g_look, 0, "Accent colour", NULL);
     for (int i = 0; i < N_ACCENTS; i++) {
         rect_t r = L.accent[i];
@@ -334,6 +356,10 @@ static int event(const event_t *e, rect_t a) {
     if (st.cand) { set_slider(st.cand, slider_value(st.cand == SL_BRIGHT ? L.bright : L.vol, e->x)); st.cand = SL_NONE; return 1; }
     for (int i = 0; i < N_ACCENTS; i++) if (in_rect(grab(L.accent[i]), e->x, e->y)) { shell_set_accent(i); return 1; }
     if (in_rect(L.rot[0], e->x, e->y)) { shell_set_auto_rotate(1); return 1; }
+    for (int i = 0; i < 2; i++) if (in_rect(L.style[i], e->x, e->y)) { shell_set_style(i); return 1; }
+#if LOOK_ROWS > 3
+    for (int i = 0; i < 2; i++) if (in_rect(L.web[i], e->x, e->y)) { browser_set_engine(i); return 1; }
+#endif
     for (int i = 0; i < 4; i++) if (in_rect(L.rot[i + 1], e->x, e->y)) { shell_set_auto_rotate(0); shell_set_rotation(i); return 1; }
     for (int i = 0; i < N_SLEEP; i++) if (in_rect(L.sleep[i], e->x, e->y)) { shell_set_sleep_after(sleep_secs[i]); return 1; }
     if (in_rect(L.autob, e->x, e->y) && bl() && ui_phone() && ish_lux() >= 0) {

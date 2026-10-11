@@ -401,6 +401,25 @@ static void draw_page(canvas_t *c, rect_t a) {
 #if defined(__x86_64__) || defined(__aarch64__)
 static struct { int pid; u64 started; char err[96]; } LB;
 
+/* which full browser the Browser starts: 0 NetSurf (small and quick: the default),
+ * 1 Ladybird (complete, heavy) - QrtBrowser, chosen in Settings.  Whichever is on the
+ * image is used when the chosen one is not. */
+static int engine = -1;
+int browser_engine(void) {
+    if (engine < 0) engine = hal_setting_get(u"QrtBrowser", 0) == 1;
+    return engine;
+}
+void browser_set_engine(int e) {
+    engine = e ? 1 : 0;
+    hal_setting_set(u"QrtBrowser", (u32)engine);
+    klog("browser: %s from now on", engine ? "Ladybird" : "NetSurf");
+}
+static const char *engine_exe(void) {
+    int ns = vfs_lookup("/bin/netsurf") != NULL, lb = vfs_lookup("/bin/ladybird") != NULL;
+    if (ns && (browser_engine() == 0 || !lb)) return "/bin/netsurf";
+    return lb ? "/bin/ladybird" : NULL;
+}
+
 static int ladybird_running(void) {
     if (!LB.pid) return 0;
     proc_t *p = proc_by_pid(LB.pid);
@@ -437,7 +456,7 @@ static int ladybird_open(void);
 static int pack_tick(void) {
     if (PK.state == 4) {                               /* the rootfs partition: copied yet? */
         int rs = arm_rootfs_state();
-        if (vfs_lookup("/bin/ladybird") && rs != 1) { PK.state = 0; ladybird_open(); return 1; }
+        if (engine_exe() && rs != 1) { PK.state = 0; ladybird_open(); return 1; }
         if ((rs == 0 && k_now_ms() > 60000) || rs == 2) { pack_start(); return 1; }   /* no partition, or no browser on it: download it */
         return 0;
     }
@@ -489,7 +508,7 @@ static void pack_draw(canvas_t *c, rect_t a) {
 /* 1: Ladybird takes over (its window is shown now, or will be once it has started) */
 static int ladybird_open(void) {
 #if defined(__aarch64__)
-    if (!vfs_lookup("/bin/ladybird") || arm_rootfs_state() == 1) {   /* its files first */
+    if (!engine_exe() || arm_rootfs_state() == 1) {    /* its files first */
         if (PK.state == 0 || PK.state == 3) {
             if (arm_rootfs_state() || k_now_ms() < 60000) PK.state = 4;   /* from the rootfs partition */
             else pack_start();                         /* none: over Wi-Fi */
@@ -497,26 +516,41 @@ static int ladybird_open(void) {
         return 1;
     }
 #endif
-    if (!vfs_lookup("/bin/ladybird")) return 0;
+    const char *exe = engine_exe();
+    if (!exe) return 0;
     if (ladybird_running()) {
         const app_t *a = cw_app_of(LB.pid);
         if (a && a->open) a->open();                   /* tell it it is shown again */
         return 1;
     }
-    /* the file system is in memory: a disk cache would only hold a second copy of what
-     * Ladybird keeps in its memory cache */
-    /* and the shell's density, so its toolbar and pages are sized for this screen */
-    static char scale[32];
-    fmt(scale, sizeof scale, "--qrt-scale=%d", (int)(ui.s * 100 + 0.5f));
-    /* and the home page: Google */
-    const char *const argv[] = { "ladybird", "--disable-http-disk-cache", scale, "https://www.google.com/", NULL };
-    proc_t *p = proc_spawn("/bin/ladybird", 4, argv, NULL, LB.err, sizeof LB.err);
-    if (!p) { klog("browser: Ladybird did not start: %s", LB.err); return 0; }
+    int ns = !strcmp(exe, "/bin/netsurf");
+    proc_t *p;
+    if (ns) {
+        /* NetSurf: its options before the front-end's name (the rest are in
+         * /share/netsurf/Choices), sized by the shell's density: the bar along the bottom
+         * as tall as the dock's buttons, pages at three quarters of it */
+        static char bar[16], scale[16];
+        fmt(bar, sizeof bar, "%d", dp(56));
+        fmt(scale, sizeof scale, "%d", (int)(ui.s * 75 + 0.5f));
+        const char *const argv[] = { "netsurf", "--fb_toolbar_size", bar, "--fb_toolbar_layout", "bur",
+                                     "--scale", scale, "-f", "qrt", NULL };
+        p = proc_spawn(exe, 9, argv, NULL, LB.err, sizeof LB.err);
+    } else {
+        /* the file system is in memory: a disk cache would only hold a second copy of what
+         * Ladybird keeps in its memory cache */
+        /* and the shell's density, so its toolbar and pages are sized for this screen */
+        static char scale[32];
+        fmt(scale, sizeof scale, "--qrt-scale=%d", (int)(ui.s * 100 + 0.5f));
+        /* and the home page: Google */
+        const char *const argv[] = { "ladybird", "--disable-http-disk-cache", scale, "https://www.google.com/", NULL };
+        p = proc_spawn(exe, 4, argv, NULL, LB.err, sizeof LB.err);
+    }
+    if (!p) { klog("browser: %s did not start: %s", exe, LB.err); return 0; }
     LB.pid = p->pid;
     cw_host(LB.pid, &app_browser);                     /* one app in the dock: this one shows its window */
     LB.started = k_now_ms();
     LB.err[0] = 0;
-    klog("browser: started Ladybird (pid %d)", LB.pid);
+    klog("browser: started %s (pid %d)", exe + 5, LB.pid);
     return 1;
 }
 
@@ -549,7 +583,7 @@ static void draw(canvas_t *c, rect_t a) {
             int seen[64], ns = 0;
             for (int i = 0; i < nt; i++) {
                 thread_t *t = all[i];
-                if (!t->proc || strncmp(t->proc->exe, "/bin/ladybird", 13)) continue;
+                if (!t->proc || (strncmp(t->proc->exe, "/bin/ladybird", 13) && strncmp(t->proc->exe, "/bin/netsurf", 12))) continue;
                 nth++;
                 run += t->state == T_RUNNABLE; blk += t->state == T_BLOCKED; slp += t->state == T_SLEEPING;
                 insys += t->in_sys; oncpu += t->on_cpu >= 0; tk += t->cpu_ticks;

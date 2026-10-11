@@ -1,0 +1,11 @@
+ca_bundle:/etc/ssl/certs/ca-certificates.crt
+homepage_url:https://duckduckgo.com/html/
+enable_javascript:1
+font_size:120
+font_min_size:90
+scale:100
+fb_toolbar_size:96
+fb_furniture_size:0
+fb_osk:0
+fb_font_monochrome:0
+suppress_curl_debug:1

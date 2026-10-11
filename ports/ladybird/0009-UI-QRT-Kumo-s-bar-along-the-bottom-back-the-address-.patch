@@ -1,0 +1,292 @@
+From c8ceba727b93ed25558f997385442784ae7d9e53 Mon Sep 17 00:00:00 2001
+From: grinkodbogdan <grinkod.bogdan@gmail.com>
+Date: Sun, 11 Oct 2026 19:37:48 +0000
+Subject: [PATCH] UI/QRT: Kumo's bar along the bottom: back, the address,
+ reload, the keyboard
+
+---
+ UI/QRT/BrowserWindow.cpp | 107 +++++++++++++++++++--------------------
+ UI/QRT/BrowserWindow.h   |   7 ++-
+ 2 files changed, 56 insertions(+), 58 deletions(-)
+
+diff --git a/UI/QRT/BrowserWindow.cpp b/UI/QRT/BrowserWindow.cpp
+index ea152d5a..6a721b7f 100644
+--- a/UI/QRT/BrowserWindow.cpp
++++ b/UI/QRT/BrowserWindow.cpp
+@@ -40,12 +40,15 @@ static constexpr int base_toolbar_h = 52;
+ // the shell's density, from "--qrt-scale=<percent>" (main.cpp)
+ float g_shell_scale = 1.0f;
+ 
++// Kumo's bar, along the bottom: back, the address, then reload and the keyboard
+ BrowserWindow::ToolbarItem BrowserWindow::toolbar_item_at(int x) const
+ {
+-    if (x < m_pad)
+-        return ToolbarItem::None;
+-    if (x < address_x() - m_pad)
+-        return static_cast<ToolbarItem>(min((x - m_pad) / m_button_w, 3));
++    if (x < m_pad + m_button_w)
++        return ToolbarItem::Back;
++    if (x >= m_buffer.w - m_pad - m_button_w)
++        return ToolbarItem::Keyboard;
++    if (x >= m_buffer.w - m_pad - 2 * m_button_w)
++        return ToolbarItem::Reload;
+     return ToolbarItem::Address;
+ }
+ 
+@@ -129,7 +132,7 @@ ErrorOr<void> BrowserWindow::initialize(Vector<URL::URL> const& urls)
+ 
+     m_view->on_ready_to_paint = [this] {
+         draw_page();
+-        qrt_window_present(m_window, 0, content_top(), m_buffer.w, m_buffer.h - content_top());
++        qrt_window_present(m_window, 0, 0, m_buffer.w, bar_y());
+     };
+     m_view->on_title_change = [this](auto const& title) {
+         m_title = title.to_byte_string();
+@@ -139,7 +142,7 @@ ErrorOr<void> BrowserWindow::initialize(Vector<URL::URL> const& urls)
+         if (!m_editing_address)
+             m_address = url.serialize().to_byte_string();
+         draw_toolbar();
+-        qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++        qrt_window_present(m_window, 0, bar_y(), m_buffer.w, m_toolbar_height);
+     };
+     // a text field took the focus (or lost it): the on-screen keyboard follows
+     m_view->on_input_method_state_change = [this] {
+@@ -149,18 +152,18 @@ ErrorOr<void> BrowserWindow::initialize(Vector<URL::URL> const& urls)
+         m_keyboard = wants;
+         qrt_keyboard(wants);
+         draw_toolbar();
+-        qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++        qrt_window_present(m_window, 0, bar_y(), m_buffer.w, m_toolbar_height);
+     };
+     // the page's process stopped (QRT stops the largest program when memory runs out, or it
+     // crashed): say so in the page's place; reload tries again
+     m_view->on_crash_overlay_state_change = [this](bool) {
+         draw_page();
+-        qrt_window_present(m_window, 0, content_top(), m_buffer.w, m_buffer.h - content_top());
++        qrt_window_present(m_window, 0, 0, m_buffer.w, bar_y());
+     };
+     m_view->on_loading_state_change = [this](bool loading) {
+         m_loading = loading;
+         draw_toolbar();
+-        qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++        qrt_window_present(m_window, 0, bar_y(), m_buffer.w, m_toolbar_height);
+     };
+ 
+     draw_toolbar();
+@@ -180,7 +183,7 @@ void BrowserWindow::map_buffer()
+ 
+ Web::DevicePixelSize BrowserWindow::viewport() const
+ {
+-    return { max(1, m_buffer.w), max(1, m_buffer.h - content_top()) };
++    return { max(1, m_buffer.w), max(1, bar_y()) };
+ }
+ 
+ void BrowserWindow::layout_changed()
+@@ -203,30 +206,26 @@ void BrowserWindow::present_all()
+ void BrowserWindow::draw_toolbar()
+ {
+     auto* b = &m_buffer;
+-    int h = content_top();
+-    qrt_fill(b, 0, 0, b->w, h, toolbar_bg);
+-    qrt_fill(b, 0, h - max(2, scaled(1.5f)), b->w, max(2, scaled(1.5f)), toolbar_line);
+-
+-    int cy = h / 2;
+-    auto button_x = [this](int i) { return m_pad + i * m_button_w + m_button_w / 2; };
++    int y0 = bar_y(), h = m_toolbar_height;
+     auto S = [this](float v) { return scaled(v); };
++    qrt_fill(b, 0, y0, b->w, h, toolbar_bg);
++    qrt_fill(b, 0, y0, b->w, max(2, S(1.5f)), toolbar_line);         // the accent line on top, as Kumo's
++
++    int cy = y0 + h / 2;
+     int stroke = max(2, S(1.6f));
+     bool can_back = m_view && m_view->navigate_back_action().enabled();
+-    bool can_forward = m_view && m_view->navigate_forward_action().enabled();
+ 
+-    // back and forward: chevrons
+-    int bx = button_x(0), fx = button_x(1);
+-    u32 back_c = can_back ? button_fg : button_off, forward_c = can_forward ? button_fg : button_off;
+-    qrt_line(b, bx + S(5), cy - S(9), bx - S(4), cy, stroke, back_c);
+-    qrt_line(b, bx - S(4), cy, bx + S(5), cy + S(9), stroke, back_c);
+-    qrt_line(b, fx - S(5), cy - S(9), fx + S(4), cy, stroke, forward_c);
+-    qrt_line(b, fx + S(4), cy, fx - S(5), cy + S(9), stroke, forward_c);
++    // back: a thin chevron
++    int bx = m_pad + m_button_w / 2;
++    u32 back_c = can_back ? button_fg : button_off;
++    qrt_line(b, bx + S(5), cy - S(10), bx - S(5), cy, stroke, back_c);
++    qrt_line(b, bx - S(5), cy, bx + S(5), cy + S(10), stroke, back_c);
+ 
+     // reload (or stop while loading)
+-    int rx = button_x(2);
++    int rx = b->w - m_pad - m_button_w - m_button_w / 2;
+     if (m_loading) {
+-        qrt_line(b, rx - S(7), cy - S(7), rx + S(7), cy + S(7), stroke, button_fg);
+-        qrt_line(b, rx + S(7), cy - S(7), rx - S(7), cy + S(7), stroke, button_fg);
++        qrt_line(b, rx - S(8), cy - S(8), rx + S(8), cy + S(8), stroke, button_fg);
++        qrt_line(b, rx + S(8), cy - S(8), rx - S(8), cy + S(8), stroke, button_fg);
+     } else {
+         qrt_disc(b, rx, cy, S(10), button_fg);
+         qrt_disc(b, rx, cy, S(10) - stroke, toolbar_bg);
+@@ -235,29 +234,29 @@ void BrowserWindow::draw_toolbar()
+         qrt_line(b, rx + S(8), cy - S(6), rx + S(2), cy - S(2), stroke, button_fg);
+     }
+ 
+-    // the keyboard
+-    int kx = button_x(3);
+-    if (m_keyboard)
+-        qrt_fill(b, kx - m_button_w / 2 + S(2), m_pad, m_button_w - S(4), h - 2 * m_pad, field_bg);
+-    qrt_round_rect(b, kx - S(13), cy - S(9), S(26), S(18), 0, button_fg);
+-    qrt_round_rect(b, kx - S(12), cy - S(8), S(24), S(16), 0, m_keyboard ? field_bg : toolbar_bg);
+-    for (int row = 0; row < 3; ++row)
+-        for (int col = 0; col < 4; ++col)
+-            qrt_fill(b, kx - S(10) + S(col * 6), cy - S(6) + S(row * 5), S(3), S(2), button_fg);
+-
+-    // the address field
+-    int ax = address_x();
+-    int fw = b->w - ax - m_pad;
+-    int fh = h - 2 * m_pad - S(4);
+-    qrt_round_rect(b, ax, m_pad + S(2), fw, fh, 0, m_editing_address ? field_edit : field_bg);
++    // the keyboard: an outlined square, filled while it is up (Kumo's tab button's shape)
++    int kx = b->w - m_pad - m_button_w / 2;
++    int ks = S(26);
++    qrt_fill(b, kx - ks / 2, cy - ks / 2, ks, ks, button_fg);
++    qrt_fill(b, kx - ks / 2 + stroke, cy - ks / 2 + stroke, ks - 2 * stroke, ks - 2 * stroke, m_keyboard ? field_edit : toolbar_bg);
++    for (int row = 0; row < 2; ++row)
++        for (int col = 0; col < 3; ++col)
++            qrt_fill(b, kx - S(7) + S(col * 6), cy - S(5) + S(row * 6), S(3), S(3), button_fg);
++
++    // the address: a flat tile
++    int ax = m_pad + m_button_w + m_pad;
++    int fw = b->w - m_pad - 2 * m_button_w - m_pad - ax;
++    int fh = h - 2 * m_pad - S(6);
++    int fy = y0 + (h - fh) / 2;
++    qrt_round_rect(b, ax, fy, fw, fh, 0, m_editing_address ? field_edit : field_bg);
+     int size = m_ui >= 1.3f ? QRT_TEXT_TITLE : QRT_TEXT_BODY;
+     int th = qrt_text_height(size);
+-    int tx = ax + S(10), ty = (h - th) / 2;
++    int tx = ax + S(10), ty = cy - th / 2;
+     ByteString shown = m_address;
+     if (m_editing_address && !m_replace_address)
+         shown = ByteString::formatted("{}|", m_address);
+     // keep the end of a long address in view while it is edited, the start otherwise
+-    while (shown.length() > 1 && qrt_text_width(shown.characters(), size) > fw - fh)
++    while (shown.length() > 1 && qrt_text_width(shown.characters(), size) > fw - S(20))
+         shown = m_editing_address ? shown.substring(1) : shown.substring(0, shown.length() - 1);
+     qrt_text(b, tx, ty, shown.characters(), m_address.is_empty() ? text_dim : text_fg, size);
+ }
+@@ -265,8 +264,8 @@ void BrowserWindow::draw_toolbar()
+ void BrowserWindow::draw_page()
+ {
+     auto* b = &m_buffer;
+-    int top = content_top();
+-    int vw = b->w, vh = b->h - top;
++    int top = 0;                                            // the page above, the bar below (Kumo)
++    int vw = b->w, vh = bar_y();
+     if (vw <= 0 || vh <= 0)
+         return;
+ 
+@@ -312,7 +311,7 @@ void BrowserWindow::handle_events()
+ 
+ void BrowserWindow::send_mouse(Web::MouseEvent::Type type, int x, int y, Web::UIEvents::MouseButton button, Web::UIEvents::MouseButton buttons, double wheel_y)
+ {
+-    Web::DevicePixelPoint position { x, y - content_top() };
++    Web::DevicePixelPoint position { x, min(y, bar_y() - 1) };
+     Web::MouseEvent event {};
+     event.type = type;
+     event.position = position;
+@@ -340,14 +339,14 @@ void BrowserWindow::handle(qrt_event const& e)
+         Core::EventLoop::current().quit(0);
+         break;
+     case QRT_EV_DOWN:
+-        if (e.y < content_top()) {
++        if (e.y >= bar_y()) {
+             tap_toolbar(e.x);
+             break;
+         }
+         if (m_editing_address) {
+             m_editing_address = false;
+             draw_toolbar();
+-            qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++            qrt_window_present(m_window, 0, bar_y(), m_buffer.w, m_toolbar_height);
+         }
+         if (m_fling)
+             m_fling->stop();
+@@ -362,7 +361,7 @@ void BrowserWindow::handle(qrt_event const& e)
+         break;
+     case QRT_EV_MOVE:
+         if (!m_finger_down) {
+-            if (e.y >= content_top())
++            if (e.y < bar_y())
+                 send_mouse(Type::MouseMove, e.x, e.y, none, none);
+             break;
+         }
+@@ -408,7 +407,7 @@ void BrowserWindow::handle(qrt_event const& e)
+         }
+         break;
+     case QRT_EV_SCROLL:
+-        send_mouse(Type::MouseWheel, m_last_x, max(m_last_y, content_top()), none, none, e.y * 60.0 * m_page_ratio);
++        send_mouse(Type::MouseWheel, m_last_x, min(m_last_y, bar_y() - 1), none, none, e.y * 60.0 * m_page_ratio);
+         break;
+     case QRT_EV_KEY:
+         if (m_editing_address)
+@@ -429,7 +428,7 @@ void BrowserWindow::scroll_page(double dy)
+ {
+     using Type = Web::MouseEvent::Type;
+     auto const none = Web::UIEvents::MouseButton::None;
+-    send_mouse(Type::MouseWheel, m_down_x, max(m_down_y, content_top()), none, none, dy / m_page_ratio);
++    send_mouse(Type::MouseWheel, m_down_x, min(m_down_y, bar_y() - 1), none, none, dy / m_page_ratio);
+ }
+ 
+ void BrowserWindow::fling_step()
+@@ -477,7 +476,7 @@ void BrowserWindow::tap_toolbar(int x)
+         break;
+     }
+     draw_toolbar();
+-    qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++    qrt_window_present(m_window, 0, bar_y(), m_buffer.w, m_toolbar_height);
+ }
+ 
+ void BrowserWindow::address_key(u32 ch, u32 scan)
+@@ -500,7 +499,7 @@ void BrowserWindow::address_key(u32 ch, u32 scan)
+         m_replace_address = false;
+     }
+     draw_toolbar();
+-    qrt_window_present(m_window, 0, 0, m_buffer.w, content_top());
++    qrt_window_present(m_window, 0, bar_y(), m_buffer.w, m_toolbar_height);
+ }
+ 
+ void BrowserWindow::page_key(u32 ch, u32 scan)
+diff --git a/UI/QRT/BrowserWindow.h b/UI/QRT/BrowserWindow.h
+index 2d167918..0a32cd43 100644
+--- a/UI/QRT/BrowserWindow.h
++++ b/UI/QRT/BrowserWindow.h
+@@ -35,8 +35,8 @@ private:
+     PageView(Core::AnonymousBuffer theme, Web::DevicePixelSize size, double device_pixel_ratio);
+ };
+ 
+-// Ladybird's window in the QRT shell: a toolbar (back, forward, reload, the address,
+-// the on-screen keyboard) and the page.  Touch drags scroll, taps click; the mouse
++// Ladybird's window in the QRT shell: the page, and Kumo's bar along the bottom (back,
++// the address, reload, the on-screen keyboard).  Touch drags scroll, taps click; the mouse
+ // and the keyboard go to the page, or to the address while it is being edited.
+ class BrowserWindow {
+ public:
+@@ -61,7 +61,6 @@ private:
+     enum class ToolbarItem { Back, Forward, Reload, Keyboard, Address, None };
+     ToolbarItem toolbar_item_at(int x) const;
+     int scaled(float v) const { return static_cast<int>(v * m_ui + 0.5f); }
+-    int address_x() const { return m_pad + 4 * m_button_w + m_pad; }
+ 
+     void tap_toolbar(int x);
+     void fling_step();
+@@ -71,7 +70,7 @@ private:
+     void page_key(u32 ch, u32 scan);
+     void send_mouse(Web::MouseEvent::Type, int x, int y, Web::UIEvents::MouseButton button, Web::UIEvents::MouseButton buttons, double wheel_y = 0);
+ 
+-    int content_top() const { return m_toolbar_height; }
++    int bar_y() const { return max(0, m_buffer.h - m_toolbar_height); }   // the bar along the bottom (Kumo's)
+     Web::DevicePixelSize viewport() const;
+ 
+     int m_window { -1 };
+-- 
+2.43.0
+

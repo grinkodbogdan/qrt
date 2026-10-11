@@ -1,0 +1,316 @@
+diff --git a/frontends/framebuffer/fbtk.h b/frontends/framebuffer/fbtk.h
+index 86bdc86..30b4ca3 100644
+--- a/frontends/framebuffer/fbtk.h
++++ b/frontends/framebuffer/fbtk.h
+@@ -21,8 +21,11 @@
+ 
+ #include "netsurf/types.h"
+ 
+-#define FB_SCROLL_COLOUR 0xFFAAAAAA
+-#define FB_FRAME_COLOUR 0xFFDDDDDD
++/* QRT: Kumo's colours - near black, a lighter tile for the address */
++#define FB_SCROLL_COLOUR 0xFF555555
++#define FB_FRAME_COLOUR 0xFF181818
++#define FB_FIELD_COLOUR 0xFF282828
++#define FB_ACCENT_COLOUR 0xFF2A2A75
+ #define FB_COLOUR_BLACK 0xFF000000
+ #define FB_COLOUR_WHITE 0xFFFFFFFF
+ 
+diff --git a/frontends/framebuffer/fbtk/text.c b/frontends/framebuffer/fbtk/text.c
+index 9c96dce..37a651d 100644
+--- a/frontends/framebuffer/fbtk/text.c
++++ b/frontends/framebuffer/fbtk/text.c
+@@ -63,8 +63,9 @@ fb_text_font_style(fbtk_widget_t *widget, int *font_height, int *padding,
+ 		*padding = 0;
+ 
+ #ifdef FB_USE_FREETYPE
+-	*padding += widget->height / 6;
+-	*font_height = widget->height - *padding - *padding;
++	/* QRT: text about 40% of the field's height, centred (Kumo's address) */
++	*font_height = widget->height * 2 / 5;
++	*padding += (widget->height - *font_height) / 2;
+ #else
+ 	*font_height = FB_FONT_HEIGHT;
+ 	*padding = (widget->height - *padding - *font_height) / 2;
+@@ -146,6 +147,13 @@ fb_redraw_text(fbtk_widget_t *widget, fbtk_callback_info *cbi )
+ 			x +=  scroll;
+ 		}
+ 
++		/* QRT: all of it selected - the accent behind it */
++		if (widget->u.text.all && widget->u.text.len > 0) {
++			nsfb_bbox_t sel = { x - 2, bbox.y0 + padding, x + widget->u.text.width + 2, bbox.y1 - padding };
++			if (sel.x1 > bbox.x1 - padding) sel.x1 = bbox.x1 - padding;
++			nsfb_plot_rectangle_fill(root->u.root.fb, &sel, 0xFFC0682A);   /* ABGR: QRT's blue */
++		}
++
+ 		/* Call the fb text plotting, baseline is 3/4 down the font */
+ 		ctx.plot->text(&ctx,
+ 			       &font_style,
+@@ -287,6 +295,7 @@ fb_text_input_remove_caret_cb(fbtk_widget_t *widget)
+ {
+ 	int c_x, c_y, c_h;
+ 
++	widget->u.text.all = false;
+ 	if (fbtk_get_caret(widget, &c_x, &c_y, &c_h)) {
+ 		fbtk_request_redraw(widget);
+ 	}
+@@ -345,7 +354,29 @@ text_input(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ 		return 0;
+ 	}
+ 
++	/* QRT: with all of it selected, a key that edits replaces it; any other drops the
++	 * selection */
++	if (widget->u.text.all) {
++		widget->u.text.all = false;
++		switch (value) {
++		case NSFB_KEY_RETURN: case NSFB_KEY_RIGHT: case NSFB_KEY_LEFT: case NSFB_KEY_UP: case NSFB_KEY_DOWN:
++		case NSFB_KEY_RSHIFT: case NSFB_KEY_LSHIFT: case NSFB_KEY_RCTRL: case NSFB_KEY_LCTRL:
++			if (value == NSFB_KEY_RSHIFT || value == NSFB_KEY_LSHIFT) widget->u.text.all = true;
++			break;
++		default:
++			widget->u.text.idx = 0;
++			widget->u.text.len = 0;
++			widget->u.text.text[0] = '\0';
++			widget->u.text.width = 0;
++			caret_moved = true;
++			if (value == NSFB_KEY_BACKSPACE || value == NSFB_KEY_DELETE) value = -1;
++			break;
++		}
++	}
++
+ 	switch (value) {
++	case -1:
++		break;
+ 	case NSFB_KEY_BACKSPACE:
+ 		if (widget->u.text.idx <= 0)
+ 			break;
+@@ -485,16 +516,32 @@ text_input(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+  * @param cbi The callback parameters.
+  * @return The callback result.
+  */
++#include <qrt.h>
+ static int
+ text_input_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ {
++	qrt_keyboard(1);                                /* QRT: the on-screen keyboard for the field */
+ 	plot_font_style_t font_style;
+ 	int fh;
+ 	int border;
+ 	size_t idx;
++	int had = fbtk_get_caret(widget, &(int){0}, &(int){0}, &(int){0});
+ 
+ 	fb_text_font_style(widget, &fh, &border, &font_style);
+ 
++	/* QRT: the first tap into a writable field selects all of it (as phones do: an
++	 * address is replaced more often than edited); a tap in it after that places the caret */
++	widget->u.text.all = !had && widget->u.text.enter != NULL && widget->u.text.len > 0;
++	if (widget->u.text.all) {
++		fb_font_width(&font_style, widget->u.text.text, widget->u.text.len, &widget->u.text.width);
++		widget->u.text.idx = widget->u.text.len;
++		widget->u.text.idx_offset = widget->u.text.width;
++		fbtk_set_caret(widget, true, widget->u.text.idx_offset + border, border,
++				widget->height - border - border, fb_text_input_remove_caret_cb);
++		fbtk_request_redraw(widget);
++		return 0;
++	}
++
+ 	widget->u.text.idx = widget->u.text.len;
+ 
+ 	fb_font_position(&font_style, widget->u.text.text,
+@@ -523,6 +570,7 @@ static int
+ text_input_strip_focus(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ {
+ 	fbtk_set_caret(widget, false, 0, 0, 0, NULL);
++	widget->u.text.all = false;
+ 
+ 	return 0;
+ }
+diff --git a/frontends/framebuffer/fbtk/widget.h b/frontends/framebuffer/fbtk/widget.h
+index 5622723..f4f93ea 100644
+--- a/frontends/framebuffer/fbtk/widget.h
++++ b/frontends/framebuffer/fbtk/widget.h
+@@ -187,6 +187,7 @@ struct fbtk_widget_s {
+ 			int len; /* text length */
+ 			int width; /* text width in px */
+ 			int idx_offset; /* caret pos in pixels */
++			bool all; /* QRT: all of it selected (a tap into the field): typing replaces it */
+ 		} text;
+ 
+ 		/* application driven widget */
+diff --git a/frontends/framebuffer/gui.c b/frontends/framebuffer/gui.c
+index 5bfc822..03dc301 100644
+--- a/frontends/framebuffer/gui.c
++++ b/frontends/framebuffer/gui.c
+@@ -649,10 +649,39 @@ static void gui_quit(void)
+ 	framebuffer_finalise();
+ }
+ 
++#include <qrt.h>
++/* QRT: a finger on the page - a tap is a click where it went down, a drag scrolls (as
++ * the shell's own browser and Kumo), so no text selection by dragging */
++static struct { int state, sx, sy, lx, ly; bool grab; } touch;   /* state: 0 none, 1 down, 2 scrolling */
++
+ /* called back when click in browser window */
+ static int
+ fb_browser_window_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ {
++	if (cbi->event->type == NSFB_EVENT_KEY_DOWN && cbi->event->value.keycode == NSFB_KEY_MOUSE_1) {
++		touch.state = 1;
++		touch.sx = touch.lx = cbi->x;
++		touch.sy = touch.ly = cbi->y;
++		touch.grab = fbtk_tgrab_pointer(widget);
++		return 1;
++	}
++	if (cbi->event->type == NSFB_EVENT_KEY_UP && cbi->event->value.keycode == NSFB_KEY_MOUSE_1 && touch.state) {
++		struct gui_window *tgw = cbi->context;
++		struct browser_widget_s *tbw = fbtk_get_userpw(widget);
++		int was = touch.state;
++		touch.state = 0;
++		if (touch.grab) {
++			fbtk_tgrab_pointer(widget);
++			touch.grab = false;
++		}
++		if (was == 1) {
++			int x0 = touch.sx + tbw->scrollx, y0 = touch.sy + tbw->scrolly;
++			browser_window_mouse_click(tgw->bw, BROWSER_MOUSE_PRESS_1, x0, y0);
++			browser_window_mouse_click(tgw->bw, BROWSER_MOUSE_CLICK_1, x0, y0);
++		}
++		return 1;
++	}
++
+ 	struct gui_window *gw = cbi->context;
+ 	struct browser_widget_s *bwidget = fbtk_get_userpw(widget);
+ 	browser_mouse_state mouse;
+@@ -815,6 +844,22 @@ fb_browser_window_move(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ 	int x = cbi->x + bwidget->scrollx;
+ 	int y = cbi->y + bwidget->scrolly;
+ 
++	if (touch.state) {
++		int slop = fbtk_get_height(gw->toolbar) / 6;
++		if (touch.state == 1 && (abs(cbi->x - touch.sx) > slop || abs(cbi->y - touch.sy) > slop))
++			touch.state = 2;
++		if (touch.state == 2) {
++			int dx = touch.lx - cbi->x, dy = touch.ly - cbi->y;
++			if (dy != 0 && !browser_window_scroll_at_point(gw->bw, x, y, 0, dy))
++				widget_scroll_y(gw, dy, false);
++			if (dx != 0 && !browser_window_scroll_at_point(gw->bw, x, y, dx, 0))
++				widget_scroll_x(gw, dx, false);
++		}
++		touch.lx = cbi->x;
++		touch.ly = cbi->y;
++		return 1;
++	}
++
+ 	if (gui_drag.state == GUI_DRAG_PRESSED &&
+ 			(abs(x - gui_drag.x) > 5 ||
+ 			 abs(y - gui_drag.y) > 5)) {
+@@ -1169,6 +1214,7 @@ fb_url_enter(void *pw, char *text)
+ 	nsurl *url;
+ 	nserror error;
+ 
++	qrt_keyboard(0);                                /* QRT: the address is entered */
+ 	error = nsurl_create(text, &url);
+ 	if (error != NSERROR_OK) {
+ 		fb_warn_user("Errorcode:", messages_get_errorcode(error));
+@@ -1261,8 +1307,10 @@ create_toolbar(struct gui_window *gw,
+ 		return NULL;
+ 	}
+ 
+-	toolbar = fbtk_create_window(gw->window, 0, 0, 0, 
+-				     toolbar_height, 
++	/* QRT: Kumo's bar, along the bottom */
++	toolbar = fbtk_create_window(gw->window, 0,
++				     fbtk_get_height(gw->window) - toolbar_height, 0,
++				     toolbar_height,
+ 				     frame_col);
+ 
+ 	if (toolbar == NULL) {
+@@ -1399,9 +1447,9 @@ create_toolbar(struct gui_window *gw,
+ 						   padding,
+ 						   xpos - xlhs,
+ 						   -padding,
++						   FB_FIELD_COLOUR,
+ 						   FB_COLOUR_WHITE,
+-						   FB_COLOUR_BLACK,
+-						   true,
++						   false,
+ 						   fb_url_enter,
+ 						   gw->bw);
+ 
+@@ -1487,7 +1535,7 @@ resize_toolbar(struct gui_window *gw,
+ 		return;
+ 	}
+ 
+-	fbtk_set_pos_and_size(gw->toolbar, 0, 0, 0, toolbar_height);
++	fbtk_set_pos_and_size(gw->toolbar, 0, fbtk_get_height(gw->window) - toolbar_height, 0, toolbar_height);
+ 
+ 	xpos = padding;
+ 
+@@ -1620,9 +1668,9 @@ create_browser_widget(struct gui_window *gw, int toolbar_height, int furniture_w
+ 
+ 	gw->browser = fbtk_create_user(gw->window,
+ 				       0,
+-				       toolbar_height,
+-				       -furniture_width,
++				       0,
+ 				       -furniture_width,
++				       -(furniture_width + toolbar_height),
+ 				       browser_widget);
+ 
+ 	fbtk_set_handler(gw->browser, FBTK_CBT_REDRAW, fb_browser_window_redraw, gw);
+@@ -1659,7 +1707,7 @@ create_normal_browser_window(struct gui_window *gw, int furniture_width)
+ 	/* toolbar */
+ 	toolbar = create_toolbar(gw, 
+ 				 toolbar_height, 
+-				 2, 
++				 toolbar_height / 6, 
+ 				 FB_FRAME_COLOUR, 
+ 				 nsoption_charp(fb_toolbar_layout));
+ 	gw->toolbar = toolbar;
+@@ -1730,7 +1778,7 @@ create_normal_browser_window(struct gui_window *gw, int furniture_width)
+ 	/* create vertical scrollbar */
+ 	gw->vscroll = fbtk_create_vscroll(gw->window,
+ 					  fbtk_get_width(gw->window) - furniture_width,
+-					  toolbar_height,
++					  0,
+ 					  furniture_width,
+ 					  fbtk_get_height(gw->window) - toolbar_height - furniture_width,
+ 					  FB_SCROLL_COLOUR,
+@@ -1762,7 +1810,7 @@ resize_normal_browser_window(struct gui_window *gw, int furniture_width)
+ 	height = fbtk_get_height(gw->window);
+ 	statusbar_width = nsoption_int(toolbar_status_size) * width / 10000;
+ 
+-	resize_toolbar(gw, toolbar_height, 2,
++	resize_toolbar(gw, toolbar_height, toolbar_height / 6,
+ 			nsoption_charp(fb_toolbar_layout));
+ 	fbtk_set_pos_and_size(gw->status,
+ 			0, height - furniture_width,
+@@ -1776,10 +1824,10 @@ resize_normal_browser_window(struct gui_window *gw, int furniture_width)
+ 			furniture_width, furniture_width);
+ 	fbtk_reposition_vscroll(gw->vscroll,
+ 			width - furniture_width,
+-			toolbar_height, furniture_width,
++			0, furniture_width,
+ 			height - toolbar_height - furniture_width);
+ 	resize_browser_widget(gw,
+-			0, toolbar_height,
++			0, 0,
+ 			width - furniture_width,
+ 			height - furniture_width - toolbar_height);
+ }
+@@ -2096,6 +2144,7 @@ gui_window_place_caret(struct gui_window *g, int x, int y, int height,
+ 	/* set new pos */
+ 	fbtk_set_caret(g->browser, true, x, y, height,
+ 			gui_window_remove_caret_cb);
++	qrt_keyboard(1);                                /* QRT: a text field on the page */
+ 
+ 	/* redraw new caret pos */
+ 	fb_queue_redraw(g->browser,
+@@ -2113,6 +2162,7 @@ gui_window_remove_caret(struct gui_window *g)
+ 	if (fbtk_get_caret(g->browser, &c_x, &c_y, &c_h)) {
+ 		/* browser window owns the caret, so can remove it */
+ 		fbtk_set_caret(g->browser, false, 0, 0, 0, NULL);
++		qrt_keyboard(0);
+ 	}
+ }
+ 

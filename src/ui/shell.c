@@ -28,10 +28,10 @@ ui_t ui;
 /* The look follows Catacomb's (Kumo, Epitaph, Tzompantli): flat near-black surfaces,
  * square tiles a shade lighter, thin white line icons and one dark red accent */
 const u32 accent_palette[N_ACCENTS] = {
-    RGB(0x75, 0x2a, 0x2a), RGB(0x35, 0x84, 0xe4), RGB(0x21, 0x90, 0xa4),
-    RGB(0x3a, 0x94, 0x4a), RGB(0xed, 0x5b, 0x00), RGB(0x91, 0x41, 0xac),
+    RGB(0x35, 0x84, 0xe4), RGB(0x21, 0x90, 0xa4), RGB(0x3a, 0x94, 0x4a),
+    RGB(0xed, 0x5b, 0x00), RGB(0x91, 0x41, 0xac), RGB(0x75, 0x2a, 0x2a),
 };
-const char *accent_names[N_ACCENTS] = { "Crimson", "Blue", "Teal", "Green", "Orange", "Purple" };
+const char *accent_names[N_ACCENTS] = { "Blue", "Teal", "Green", "Orange", "Purple", "Crimson" };
 #define C_BG    RGB(0x18, 0x18, 0x18)     /* background */
 #define C_TILE  RGB(0x28, 0x28, 0x28)     /* tiles, fields, buttons */
 #define C_OFF   RGB(0x33, 0x33, 0x33)     /* an inactive toggle, a slider's track */
@@ -47,6 +47,7 @@ typedef enum { VIEW_HOME, VIEW_APP } view_t;
 static struct {
     canvas_t scene, frame, phys, wall, wall_dim;
     int rot, accent_idx;
+    int style;                    /* 0 Classic (rounded, colourful), 1 Catacomb (flat, square): QrtShellStyle */
     view_t view;
     const app_t *app;
     int dirty;
@@ -335,23 +336,44 @@ int scroll_event(scroll_t *s, const event_t *e, rect_t area, int step) {
 }
 
 /* Widgets in the style of GNOME's libadwaita (dark): flat, small radii. */
-void ui_card(canvas_t *c, rect_t r, int radius, int hi) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void ui_card_classic(canvas_t *c, rect_t r, int radius, int hi) {
     radius = MIN(radius, dp(12));
     gfx_rrect(c, r, radius, hi ? ui.card_hi : ui.card);
     gfx_rrect_outline(c, r, radius, 1, ui.stroke);
 }
+static void ui_card_cata(canvas_t *c, rect_t r, int radius, int hi) {
+    radius = MIN(radius, dp(12));
+    gfx_rrect(c, r, radius, hi ? ui.card_hi : ui.card);
+    gfx_rrect_outline(c, r, radius, 1, ui.stroke);
+}
+void ui_card(canvas_t *c, rect_t r, int radius, int hi) { if (sh.style) ui_card_cata(c, r, radius, hi); else ui_card_classic(c, r, radius, hi); }
 
-void ui_button(canvas_t *c, rect_t r, const char *label, u32 fill, u32 fg) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void ui_button_classic(canvas_t *c, rect_t r, const char *label, u32 fill, u32 fg) {
     gfx_rrect(c, r, MIN(r.h / 2, dp(8)), fill);
     gfx_text_center(c, ui.label, r, label, fg);
 }
+static void ui_button_cata(canvas_t *c, rect_t r, const char *label, u32 fill, u32 fg) {
+    gfx_rrect(c, r, MIN(r.h / 2, dp(8)), fill);
+    gfx_text_center(c, ui.label, r, label, fg);
+}
+void ui_button(canvas_t *c, rect_t r, const char *label, u32 fill, u32 fg) { if (sh.style) ui_button_cata(c, r, label, fill, fg); else ui_button_classic(c, r, label, fill, fg); }
 
-void ui_chip(canvas_t *c, rect_t r, const char *label, int selected) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void ui_chip_classic(canvas_t *c, rect_t r, const char *label, int selected) {
+    int rad = MIN(r.h / 2, dp(8));
+    if (selected) gfx_rrect(c, r, rad, ui.accent);
+    else gfx_rrect(c, r, rad, RGBA(255, 255, 255, 20));
+    gfx_text_center(c, ui.label, r, label, selected ? RGB(255, 255, 255) : ui.text);
+}
+static void ui_chip_cata(canvas_t *c, rect_t r, const char *label, int selected) {
     int rad = MIN(r.h / 2, dp(8));
     if (selected) gfx_rrect(c, r, rad, ui.accent);
     else gfx_rrect(c, r, rad, C_TILE);
     gfx_text_center(c, ui.label, r, label, selected ? RGB(255, 255, 255) : ui.text);
 }
+void ui_chip(canvas_t *c, rect_t r, const char *label, int selected) { if (sh.style) ui_chip_cata(c, r, label, selected); else ui_chip_classic(c, r, label, selected); }
 
 void ui_section(canvas_t *c, int x, int y, const char *title) {
     gfx_text(c, ui.small, x, y, title, ui.text2);
@@ -376,25 +398,45 @@ static void metrics_for(int W, int H, float across) {
     ui.landscape = ui.W > ui.H;
     float s = (float)MIN(ui.W, ui.H) / across;
     ui.s = CLAMP(s, 1.0f, 3.0f);
-    ui.small   = font_pick(F_REGULAR, dp(13));
-    ui.body    = font_pick(F_REGULAR, dp(15));
-    ui.label   = font_pick(F_REGULAR, dp(15));
-    ui.title   = font_pick(F_REGULAR, dp(20));
-    ui.h1      = font_pick(F_REGULAR, dp(28));
-    ui.display = font_pick(F_LIGHT, dp(56));
-    ui.huge    = font_pick(F_LIGHT, dp(ui.landscape ? 80 : 88));
     ui.accent  = accent_palette[sh.accent_idx];
     ui.text    = RGB(0xff, 0xff, 0xff);
-    ui.text2   = RGB(0xbf, 0xbf, 0xbf);
-    ui.text3   = RGB(0x66, 0x66, 0x66);
-    ui.card    = C_TILE;
-    ui.card_hi = C_OFF;
-    ui.stroke  = C_OFF;
-    ui.window  = C_BG;
-    ui.header  = C_BG;
-    ui.bg_top    = C_BG;
-    ui.bg_bottom = C_BG;
-    gfx_corner_cap = 0;                                           /* square, everywhere in the shell */
+    ui.display = font_pick(F_LIGHT, dp(56));
+    if (sh.style) {                                               /* Catacomb: flat, square, thin */
+        ui.small   = font_pick(F_REGULAR, dp(13));
+        ui.body    = font_pick(F_REGULAR, dp(15));
+        ui.label   = font_pick(F_REGULAR, dp(15));
+        ui.title   = font_pick(F_REGULAR, dp(20));
+        ui.h1      = font_pick(F_REGULAR, dp(28));
+        ui.huge    = font_pick(F_LIGHT, dp(ui.landscape ? 80 : 88));
+        ui.text2   = RGB(0xbf, 0xbf, 0xbf);
+        ui.text3   = RGB(0x66, 0x66, 0x66);
+        ui.card    = C_TILE;
+        ui.card_hi = C_OFF;
+        ui.stroke  = C_OFF;
+        ui.window  = C_BG;
+        ui.header  = C_BG;
+        ui.bg_top = ui.bg_bottom = C_BG;
+        gfx_corner_cap = 0;                                       /* square, everywhere in the shell */
+        return;
+    }
+    /* Classic: GNOME's rounded, friendly look, toned down - a calm charcoal-blue backdrop,
+     * one soft light of the accent, cards a shade lighter, semibold labels */
+    ui.small   = font_pick(F_REGULAR, dp(13));
+    ui.body    = font_pick(F_REGULAR, dp(15));
+    ui.label   = font_pick(F_SEMIBOLD, dp(15));
+    ui.title   = font_pick(F_SEMIBOLD, dp(20));
+    ui.h1      = font_pick(F_SEMIBOLD, dp(28));
+    ui.huge    = font_pick(F_LIGHT, dp(ui.landscape ? 96 : 112));
+    ui.text2   = RGBA(0xff, 0xff, 0xff, 180);
+    ui.text3   = RGBA(0xff, 0xff, 0xff, 115);
+    ui.card    = RGBA(255, 255, 255, 16);
+    ui.card_hi = RGBA(255, 255, 255, 28);
+    ui.stroke  = RGBA(255, 255, 255, 24);
+    ui.window  = RGB(0x22, 0x24, 0x28);
+    ui.header  = RGB(0x2c, 0x2f, 0x34);
+    ui.bg_top    = RGB(0x1a, 0x1f, 0x2b);
+    ui.bg_bottom = RGB(0x0c, 0x0f, 0x15);
+    gfx_corner_cap = 1 << 20;
 }
 
 /* a phone (the Mi A1, and QEMU's ARM machine standing in for it): held close, so more
@@ -421,7 +463,7 @@ static void ui_metrics(void) {
 }
 
 /* Soft radial light, the signature of the wallpaper. */
-__attribute__((unused)) static void glow(canvas_t *c, float cx, float cy, float rad, u32 color) {
+static void glow(canvas_t *c, float cx, float cy, float rad, u32 color) {
     rect_t cl = c->clip;
     int x0 = MAX(cl.x, (int)(cx - rad)), x1 = MIN(cl.x + cl.w, (int)(cx + rad));
     int y0 = MAX(cl.y, (int)(cy - rad)), y1 = MIN(cl.y + cl.h, (int)(cy + rad));
@@ -452,7 +494,20 @@ static rect_t band(rect_t r, int i, int n) {
 }
 
 /* One band of the wallpaper; runs on any core (pure pixel work). */
-static void wallpaper_job(void *arg, int i, int n) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void wallpaper_job_classic(void *arg, int i, int n) {
+    rect_t b = band(full_rect(), i, n);
+    canvas_t w = sh.wall, dim = sh.wall_dim;       /* private clip state per core */
+    gfx_limit(&w, b);
+    gfx_limit(&dim, b);
+    float W = (float)ui.W, H = (float)ui.H, m = (float)MAX(ui.W, ui.H);
+    gfx_vgradient(&w, full_rect(), ui.bg_top, ui.bg_bottom);
+    glow(&w, W * 0.85f, H * 0.05f, m * 0.60f, ALPHA(ui.accent, 70));   /* one soft light of the accent */
+    glow(&w, W * 0.10f, H * 0.85f, m * 0.55f, RGBA(0x3a, 0x5a, 0x8c, 45));
+    memcpy(dim.px + (usize)b.y * w.stride, w.px + (usize)b.y * w.stride, (usize)b.h * w.stride * 4);
+    gfx_fill(&dim, b, RGBA(6, 8, 12, 140));
+}
+static void wallpaper_job_cata(void *arg, int i, int n) {
     rect_t b = band(full_rect(), i, n);
     canvas_t w = sh.wall, dim = sh.wall_dim;       /* private clip state per core */
     gfx_limit(&w, b);
@@ -462,6 +517,7 @@ static void wallpaper_job(void *arg, int i, int n) {
     gfx_fill(&w, b, C_BG);                                        /* flat (Catacomb) */
     gfx_fill(&dim, b, C_BG);
 }
+static void wallpaper_job(void *arg, int i, int n) { if (sh.style) wallpaper_job_cata(arg, i, n); else wallpaper_job_classic(arg, i, n); }
 
 static void build_wallpaper(void) { smp_run(wallpaper_job, NULL, MAX(4, smp_workers())); }
 
@@ -497,6 +553,12 @@ void shell_set_rotation(int rot) {
 int shell_auto_rotate(void) { return sh.auto_rot; }
 void shell_set_auto_rotate(int on) { sh.auto_rot = on != 0; hal_setting_set(u"QrtAutoRotate", (u32)sh.auto_rot); sh.dirty = 1; }
 
+int shell_style(void) { return sh.style; }
+void shell_set_style(int style) {
+    sh.style = style ? 1 : 0;
+    hal_setting_set(u"QrtShellStyle", (u32)sh.style);
+    relayout();                                           /* metrics, colours, the wallpaper */
+}
 void shell_set_accent(int idx) {
     sh.accent_idx = CLAMP(idx, 0, N_ACCENTS - 1);
     hal_setting_set(u"QrtAccent", (u32)sh.accent_idx);
@@ -710,7 +772,25 @@ static int battery_icon(canvas_t *c, float x, float cy, float s, u32 fg) {
     return (int)(x + bw + dp(2)) - x0;
 }
 
-static void draw_status(canvas_t *c, const EFI_TIME *t) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void draw_status_classic(canvas_t *c, const EFI_TIME *t) {
+    int h = dp(32);
+    gfx_fill(c, (rect_t){ 0, 0, ui.W, h }, RGBA(0, 0, 0, 225));
+    char buf[48], clk[16];
+    static const char *wd[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    static const char *mo[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    /* day of the week (Sakamoto) */
+    static const int tt[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    int yy = t->Year - (t->Month < 3), dow = (yy + yy / 4 - yy / 100 + yy / 400 + tt[(t->Month + 11) % 12] + t->Day) % 7;
+    clock_text(clk, sizeof clk, t);
+    fmt(buf, sizeof buf, "%s %d %s  %s", wd[dow], t->Day, mo[(t->Month + 11) % 12], clk);
+    gfx_text_center(c, font_pick(F_SEMIBOLD, dp(13)), (rect_t){ 0, 0, ui.W, h }, buf, ui.text);
+    float s = dp(16), cy = h / 2.0f, x = ui.W - dp(16) - s;
+    speaker_icon(c, x, cy, s, sh.volume == 0, sh.volume, ui.text);
+    net_icon(c, x - dp(14) - s, cy, s, ui.text);
+    battery_icon(c, x - dp(28) - s * 2.15f, cy, s, ui.text);
+}
+static void draw_status_cata(canvas_t *c, const EFI_TIME *t) {
     int h = dp(30);
     gfx_fill(c, (rect_t){ 0, 0, ui.W, h }, C_BG);
     char buf[32], clk[16];
@@ -730,6 +810,7 @@ static void draw_status(canvas_t *c, const EFI_TIME *t) {
     battery_icon(c, x - dp(24) - s * 2.15f, cy, s, ui.text);
     if (sh.drawer_y > 0 && sh.drawer_y < h) gfx_fill(c, (rect_t){ 0, h - 1, ui.W, 1 }, ui.accent);
 }
+static void draw_status(canvas_t *c, const EFI_TIME *t) { if (sh.style) draw_status_cata(c, t); else draw_status_classic(c, t); }
 
 /* ---- geometry ----------------------------------------------------------------
  * A status bar across the top, the dock floating along one edge and the
@@ -737,21 +818,35 @@ static void draw_status(canvas_t *c, const EFI_TIME *t) {
  * rounded panel inset from its edge; it can be dragged anywhere and snaps
  * to the nearest edge when released.  The on-screen keyboard, when shown,
  * takes the bottom of the content area. */
-#define STATUS_H dp(30)
+#define STATUS_H (sh.style ? dp(30) : dp(32))
 enum { DOCK_RIGHT, DOCK_LEFT, DOCK_BOTTOM, DOCK_TOP };
-static int dock_thick(void) { return dp(60); }
-static int dock_gap(void) { return 0; }                  /* flat along its edge, not floating */
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static int dock_thick_classic(void) { return dp(76); }
+static int dock_thick_cata(void) { return dp(60); }
+static int dock_thick(void) { return sh.style ? dock_thick_cata() : dock_thick_classic(); }
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static int dock_gap_classic(void) { return dp(8); }
+static int dock_gap_cata(void) { return 0; }
+static int dock_gap(void) { return sh.style ? dock_gap_cata() : dock_gap_classic(); }                  /* flat along its edge, not floating */
 static int dock_band(void) { return dock_thick() + 2 * dock_gap(); }     /* space the dock takes from the content */
 static int dock_vertical(int edge) { return edge == DOCK_RIGHT || edge == DOCK_LEFT; }
 static int dock_items(int *out);
 
 /* the panel's length along its edge: as long as its icons need, at most the edge */
-static int dock_length(int edge) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static int dock_length_classic(int edge) {
+    int items[16], n = dock_items(items);
+    int full = dock_vertical(edge) ? ui.H - STATUS_H - 2 * dock_gap() : ui.W - 2 * dock_gap();
+    int want = dp(20) + n * dp(64) + dp(12) + dp(60);
+    return MIN(want, full);
+}
+static int dock_length_cata(int edge) {
     int items[16], n = dock_items(items);
     int full = dock_vertical(edge) ? ui.H - STATUS_H - 2 * dock_gap() : ui.W - 2 * dock_gap();
     (void)n;
     return full;                                                  /* the whole edge: a bar */
 }
+static int dock_length(int edge) { return sh.style ? dock_length_cata(edge) : dock_length_classic(edge); }
 
 static rect_t dock_rect_at(int edge) {
     int t = dock_thick(), g = dock_gap(), len = dock_length(edge);
@@ -829,25 +924,50 @@ static int dock_items(int *out) {
 }
 
 /* cells shrink when many apps are open, so every one keeps a place */
-static int dock_cell(void) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static int dock_cell_classic(void) {
+    int items[16], n = dock_items(items);
+    rect_t d = dock_rect();
+    int len = dock_vertical(dock_shape()) ? d.h : d.w;
+    int avail = len - dp(20) - dp(60) - dp(12);                  /* minus the launcher button */
+    return CLAMP(avail / MAX(1, n) - dp(4), dp(40), dp(60));
+}
+static int dock_cell_cata(void) {
     int items[16], n = dock_items(items);
     rect_t d = dock_rect();
     int len = dock_vertical(dock_shape()) ? d.h : d.w;
     int avail = len - dock_thick();                               /* minus the launcher button */
     return CLAMP(avail / MAX(1, n), dp(40), dock_thick());
 }
-static rect_t dock_slot(int i) {
+static int dock_cell(void) { return sh.style ? dock_cell_cata() : dock_cell_classic(); }
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static rect_t dock_slot_classic(int i) {
+    rect_t d = dock_rect();
+    int c = dock_cell(), along = dp(10) + i * (c + dp(4));
+    if (dock_vertical(dock_shape())) return (rect_t){ d.x + (d.w - c) / 2, d.y + along, c, c };
+    return (rect_t){ d.x + along, d.y + (d.h - c) / 2, c, c };
+}
+static rect_t dock_slot_cata(int i) {
     rect_t d = dock_rect();
     int c = dock_cell(), along = i * c;
     if (dock_vertical(dock_shape())) return (rect_t){ d.x, d.y + along, d.w, c };
     return (rect_t){ d.x + along, d.y, c, d.h };
 }
-static rect_t dock_launcher_rect(void) {
+static rect_t dock_slot(int i) { return sh.style ? dock_slot_cata(i) : dock_slot_classic(i); }
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static rect_t dock_launcher_rect_classic(void) {
+    rect_t d = dock_rect();
+    int c = dp(60);
+    if (dock_vertical(dock_shape())) return (rect_t){ d.x + (d.w - c) / 2, d.y + d.h - dp(10) - c, c, c };
+    return (rect_t){ d.x + d.w - dp(10) - c, d.y + (d.h - c) / 2, c, c };
+}
+static rect_t dock_launcher_rect_cata(void) {
     rect_t d = dock_rect();
     int c = dock_thick();
     if (dock_vertical(dock_shape())) return (rect_t){ d.x, d.y + d.h - c, d.w, c };
     return (rect_t){ d.x + d.w - c, d.y, c, d.h };
 }
+static rect_t dock_launcher_rect(void) { return sh.style ? dock_launcher_rect_cata() : dock_launcher_rect_classic(); }
 
 void shell_set_dock_edge(int edge) {
     sh.dock_edge = edge & 3;
@@ -858,12 +978,56 @@ int shell_dock_edge(void) { return sh.dock_edge; }
 
 /* an app's icon: its white line drawing, on a square tile (Tzompantli's grid) or alone */
 static void app_glyph(canvas_t *c, const app_t *a, float cx, float cy, float r) { a->icon(c, cx, cy, r * 0.62f, ui.text); }
-static void app_icon(canvas_t *c, const app_t *a, float cx, float cy, float r) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void app_icon_classic(canvas_t *c, const app_t *a, float cx, float cy, float r) {
+    rect_t sq = { (int)(cx - r), (int)(cy - r), (int)(2 * r), (int)(2 * r) };
+    gfx_rrect(c, sq, (int)(r * 0.42f), a->color);
+    gfx_rrect(c, (rect_t){ sq.x, sq.y, sq.w, sq.h / 2 }, (int)(r * 0.42f), RGBA(255, 255, 255, 22));   /* soft top light */
+    gfx_fill(c, (rect_t){ sq.x + (int)(r * 0.42f), sq.y + sq.h / 2 - 1, sq.w - 2 * (int)(r * 0.42f), 1 }, RGBA(255, 255, 255, 0));
+    a->icon(c, cx, cy, r * 0.6f, RGB(255, 255, 255));
+}
+static void app_icon_cata(canvas_t *c, const app_t *a, float cx, float cy, float r) {
     gfx_fill(c, (rect_t){ (int)(cx - r), (int)(cy - r), (int)(2 * r), (int)(2 * r) }, C_TILE);
     app_glyph(c, a, cx, cy, r);
 }
+static void app_icon(canvas_t *c, const app_t *a, float cx, float cy, float r) { if (sh.style) app_icon_cata(c, a, cx, cy, r); else app_icon_classic(c, a, cx, cy, r); }
 
-static void draw_dock(canvas_t *c) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void draw_dock_classic(canvas_t *c) {
+    rect_t d = dock_rect();
+    int edge = dock_shape(), vert = dock_vertical(edge), rad = dp(22);
+    int lifted = sh.dock_drag == 2 || sh.animating;
+    if (lifted) gfx_shadow(c, d, rad, dp(18), RGBA(0, 0, 0, 120));
+    gfx_rrect(c, d, rad, RGBA(24, 24, 24, lifted ? 235 : 215));
+    gfx_rrect_outline(c, d, rad, 1, lifted ? ALPHA(ui.accent, 160) : ui.stroke);
+    int items[16], n = dock_items(items);
+    rect_t lr = dock_launcher_rect();
+    for (int i = 0; i < n; i++) {
+        rect_t r = dock_slot(i);
+        if (vert ? r.y + r.h > lr.y - dp(4) : r.x + r.w > lr.x - dp(4)) break;     /* no room left */
+        const app_t *a = apps[items[i]];
+        int active = sh.view == VIEW_APP && sh.app == a && !sh.launcher_open;
+        if (active || (sh.dock_pressed == i && sh.dock_drag != 2)) gfx_rrect(c, r, dp(14), RGBA(255, 255, 255, active ? 42 : 28));
+        app_icon(c, a, r.x + r.w / 2.0f, r.y + r.h / 2.0f, r.w * 0.35f);
+        if (sh.running & (1u << items[i])) {
+            /* the running dot sits on the side facing the screen's middle */
+            float dx, dy;
+            switch (edge) {
+            case DOCK_LEFT:   dx = d.x + d.w - dp(7); dy = r.y + r.h / 2.0f; break;
+            case DOCK_BOTTOM: dx = r.x + r.w / 2.0f; dy = d.y + dp(6); break;
+            case DOCK_TOP:    dx = r.x + r.w / 2.0f; dy = d.y + d.h - dp(6); break;
+            default:          dx = d.x + dp(7); dy = r.y + r.h / 2.0f; break;
+            }
+            gfx_circle(c, dx, dy, dp(2.5f), active ? ui.accent : ui.text);
+        }
+    }
+    /* "show applications": a 3x3 grid of dots */
+    if (sh.launcher_open || (sh.dock_pressed == 99 && sh.dock_drag != 2)) gfx_rrect(c, lr, dp(14), RGBA(255, 255, 255, sh.launcher_open ? 42 : 28));
+    float cx = lr.x + lr.w / 2.0f, cy = lr.y + lr.h / 2.0f, g = dp(8);
+    for (int yy = -1; yy <= 1; yy++)
+        for (int xx = -1; xx <= 1; xx++) gfx_circle(c, cx + xx * g, cy + yy * g, dp(2.6f), ui.text);
+}
+static void draw_dock_cata(canvas_t *c) {
     rect_t d = dock_rect();
     int edge = dock_shape(), vert = dock_vertical(edge);
     int lifted = sh.dock_drag == 2 || sh.animating;
@@ -904,6 +1068,7 @@ static void draw_dock(canvas_t *c) {
     for (int yy = -1; yy <= 1; yy++)
         for (int xx = -1; xx <= 1; xx++) gfx_fill(c, (rect_t){ (int)(cx + xx * g - q / 2), (int)(cy + yy * g - q / 2), (int)q, (int)q }, ui.text);
 }
+static void draw_dock(canvas_t *c) { if (sh.style) draw_dock_cata(c); else draw_dock_classic(c); }
 
 /* ---- home ------------------------------------------------------------------- */
 static int home_cols(void) { rect_t a = work_rect(); return ui_phone() && !ui.landscape ? 4 : MAX(4, MIN(8, a.w / dp(110))); }
@@ -938,7 +1103,7 @@ static void draw_home(canvas_t *c, const EFI_TIME *t) {
         rect_t r = home_cell(k2++);
         int tile = MIN(r.w - dp(20), dp(60));
         float cx = r.x + r.w / 2.0f, cy = r.y + dp(6) + tile / 2.0f;
-        if (sh.home_pressed == i) gfx_fill(c, (rect_t){ r.x + dp(2), r.y, r.w - dp(4), r.h - dp(4) }, C_OFF);
+        if (sh.home_pressed == i) gfx_rrect(c, (rect_t){ r.x + dp(2), r.y, r.w - dp(4), r.h - dp(4) }, dp(14), ui.card_hi);
         app_icon(c, apps[i], cx, cy, tile / 2.0f);
         gfx_text_center(c, ui.small, (rect_t){ r.x + dp(2), r.y + dp(10) + tile, r.w - dp(4), ui.small->line }, apps[i]->name,
                         (sh.running & (1u << i)) ? ui.text : ui.text2);
@@ -1001,7 +1166,43 @@ static rect_t action_row(int napps, int i) {
     return (rect_t){ s.x, y0 + i * dp(56), s.w, dp(52) };
 }
 
-static void draw_launcher(canvas_t *c) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void draw_launcher_classic(canvas_t *c) {
+    rect_t a = content_rect();
+    gfx_fill(c, a, RGBA(0, 0, 0, 200));
+    rect_t f = search_rect();
+    gfx_rrect(c, f, f.h / 2, RGBA(0xf5, 0xf3, 0xfa, 235));
+    float cx = f.x + dp(26), cy = f.y + f.h / 2.0f;
+    gfx_ring(c, cx - dp(2), cy - dp(2), dp(8), dp(2.4f), ui.accent);
+    gfx_line(c, cx + dp(4), cy + dp(4), cx + dp(9), cy + dp(9), dp(2.6f), ui.accent);
+    int tx = f.x + dp(48), ty = f.y + (f.h - ui.body->line) / 2;
+    int end = sh.query[0] ? gfx_text(c, ui.body, tx, ty, sh.query, RGB(0x20, 0x1a, 0x30))
+                          : (gfx_text(c, ui.body, tx, ty, "Search apps and actions", RGBA(0x20, 0x1a, 0x30, 120)), tx);
+    gfx_fill(c, (rect_t){ end + 1, ty + dp(2), MAX(1, dp(2)), ui.body->line - dp(4) }, ui.accent);
+
+    int ia[32], na = match_apps(ia), ix[32], nx = match_actions(ix);
+    rect_t w = work_rect();
+    gfx_clip(c, w);
+    for (int i = 0; i < na; i++) {
+        rect_t r = grid_cell(i);
+        if (sh.launch_pressed == i) gfx_rrect(c, (rect_t){ r.x + dp(6), r.y, r.w - dp(12), r.h - dp(6) }, dp(18), RGBA(255, 255, 255, 30));
+        const app_t *ap = apps[ia[i]];
+        app_icon(c, ap, r.x + r.w / 2.0f, r.y + dp(40), dp(29));
+        if (sh.query[0] && i == 0) gfx_ring(c, r.x + r.w / 2.0f, r.y + dp(40), dp(33), dp(2), ui.accent);
+        gfx_text_center(c, ui.label, (rect_t){ r.x + dp(4), r.y + dp(76), r.w - dp(8), ui.label->line }, ap->name, ui.text);
+    }
+    if (nx) ui_section(c, action_row(na, 0).x + dp(12), action_row(na, 0).y - ui.small->line - dp(6), "ACTIONS");
+    for (int i = 0; i < nx; i++) {
+        rect_t r = action_row(na, i);
+        gfx_rrect(c, r, dp(14), sh.launch_pressed == 100 + i || (!na && i == 0) ? RGBA(255, 255, 255, 40) : RGBA(255, 255, 255, 16));
+        gfx_circle(c, r.x + dp(24), r.y + r.h / 2.0f, dp(14), RGB(0x55, 0x50, 0x66));
+        gfx_ring(c, r.x + dp(24), r.y + r.h / 2.0f, dp(6), dp(2), RGB(255, 255, 255));
+        gfx_text(c, ui.label, r.x + dp(48), r.y + dp(6), actions[ix[i]].title, ui.text);
+        gfx_text_fit(c, ui.small, r.x + dp(48), r.y + dp(6) + ui.label->line, r.w - dp(56), actions[ix[i]].sub, ui.text2);
+    }
+    gfx_unclip(c);
+}
+static void draw_launcher_cata(canvas_t *c) {
     rect_t a = content_rect();
     gfx_fill(c, a, C_BG);
     rect_t f = search_rect();
@@ -1037,6 +1238,7 @@ static void draw_launcher(canvas_t *c) {
     }
     gfx_unclip(c);
 }
+static void draw_launcher(canvas_t *c) { if (sh.style) draw_launcher_cata(c); else draw_launcher_classic(c); }
 
 /* ---- power menu (hardware power button) ---------------------------------------- */
 /* With a monitor connected the menu also switches between controlling it (the shell on
@@ -1056,7 +1258,18 @@ static rect_t power_panel(void) {
     return (rect_t){ (ui.W - w) / 2, (ui.H - h) / 2, w, h };
 }
 static rect_t power_row(int i) { rect_t p = power_panel(); return (rect_t){ p.x + dp(14), p.y + dp(64) + i * dp(56), p.w - dp(28), dp(50) }; }
-static void draw_power(canvas_t *c) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void draw_power_classic(canvas_t *c) {
+    gfx_fill(c, full_rect(), RGBA(0, 0, 0, 150));
+    rect_t p = power_panel();
+    ui_card(c, p, dp(24), 1);
+    gfx_text(c, ui.title, p.x + dp(20), p.y + dp(20), "Power", ui.text);
+    int ids[8], n = power_items(ids);
+    for (int i = 0; i < n; i++)
+        ui_button(c, power_row(i), power_labels[ids[i]],
+                  ids[i] == P_SHUTDOWN ? RGB(0xe5, 0x48, 0x4d) : ids[i] <= P_MIRROR ? ui.accent : RGBA(255, 255, 255, 30), ui.text);
+}
+static void draw_power_cata(canvas_t *c) {
     gfx_fill(c, full_rect(), RGBA(0, 0, 0, 170));
     rect_t p = power_panel();
     gfx_fill(c, p, C_BG);
@@ -1066,6 +1279,7 @@ static void draw_power(canvas_t *c) {
     for (int i = 0; i < n; i++)
         ui_button(c, power_row(i), power_labels[ids[i]], ids[i] == P_SHUTDOWN || ids[i] <= P_MIRROR ? ui.accent : C_TILE, ui.text);
 }
+static void draw_power(canvas_t *c) { if (sh.style) draw_power_cata(c); else draw_power_classic(c); }
 
 /* ---- app chrome ----------------------------------------------------------------- */
 static void open_app(int i);
@@ -1079,10 +1293,37 @@ static rect_t app_area(void) {
     return (rect_t){ w.x, top, w.w, w.y + w.h - top };
 }
 rect_t shell_app_area(void) { return app_area(); }
-static rect_t close_rect(void) { rect_t h = header_rect(); int b = h.h - dp(8); return (rect_t){ h.x + h.w - dp(4) - b, h.y + dp(4), b, b }; }
-static rect_t min_rect(void) { rect_t cl = close_rect(); return (rect_t){ cl.x - dp(4) - cl.w, cl.y, cl.w, cl.h }; }
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static rect_t close_rect_classic(void) { rect_t h = header_rect(); int b = dp(34); return (rect_t){ h.x + h.w - dp(10) - b, h.y + (h.h - b) / 2, b, b }; }
+static rect_t close_rect_cata(void) { rect_t h = header_rect(); int b = h.h - dp(8); return (rect_t){ h.x + h.w - dp(4) - b, h.y + dp(4), b, b }; }
+static rect_t close_rect(void) { return sh.style ? close_rect_cata() : close_rect_classic(); }
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static rect_t min_rect_classic(void) { rect_t cl = close_rect(); return (rect_t){ cl.x - dp(10) - cl.w, cl.y, cl.w, cl.h }; }
+static rect_t min_rect_cata(void) { rect_t cl = close_rect(); return (rect_t){ cl.x - dp(4) - cl.w, cl.y, cl.w, cl.h }; }
+static rect_t min_rect(void) { return sh.style ? min_rect_cata() : min_rect_classic(); }
 
-static void draw_app(canvas_t *c) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void draw_app_classic(canvas_t *c) {
+    rect_t win = content_rect(), hb = header_rect();
+    gfx_fill(c, win, ui.window);
+    gfx_fill(c, hb, ui.header);
+    gfx_fill(c, (rect_t){ hb.x, hb.y + hb.h - 1, hb.w, 1 }, RGBA(0, 0, 0, 140));
+    gfx_text_center(c, font_pick(F_SEMIBOLD, dp(15)), hb, sh.app->name, ui.text);
+    rect_t cl = close_rect(), mn = min_rect();
+    float s = dp(5.5f), cx = cl.x + cl.w / 2.0f, cy = cl.y + cl.h / 2.0f;
+    gfx_circle(c, cx, cy, cl.w / 2.0f, RGBA(255, 255, 255, 22));
+    gfx_line(c, cx - s, cy - s, cx + s, cy + s, dp(2), ui.text);
+    gfx_line(c, cx - s, cy + s, cx + s, cy - s, dp(2), ui.text);
+    cx = mn.x + mn.w / 2.0f;
+    gfx_circle(c, cx, cy, mn.w / 2.0f, RGBA(255, 255, 255, 22));
+    gfx_line(c, cx - s, cy + s * 0.6f, cx + s, cy + s * 0.6f, dp(2), ui.text);
+
+    rect_t area = app_area();
+    gfx_clip(c, area);
+    if (sh.app->draw) sh.app->draw(c, area);
+    gfx_unclip(c);
+}
+static void draw_app_cata(canvas_t *c) {
     rect_t win = content_rect(), hb = header_rect();
     gfx_fill(c, win, ui.window);
     gfx_fill(c, hb, C_BG);
@@ -1104,6 +1345,7 @@ static void draw_app(canvas_t *c) {
     if (sh.app->draw) sh.app->draw(c, area);
     gfx_unclip(c);
 }
+static void draw_app(canvas_t *c) { if (sh.style) draw_app_cata(c); else draw_app_classic(c); }
 
 /* ---- open apps: thumbnails, closing, the overview grid ------------------------------ */
 static int cur_index(void) { for (int i = 0; i < N_APPS; i++) if (apps[i] && apps[i] == sh.app) return i; return -1; }
@@ -1169,7 +1411,48 @@ static rect_t ov_card_rect(int k2, int n) {
 }
 static rect_t ov_close_rect(rect_t card) { int b = dp(30); return (rect_t){ card.x + card.w - b - dp(2), card.y + dp(2), b, b }; }
 
-static void draw_overview(canvas_t *c) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void draw_overview_classic(canvas_t *c) {
+    rect_t a = content_rect();
+    gfx_fill(c, a, RGBA(0, 0, 0, 170));
+    int list[16], n = running_list(list);
+    gfx_text(c, ui.title, a.x + dp(24), a.y + dp(20), "Open apps", ui.text);
+    if (!n) { gfx_text_center(c, ui.body, a, "No apps are open", ui.text2); return; }
+    for (int k2 = 0; k2 < n; k2++) {
+        int i = list[k2];
+        rect_t r = ov_card_rect(k2, n);
+        int dy = k2 == sh.ov_card && sh.ov_dragging ? sh.ov_dy : 0;
+        r.y += dy;
+        u32 fade = (u32)CLAMP(255 + dy * 255 / dp(260), 60, 255);
+        /* title row */
+        app_icon(c, apps[i], r.x + dp(14), r.y + dp(16), dp(12));
+        gfx_text_fit(c, ui.label, r.x + dp(34), r.y + dp(16) - ui.label->line / 2, r.w - dp(74), apps[i]->name, ALPHA(ui.text, fade));
+        rect_t cb = ov_close_rect(r);
+        gfx_circle(c, cb.x + cb.w / 2.0f, cb.y + cb.h / 2.0f, cb.w / 2.0f, RGBA(255, 255, 255, 40));
+        float s = dp(4.5f), cx = cb.x + cb.w / 2.0f, cy = cb.y + cb.h / 2.0f;
+        gfx_line(c, cx - s, cy - s, cx + s, cy + s, dp(2), ui.text);
+        gfx_line(c, cx - s, cy + s, cx + s, cy - s, dp(2), ui.text);
+        /* the window picture */
+        rect_t pic = { r.x, r.y + dp(36), r.w, r.h - dp(36) };
+        canvas_t *t = &sh.thumbs[i];
+        if (t->px && t->w > 0) {
+            /* nearest-neighbour fit of the thumbnail into the card */
+            rect_t cl = rect_intersect(c->clip, pic);
+            for (int y = cl.y; y < cl.y + cl.h; y++) {
+                const u32 *srow = t->px + (usize)((y - pic.y) * t->h / pic.h) * t->stride;
+                u32 *drow = c->px + (usize)y * c->stride;
+                for (int x = cl.x; x < cl.x + cl.w; x++) drow[x] = srow[(x - pic.x) * t->w / pic.w];
+            }
+            gfx_rrect_outline(c, pic, dp(10), 1, ui.stroke);
+        } else {
+            gfx_rrect(c, pic, dp(10), ui.window);
+            app_icon(c, apps[i], pic.x + pic.w / 2.0f, pic.y + pic.h / 2.0f, dp(28));
+        }
+        if (k2 == sh.ov_card && !sh.ov_dragging) gfx_rrect_outline(c, pic, dp(10), dp(3), ui.accent);
+    }
+    gfx_text_center(c, ui.small, (rect_t){ a.x, a.y + a.h - dp(40), a.w, dp(24) }, "Swipe a window up to close it", ui.text3);
+}
+static void draw_overview_cata(canvas_t *c) {
     rect_t a = content_rect();
     gfx_fill(c, a, C_BG);
     int list[16], n = running_list(list);
@@ -1209,6 +1492,7 @@ static void draw_overview(canvas_t *c) {
     }
     gfx_text_center(c, ui.small, (rect_t){ a.x, a.y + a.h - dp(40), a.w, dp(24) }, "Swipe a window up to close it", ui.text3);
 }
+static void draw_overview(canvas_t *c) { if (sh.style) draw_overview_cata(c); else draw_overview_classic(c); }
 
 static void overview_pointer(const event_t *e) {
     int list[16], n = running_list(list), hit = -1;
@@ -1322,9 +1606,15 @@ static void dm_icon(canvas_t *c, int i, float cx, float cy, float s) {
     }
     }
 }
+/* the drawer's colours: Catacomb's greys, or Classic's translucent cards and accent */
+static u32 dw_bg(void) { return sh.style ? C_BG : RGBA(0x16, 0x19, 0x20, 246); }
+static u32 dw_off(void) { return sh.style ? C_OFF : RGBA(255, 255, 255, 22); }
+static u32 dw_on(void) { return sh.style ? C_ON : ui.accent; }
+static int dw_round(void) { return sh.style ? 0 : dp(18); }
 static void drawer_slider_draw(canvas_t *c, rect_t r, int pct, int which) {
-    gfx_fill(c, r, C_OFF);
-    gfx_fill(c, (rect_t){ r.x, r.y, r.w * CLAMP(pct, 0, 100) / 100, r.h }, C_ON);
+    gfx_rrect(c, r, dw_round(), dw_off());
+    int fw = r.w * CLAMP(pct, 0, 100) / 100;
+    if (fw > 0) gfx_rrect(c, (rect_t){ r.x, r.y, MAX(fw, dw_round() * 2), r.h }, dw_round(), dw_on());
     float cx = r.x + dp(24), cy = r.y + r.h / 2.0f, s = dp(18);
     if (which == 0) {                                     /* a sun */
         gfx_ring(c, cx, cy, s * 0.28f, dp(1.5f), ui.text);
@@ -1342,6 +1632,7 @@ static void draw_drawer(canvas_t *c, const EFI_TIME *t) {
     if (y <= 0) return;
     int off = y - H;                                     /* it slides down: its contents move with it */
     gfx_fill(c, (rect_t){ 0, 0, ui.W, y }, C_BG);
+    if (!sh.style) gfx_fill(c, (rect_t){ 0, 0, ui.W, y }, dw_bg());
     rect_t lim = c->clip;
     gfx_clip(c, (rect_t){ 0, 0, ui.W, y });
     for (int i = 0; i < 2; i++) {
@@ -1352,14 +1643,14 @@ static void draw_drawer(canvas_t *c, const EFI_TIME *t) {
     for (int i = 0; i < DM_N; i++) {
         rect_t m = drawer_module(i);
         m.y += off;
-        gfx_fill(c, m, dm_active(i) || sh.drawer_pressed == i ? C_ON : C_OFF);
+        gfx_rrect(c, m, dw_round(), dm_active(i) ? dw_on() : sh.drawer_pressed == i ? ui.card_hi : dw_off());
         dm_icon(c, i, m.x + m.w / 2.0f, m.y + m.h / 2.0f, dp(24));
         gfx_text_center(c, ui.small, (rect_t){ m.x - dp(8), m.y + m.h + dp(4), m.w + dp(16), ui.small->line }, dm_names[i], ui.text2);
     }
     rect_t hd = drawer_handle();
     hd.y += off;
-    gfx_fill(c, (rect_t){ ui.W / 2 - dp(24), hd.y + hd.h / 2 - dp(1), dp(48), dp(2) }, C_ON);
-    gfx_fill(c, (rect_t){ 0, y - 1, ui.W, 1 }, ui.accent);
+    gfx_rrect(c, (rect_t){ ui.W / 2 - dp(24), hd.y + hd.h / 2 - dp(2), dp(48), dp(4) }, dp(2), sh.style ? C_ON : ui.text3);
+    if (sh.style) gfx_fill(c, (rect_t){ 0, y - 1, ui.W, 1 }, ui.accent);
     c->clip = lim;
     draw_status(c, t);                                   /* the bar stays above it (Epitaph) */
 }
@@ -1725,7 +2016,24 @@ static void speaker_icon(canvas_t *c, float x, float cy, float s, int muted, int
         }
     }
 }
-static void draw_osd(canvas_t *c) {
+/* the Classic style (rounded, colourful), then the Catacomb one */
+static void draw_osd_classic(canvas_t *c) {
+    rect_t r = osd_rect();
+    gfx_shadow(c, r, r.h / 2, dp(12), RGBA(0, 0, 0, 90));
+    gfx_rrect(c, r, r.h / 2, RGBA(20, 16, 34, 235));
+    gfx_rrect_outline(c, r, r.h / 2, 1, ui.stroke);
+    float cy = r.y + r.h / 2.0f;
+    speaker_icon(c, r.x + dp(20), cy, dp(26), sh.volume == 0, sh.volume, ui.text);
+    char pct[16];
+    fmt(pct, sizeof pct, sh.volume ? "%d%%" : "Muted", sh.volume);
+    int tw = text_width(ui.label, pct);
+    gfx_text(c, ui.label, r.x + r.w - dp(20) - tw, (int)cy - ui.label->line / 2, pct, ui.text);
+    int bx = r.x + dp(64), bw = r.w - dp(64) - dp(34) - text_width(ui.label, "100%");
+    rect_t track = { bx, (int)cy - dp(3), bw, dp(6) };
+    gfx_rrect(c, track, dp(3), RGBA(255, 255, 255, 40));
+    if (sh.volume) gfx_rrect(c, (rect_t){ bx, track.y, MAX(dp(6), bw * sh.volume / 100), track.h }, dp(3), ui.accent);
+}
+static void draw_osd_cata(canvas_t *c) {
     rect_t r = osd_rect();
     gfx_fill(c, r, C_BG);                                         /* Epitaph's volume overlay */
     gfx_rrect_outline(c, r, 0, 1, C_OFF);
@@ -1740,6 +2048,7 @@ static void draw_osd(canvas_t *c) {
     gfx_fill(c, track, C_OFF);
     if (sh.volume) gfx_fill(c, (rect_t){ bx, track.y, MAX(dp(6), bw * sh.volume / 100), track.h }, ui.accent);
 }
+static void draw_osd(canvas_t *c) { if (sh.style) draw_osd_cata(c); else draw_osd_classic(c); }
 int shell_volume(void) { return sh.volume; }
 void shell_set_volume(int v) {
     sh.volume = CLAMP(v, 0, 100);
@@ -2382,6 +2691,7 @@ void shell_main(void) {
     sh.rot = (int)hal_setting_get(u"QrtRotation", 0) & 3;
     sh.auto_rot = (int)hal_setting_get(u"QrtAutoRotate", 1) != 0;
     sh.accent_idx = (int)hal_setting_get(u"QrtAccent", 0) % N_ACCENTS;
+    sh.style = hal_setting_get(u"QrtShellStyle", 0) == 1;
     sh.dock_edge = (int)hal_setting_get(u"QrtDockEdge", ui_phone() ? DOCK_BOTTOM : DOCK_RIGHT) & 3;
     sh.sleep_after = (int)hal_setting_get(u"QrtSleepAfter", 120);
     sh.volume = sh.volume_saved = CLAMP((int)hal_setting_get(u"QrtVolume", 50), 0, 100);
