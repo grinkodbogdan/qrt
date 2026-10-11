@@ -1,0 +1,5 @@
+// fastfetch on QRT: QRT's logo, the modules that have something to say here
+{
+    "logo": { "source": "/etc/xdg/fastfetch/qrt.txt", "type": "file", "color": { "1": "blue", "2": "white" } },
+    "modules": [ "title", "separator", "os", "host", "kernel", "uptime", "shell", "cpu", "memory", "disk", "locale", "break", "colors" ]
+}

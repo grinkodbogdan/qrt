@@ -182,7 +182,7 @@ int arm_kernel_user_fault(frame_t *f) {
     return 1;
 }
 
-/* ---- qrt.run=PROG[,PROG...]: programs run one after another at boot (tests), their
+/* ---- qrt.run=PROG[+ARG...][,PROG...]: programs run one after another at boot (tests), their
  * output to the kernel log ----------------------------------------------------------- */
 static char run_list[256];
 static term_t run_term;
@@ -197,10 +197,12 @@ static void run_thread(void *arg) {
         memcpy(path, s, n); path[n] = 0;
         s = *e ? e + 1 : e;
         char err[128];
-        const char *argv[] = { path };
+        const char *argv[8] = { path };                           /* PROG+ARG+ARG: arguments */
+        int argc = 1;
+        for (char *q = path; *q && argc < 8; q++) if (*q == '+') { *q = 0; argv[argc++] = q + 1; }
         klog("run: %s", path);
         u64 t0 = k_now_us();
-        proc_t *p = proc_spawn(path, 1, argv, &run_term, err, sizeof err);
+        proc_t *p = proc_spawn(path, argc, argv, &run_term, err, sizeof err);
         if (!p) { klog("run: %s: %s", path, err); continue; }
         while (!p->exited) thr_sleep_us(10000);
         usize from = 0;                                           /* its output, line by line */

@@ -189,6 +189,16 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.29.1: fastfetch
+
+- **`fastfetch`** in the Terminal on the phone (fastfetch 2.66, built for ARM with the new
+  SDK by `ports/fastfetch-arm64.sh`), with a QRT logo (`/etc/xdg/fastfetch`).
+- `/proc/cpuinfo` on ARM is Linux's ARM layout, from the core's own ID register, with the
+  chip's name (Snapdragon 625 on the Mi A1); `/proc/meminfo` gives the free memory;
+  `/sys/firmware/devicetree/base/model` names the device.
+- The ARM SDK has a CMake toolchain file (`build/sdk-arm64/qrt-a64.cmake`) and Linux's
+  DRM, sound and video headers.
+
 ## 0.29.0: programs on the phone
 
 The first step towards a real browser on the Mi A1: the ARM kernel runs Linux programs

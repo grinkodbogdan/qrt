@@ -151,11 +151,16 @@ dts-tissot:
 # programs for ARM (the SDK: sdk/build-arm64.sh, when an AArch64 libgcc is there): the
 # Linux-layer tests in /bin
 ARM_SDK := $(if $(shell aarch64-linux-gnu-gcc -print-libgcc-file-name 2>/dev/null),yes)
-ARM_PROGS := $(if $(ARM_SDK),$(addprefix build/arm64/rootfs/bin/,hello threads procs signals memory events busybox BUSYBOX.txt))
+ARM_PROGS := $(if $(ARM_SDK),$(addprefix build/arm64/rootfs/bin/,hello threads procs signals memory events busybox BUSYBOX.txt fastfetch FASTFETCH.txt))
 build/sdk-arm64/.stamp: sdk/build-arm64.sh sdk/musl-1.2.6.tar.gz
 	sh sdk/build-arm64.sh build/sdk-arm64
 build/arm64/rootfs/bin/busybox: ports/busybox-arm64.sh build/sdk-arm64/.stamp
 	sh ports/busybox-arm64.sh $@
+build/arm64/rootfs/bin/fastfetch: ports/fastfetch-arm64.sh build/sdk-arm64/.stamp
+	sh ports/fastfetch-arm64.sh $@
+build/arm64/rootfs/bin/FASTFETCH.txt: tools/FASTFETCH.txt
+	@mkdir -p $(dir $@)
+	cp $< $@
 build/arm64/rootfs/bin/BUSYBOX.txt: tools/BUSYBOX-arm64.txt
 	@mkdir -p $(dir $@)
 	cp $< $@

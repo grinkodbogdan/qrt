@@ -1,0 +1,3 @@
+/bin/fastfetch is fastfetch 2.66.0 (https://github.com/fastfetch-cli/fastfetch, MIT
+licence) with yyjson 0.12.0 (https://github.com/ibireme/yyjson, MIT licence), built
+unmodified from Ubuntu's orig tarballs by ports/fastfetch-arm64.sh.

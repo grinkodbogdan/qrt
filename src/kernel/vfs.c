@@ -300,6 +300,37 @@ static int gen_version(char *b, int cap) {
 static int gen_os_release(char *b, int cap) {
     return fmt(b, cap, "NAME=\"QRT\"\nVERSION=\"" QRT_VERSION "\"\nID=qrt\nPRETTY_NAME=\"QRT " QRT_VERSION "\"\n");
 }
+#if defined(__aarch64__)
+/* Linux's ARM layout: the core's own ID register says what it is (fastfetch, lscpu) */
+static int gen_cpuinfo(char *b, int cap) {
+    u64 midr;
+    __asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
+    int n = 0, cores = 1 + smp_workers();
+    /* the chip by name, first (fastfetch shows "Hardware" as the CPU, and reads one block) */
+    int fdt_node(const char *path);
+    const void *fdt_prop(int node, const char *name, int *len);
+    int len = 0;
+    const char *c = fdt_prop(fdt_node("/"), "compatible", &len), *soc = NULL;
+    for (int o = 0; c && o < len; o += (int)strlen(c + o) + 1)
+        if (!strcmp(c + o, "qcom,msm8953")) soc = "Qualcomm Snapdragon 625 (MSM8953)";
+    u64 part = (midr >> 4) & 0xfff;
+    const char *core = part == 0xd03 ? "Cortex-A53" : part == 0xd04 ? "Cortex-A35" : part == 0xd05 ? "Cortex-A55" :
+                       part == 0xd07 ? "Cortex-A57" : part == 0xd08 ? "Cortex-A72" : part == 0xd0b ? "Cortex-A76" : "ARMv8";
+    if (n < cap) {
+        if (soc) n += fmt(b + n, (usize)(cap - n), "Hardware\t: %s\n", soc);
+        else n += fmt(b + n, (usize)(cap - n), "Hardware\t: %d x ARM %s\n", cores, core);
+    }
+    for (int i = 0; i < cores && n < cap; i++)
+        n += fmt(b + n, (usize)(cap - n), "processor\t: %d\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 cpuid\n"
+                 "CPU implementer\t: 0x%02llx\nCPU architecture: 8\nCPU variant\t: 0x%llx\nCPU part\t: 0x%03llx\nCPU revision\t: %llu\n\n",
+                 i, (midr >> 24) & 0xff, (midr >> 20) & 0xf, (midr >> 4) & 0xfff, midr & 0xf);
+    return n;
+}
+/* the device tree's model, where Linux shows it (the compatible strings are left out:
+ * fastfetch would name the CPU after the board) */
+extern const char *arm_model;
+static int gen_dt_model(char *b, int cap) { strlcpy(b, arm_model, (usize)cap); return (int)strlen(b) + 1; }
+#else
 static int gen_cpuinfo(char *b, int cap) {
     int n = 0, cores = 1 + smp_workers();
     for (int i = 0; i < cores && n < cap; i++)
@@ -307,6 +338,7 @@ static int gen_cpuinfo(char *b, int cap) {
                  i, k.cpu, k.tsc_per_ms / 1000);
     return n;
 }
+#endif
 static int gen_uptime(char *b, int cap) {
     u64 ms = k_now_ms();
     return fmt(b, cap, "%llu.%02llu 0.00\n", ms / 1000, ms / 10 % 100);
@@ -315,6 +347,9 @@ static int gen_meminfo(char *b, int cap) {
     u64 total = k.ram_bytes, avail = total;
 #if defined(__x86_64__)
     if (k.native) { total = pmm_total_bytes(); avail = pmm_free_bytes(); }
+#elif defined(__aarch64__)
+    u64 pmm_free_bytes(void);
+    avail = pmm_free_bytes();
 #endif
     return fmt(b, cap, "MemTotal:       %8llu kB\nMemFree:        %8llu kB\nMemAvailable:   %8llu kB\n",
                total >> 10, avail >> 10, avail >> 10);
@@ -344,6 +379,10 @@ static void add_synthetic(void) {
     synth("/proc/cpuinfo", gen_cpuinfo);
     synth("/proc/meminfo", gen_meminfo);
     synth("/proc/uptime", gen_uptime);
+#if defined(__aarch64__)
+    synth("/sys/firmware/devicetree/base/model", gen_dt_model);
+    synth("/proc/device-tree/model", gen_dt_model);
+#endif
     synth("/etc/os-release", gen_os_release);
     synth("/etc/hostname", gen_hostname);
     synth("/etc/passwd", gen_passwd);
