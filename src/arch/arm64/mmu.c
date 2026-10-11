@@ -23,12 +23,13 @@
 #define ARGON_L1 255       /* L1 entries from here: Argon's window (mmu.c, below): 255 GB up */
 #define NL2 16
 #define NL3 96
+static u64 l0[512] __attribute__((aligned(4096)));   /* 48-bit: entry 0 -> l1 (the kernel's 512 GB) */
 static u64 l1[512] __attribute__((aligned(4096)));
 static u64 l2[NL2][512] __attribute__((aligned(4096)));
 static u64 l3[NL3][512] __attribute__((aligned(4096)));
-#define L1_USER 384        /* L1 entries from here: programs' own (umm.c) */
+#define L1_USER 512        /* the kernel's L1 is all the kernel's: programs live above 512 GB (umm.c) */
 extern u64 kernel_l1_phys;
-u64 *mmu_kernel_l1(void) { return l1; }
+u64 *mmu_kernel_l0(void) { return l0; }
 
 static u64 desc(u64 pa, int attr, u64 type) {
     u64 d = pa | type | D_AF | D_ATTR(attr);
@@ -113,10 +114,11 @@ void mmu_init(const u64 (*ram)[2], int nram, const u64 (*nc)[2], int nnc, const 
     dcache_inval(base, base + (u64)(__bss_end - _start));
     SYSREG_W(mair_el1, 0x04ull << (8 * MAIR_DEVICE) | 0xffull << (8 * MAIR_NORMAL) | 0x44ull << (8 * MAIR_NC));
     u64 pa_range = SYSREG_R(id_aa64mmfr0_el1) & 7;
-    u64 tcr = 25 | (1ull << 8) | (1ull << 10) | (3ull << 12) | (1ull << 23) | (pa_range << 32);   /* T0SZ 25, WB, ISH, 4K, EPD1 */
+    u64 tcr = 16 | (1ull << 8) | (1ull << 10) | (3ull << 12) | (1ull << 23) | (pa_range << 32);   /* T0SZ 16 (48-bit), WB, ISH, 4K, EPD1 */
+    l0[0] = (u64)(usize)l1 | D_TABLE;
     SYSREG_W(tcr_el1, tcr);
-    SYSREG_W(ttbr0_el1, (u64)(usize)l1);
-    kernel_l1_phys = (u64)(usize)l1;
+    SYSREG_W(ttbr0_el1, (u64)(usize)l0);
+    kernel_l1_phys = (u64)(usize)l0;
     __asm__ volatile("dsb sy; tlbi vmalle1; dsb sy; isb" ::: "memory");
     u64 sctlr = SYSREG_R(sctlr_el1);
     sctlr |= 1 | (1 << 2) | (1 << 12);          /* MMU, data cache, instruction cache */
@@ -151,9 +153,8 @@ static u64 *argon_pte(u64 va) {
     return &l3[(va >> 12) & 511];
 }
 int argon_window(u64 va) { return ((va >> 30) & 511) >= ARGON_L1 && ((va >> 30) & 511) < L1_USER && (va >> 39) == 0; }
-/* Argon's second-level tables, all made now: programs' tables copy the kernel's top
- * level once (umm.c), so it must not change afterwards */
-void mmu_argon_tables(void) { for (int g = ARGON_L1; g < L1_USER; g++) argon_table(&l1[g]); }
+/* (programs' tables share the kernel's L1 itself: Argon's tables can appear any time) */
+void mmu_argon_tables(void) { }
 /* [va, va + size) -> [pa, ...), write-back cacheable */
 int argon_map(u64 va, u64 pa, u64 size) {
     if (!argon_window(va) || !argon_window(va + size - 1) || (va | pa | size) & 4095) return -1;

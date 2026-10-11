@@ -189,6 +189,29 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.30.0: Ladybird on the phone
+
+The web browser the tablet runs - Ladybird, with its own engine, JavaScript and
+networking - now runs on the Mi A1: the Browser in the dock starts it.
+
+- **Built for ARM**: the ARM SDK gains C++ (`sdk/build-arm64-cxx.sh`: libc++,
+  libc++abi, libunwind, compiler-rt); Ladybird's 33 libraries are cross-built for it
+  (`QRT_ARCH=arm64 ports/build.sh`) and Ladybird itself (`QRT_ARCH=arm64
+  ports/ladybird/build.sh Ladybird`), Rust parts included; build-time programs run under
+  qemu-aarch64.  Pages are drawn by Skia on the CPU (the GPU comes next).
+- **48-bit addresses for programs**: the ARM kernel used 39-bit addresses (programs had
+  128 GB); Ladybird's JavaScript engine reserves a 4 TB region at start.  Programs now
+  have 512 GB - 128 TB, as on Linux and on QRT's x86-64 kernel (four levels of page
+  tables; the kernel's own 512 GB is shared by every process).
+- **Big files in their own pages**: the 150 MB browser program is mapped, not copied, by
+  each of its processes (as on x86-64); files up to 256 MB.
+- **A gzip'd ramdisk**: the boot image carries its files compressed (62 MB with
+  Ladybird); the kernel unpacks them at boot (`src/kernel/inflate.c`).
+- `mkdirat` (AArch64 programs have no `mkdir`), `utimensat`; QRT's own calls (windows,
+  input) reach ARM programs; mimalloc compiled for ARMv8.0 (the A53 has no LSE atomics).
+- Checked on QEMU: the browser starts, its window and error page draw.  The phone, with
+  Wi-Fi, is the real test - it runs on one core for now.
+
 ## 0.29.1: fastfetch
 
 - **`fastfetch`** in the Terminal on the phone (fastfetch 2.66, built for ARM with the new

@@ -12,15 +12,15 @@ typedef struct { u8 fp[528] __attribute__((aligned(16))); u64 x[31]; u64 pc, pst
 #define FRAME_FP(f)   ((f)->fp)
 
 #define PAGE 4096ull
-/* programs live in [384 GB, 512 GB): L1 entries 384..511 (umm.c) */
-#define USER_BASE      0x6000000000ull
+/* programs live in [512 GB, 128 TB): top-level entries 1..255 (umm.c) */
+#define USER_BASE      0x8000000000ull
 #define USER_SIGTRAMP  (USER_BASE + PAGE)                 /* rt_sigreturn, mapped in every process */
 #define USER_LOW_START (USER_BASE + 2 * PAGE)
 #define USER_TOP       (USER_BASE + 0x40000000ull)       /* the low GiB: image, brk, stack */
 #define USER_PIE_BASE_ (USER_BASE + 0x10000000ull)
 #define USER_LOW_MMAP_ (USER_BASE + 0x30000000ull)
 #define USER_HIGH_BASE (USER_BASE + 0x100000000ull)      /* mmap */
-#define USER_HIGH_END  0x8000000000ull
+#define USER_HIGH_END  0x800000000000ull
 #define USER_HOLE_BASE USER_HIGH_BASE                     /* no hole (x86-64 has one in its high region) */
 #define USER_HOLE_END  USER_HIGH_BASE
 

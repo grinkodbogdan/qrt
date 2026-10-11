@@ -8,7 +8,7 @@
 
 static vnode_t *root;
 static u64 total_bytes;
-#if defined(__x86_64__)                 /* Ladybird is one 150 MB program */
+#if defined(__x86_64__) || defined(__aarch64__)   /* Ladybird is one 150 MB program */
 #define MAX_FILE  (256ull << 20)
 #define MAX_TOTAL (768ull << 20)
 #else
@@ -467,3 +467,19 @@ static vnode_t *deep_copy(vnode_t *n, vnode_t *parent) {
 }
 
 void vfs_relocate(void) { if (root) root = deep_copy(root, NULL); }
+
+/* ARM's ramdisk: a big file (a program) goes into whole pages of its own, outside the
+ * heap - as deep_copy does on x86-64 - so exec maps its read-only segments from here,
+ * shared by every process running it (load_elf) */
+vnode_t *vfs_create_pages(const char *path, const void *data, u64 size) {
+    u64 pmm_alloc_contig(usize pages);
+    vnode_t *n = vfs_create(path, 0);
+    if (!n) return NULL;
+    u64 cap = (size + 4096ull - 1) & ~(4096ull - 1);
+    u8 *d = cap ? (u8 *)(usize)pmm_alloc_contig(cap / 4096ull) : NULL;
+    if (!d) { vfs_write(n, 0, data, size); return n; }
+    memcpy(d, data, size);
+    n->data = d; n->cap = cap; n->size = size;
+    total_bytes += size;
+    return n;
+}

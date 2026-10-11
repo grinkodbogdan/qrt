@@ -3,9 +3,10 @@
  * kernel's (as_create, as_map, as_translate, ... in src/arch/x64/mm.c), for the shared
  * user-mode layer in src/user.
  *
- * Every process has its own top-level table.  Its entries 0..383 are the kernel's (the
- * identity map and Argon's window: the same second-level tables, shared), so the kernel
- * runs on any process's tables; entries 384..511 - virtual 384 GB to 512 GB - are the
+ * 48-bit virtual addresses, four levels of tables.  Every process has its own top-level
+ * table: its entry 0 - the first 512 GB, the identity map and Argon's window - is the
+ * kernel's (the same table, shared), so the kernel runs on any process's tables; entries
+ * 1..255 - virtual 512 GB to 128 TB, as much as Linux gives an AArch64 program - are the
  * program's, built here page by page: accessible from EL0, never executable by the
  * kernel (PXN), not global (nG: tagged with the process's ASID, so switching between
  * programs needs no TLB flush).
@@ -29,8 +30,9 @@
 #define ATTR_NORMAL (1ull << 2)       /* MAIR index 1 (mmu.c) */
 #define ATTR_DEVICE (0ull << 2)
 
-#define L1_USER 384
-u64 *mmu_kernel_l1(void);
+#define L0_USER 1                     /* top-level entries 1..255 */
+#define L0_END  256
+u64 *mmu_kernel_l0(void);
 
 static u64 *tbl(u64 e) { return (u64 *)(usize)(e & D_ADDR); }
 static u64 asid_of(u64 cr3) { return cr3 >> 48; }
@@ -57,13 +59,13 @@ static void sync_icache(u64 pa) {
     __asm__ volatile("dsb ish; ic ialluis; dsb ish; isb" ::: "memory");
 }
 
-u64 kernel_cr3(void) { return (u64)(usize)mmu_kernel_l1(); }
+u64 kernel_cr3(void) { return (u64)(usize)mmu_kernel_l0(); }
 
 u64 as_create(void) {
-    u64 *l1 = (u64 *)(usize)pmm_alloc(1);
-    if (!l1) return 0;
-    memcpy(l1, mmu_kernel_l1(), L1_USER * 8);
-    u64 cr3 = (u64)(usize)l1 | (asid_take() << 48);
+    u64 *l0 = (u64 *)(usize)pmm_alloc(1);
+    if (!l0) return 0;
+    l0[0] = mmu_kernel_l0()[0];                                   /* the kernel's 512 GB */
+    u64 cr3 = (u64)(usize)l0 | (asid_take() << 48);
     u64 as_sigtramp_frame(void);
     as_map(cr3, USER_SIGTRAMP, as_sigtramp_frame(), AS_X | AS_SHARED);
     return cr3;
@@ -71,8 +73,8 @@ u64 as_create(void) {
 
 static u64 *pte_of(u64 cr3, u64 va, int create) {
     if (!user_va(va) || cr3 == kernel_cr3()) return NULL;
-    u64 *e = &tbl(cr3)[(va >> 30) & 511];
-    for (int lvl = 0; lvl < 2; lvl++) {
+    u64 *e = &tbl(cr3)[(va >> 39) & 511];
+    for (int shift = 30; shift >= 12; shift -= 9) {
         if (!(*e & 1)) {
             if (!create) return NULL;
             u64 t = pmm_alloc(1);
@@ -80,7 +82,7 @@ static u64 *pte_of(u64 cr3, u64 va, int create) {
             __asm__ volatile("dsb ishst" ::: "memory");
             *e = t | D_TABLE;
         }
-        e = &tbl(*e)[(va >> (lvl ? 12 : 21)) & 511];
+        e = &tbl(*e)[(va >> shift) & 511];
     }
     return e;
 }
@@ -158,7 +160,9 @@ static void walk(u64 cr3, u64 start, u64 end, int prot, int unmap) {
     u64 va = MAX(start & ~(PAGE - 1), USER_BASE);
     end = MIN(end, USER_HIGH_END);
     while (va < end) {
-        u64 e1 = tbl(cr3)[(va >> 30) & 511];
+        u64 e0 = tbl(cr3)[(va >> 39) & 511];
+        if (!(e0 & 1)) { va = (va + (1ull << 39)) & ~((1ull << 39) - 1); continue; }
+        u64 e1 = tbl(e0)[(va >> 30) & 511];
         if (!(e1 & 1)) { va = (va + (1ull << 30)) & ~((1ull << 30) - 1); continue; }
         u64 e2 = tbl(e1)[(va >> 21) & 511];
         if (!(e2 & 1)) { va = (va + (2ull << 20)) & ~((2ull << 20) - 1); continue; }
@@ -174,59 +178,54 @@ static void walk(u64 cr3, u64 start, u64 end, int prot, int unmap) {
 void as_unmap_range(u64 cr3, u64 start, u64 end) { walk(cr3, start, end, 0, 1); }
 void as_protect_range(u64 cr3, u64 start, u64 end, int prot) { walk(cr3, start, end, prot, 0); }
 
-/* fork: a copy of every private page; shared ones stay shared */
-u64 as_clone(u64 src) {
-    u64 dst = as_create();
-    for (int g = L1_USER; g < 512; g++) {
-        u64 e1 = tbl(src)[g];
-        if (!(e1 & 1)) continue;
-        for (int i = 0; i < 512; i++) {
-            u64 e2 = tbl(e1)[i];
-            if (!(e2 & 1)) continue;
-            for (int j = 0; j < 512; j++) {
-                u64 e = tbl(e2)[j];
-                if (!HAS(e)) continue;
-                u64 va = ((u64)g << 30) | ((u64)i << 21) | ((u64)j << 12);
-                u64 *pd = pte_of(dst, va, 1);
-                if (!pd) continue;
-                if (e & D_SHARED) { *pd = e; continue; }
-                u64 f = pmm_alloc(0);
-                if (!f) continue;
-                memcpy((void *)(usize)f, (void *)(usize)(e & D_ADDR), PAGE);
-                *pd = f | (e & ~D_ADDR);
-            }
-        }
-    }
-    __asm__ volatile("dsb ishst" ::: "memory");
-    return dst;
-}
-
-u64 as_private_pages(u64 cr3) {
+/* every page of the program's half: copied into dst (fork), counted, or freed with its tables */
+enum { V_CLONE, V_COUNT, V_FREE };
+static u64 visit(u64 cr3, int what, u64 dst) {
     u64 n = 0;
-    for (int g = L1_USER; g < 512; g++) {
-        u64 e1 = tbl(cr3)[g];
-        if (!(e1 & 1)) continue;
-        for (int i = 0; i < 512; i++) {
-            u64 e2 = tbl(e1)[i];
-            if (!(e2 & 1)) continue;
-            for (int j = 0; j < 512; j++) { u64 e = tbl(e2)[j]; if (HAS(e) && !(e & D_SHARED)) n++; }
+    for (int g = L0_USER; g < L0_END; g++) {
+        u64 e0 = tbl(cr3)[g];
+        if (!(e0 & 1)) continue;
+        for (int h = 0; h < 512; h++) {
+            u64 e1 = tbl(e0)[h];
+            if (!(e1 & 1)) continue;
+            for (int i = 0; i < 512; i++) {
+                u64 e2 = tbl(e1)[i];
+                if (!(e2 & 1)) continue;
+                for (int j = 0; j < 512; j++) {
+                    u64 e = tbl(e2)[j];
+                    if (!HAS(e)) continue;
+                    if (what == V_COUNT) { if (!(e & D_SHARED)) n++; continue; }
+                    if (what == V_FREE) { if (!(e & D_SHARED)) pmm_free(e & D_ADDR); continue; }
+                    u64 va = ((u64)g << 39) | ((u64)h << 30) | ((u64)i << 21) | ((u64)j << 12);
+                    u64 *pd = pte_of(dst, va, 1);
+                    if (!pd) continue;
+                    if (e & D_SHARED) { *pd = e; continue; }
+                    u64 f = pmm_alloc(0);
+                    if (!f) continue;
+                    memcpy((void *)(usize)f, (void *)(usize)(e & D_ADDR), PAGE);
+                    *pd = f | (e & ~D_ADDR);
+                }
+                if (what == V_FREE) pmm_free(e2 & D_ADDR);
+            }
+            if (what == V_FREE) pmm_free(e1 & D_ADDR);
         }
+        if (what == V_FREE) pmm_free(e0 & D_ADDR);
     }
     return n;
 }
 
+/* fork: a copy of every private page; shared ones stay shared */
+u64 as_clone(u64 src) {
+    u64 dst = as_create();
+    visit(src, V_CLONE, dst);
+    __asm__ volatile("dsb ishst" ::: "memory");
+    return dst;
+}
+
+u64 as_private_pages(u64 cr3) { return visit(cr3, V_COUNT, 0); }
+
 void as_destroy(u64 cr3) {
-    for (int g = L1_USER; g < 512; g++) {
-        u64 e1 = tbl(cr3)[g];
-        if (!(e1 & 1)) continue;
-        for (int i = 0; i < 512; i++) {
-            u64 e2 = tbl(e1)[i];
-            if (!(e2 & 1)) continue;
-            for (int j = 0; j < 512; j++) { u64 e = tbl(e2)[j]; if (HAS(e) && !(e & D_SHARED)) pmm_free(e & D_ADDR); }
-            pmm_free(e2 & D_ADDR);
-        }
-        pmm_free(e1 & D_ADDR);
-    }
+    visit(cr3, V_FREE, 0);
     tlb_asid(cr3);
     if (asid_of(cr3)) asid_used[asid_of(cr3)] = 0;
     pmm_free(cr3 & D_ADDR);

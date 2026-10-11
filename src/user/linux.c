@@ -1136,6 +1136,7 @@ static void syscall_dispatch_locked(frame_t *f) {
         break;
     case 28: r = do_madvise(p, a0, a1, (int)a2); break;
     case 26: case 149: case 150: case 151: case 152: case 325: r = 0; break;   /* msync, mlock family: accepted */
+    case 280: case 235: case 132: r = 0; break;         /* utimensat, utimes, utime: times are not kept */
     case 27: {                                          /* mincore: everything resident */
         u64 pages = (a1 + PAGE - 1) / PAGE;
         if (!UOK(a2, pages)) { r = -EFAULT; break; }
@@ -1240,11 +1241,11 @@ static void syscall_dispatch_locked(frame_t *f) {
         if (!UOK(buf, n)) { r = -EFAULT; break; }
         memcpy((void *)(usize)buf, p->exe, n); r = (i64)n; break;
     }
-    case 83: {                                          /* mkdir */
+    case 83: case 258: {                                /* mkdir, mkdirat (AArch64 has only the latter) */
         char path[160], full[256];
-        r = get_path(p, a0, path, sizeof path);
+        r = get_path(p, nr == 83 ? a0 : a1, path, sizeof path);
         if (r) break;
-        abs_path(p, AT_FDCWD, path, full, sizeof full);
+        abs_path(p, nr == 83 ? AT_FDCWD : (int)a0, path, full, sizeof full);
         r = vfs_lookup(full) ? -EEXIST : (vfs_create(full, 1) ? 0 : -ENOENT);
         break;
     }

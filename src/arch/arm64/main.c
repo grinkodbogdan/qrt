@@ -292,8 +292,10 @@ static int load_cpio(const u8 *p, const u8 *end) {
         strlcat(path, name[0] == '.' && name[1] == '/' ? name + 2 : name, sizeof path);
         if ((mode & 0170000) == 0040000) vfs_create(path, 1);
         else if ((mode & 0170000) == 0100000) {
-            vnode_t *n = vfs_create(path, 0);
-            if (n) { vfs_write(n, 0, data, fsize); files++; }
+            vnode_t *vfs_create_pages(const char *path, const void *data, u64 size);
+            vnode_t *n = fsize >= (1u << 20) ? vfs_create_pages(path, data, fsize) : vfs_create(path, 0);
+            if (n && fsize < (1u << 20)) vfs_write(n, 0, data, fsize);
+            if (n) files++;
         }
         p = data + ((fsize + 3) & ~3u);
     }
