@@ -684,7 +684,7 @@ static u32 screen_seq;                   /* the last job that wrote the screen *
 /* start a job in the next slot (its last use done first): 0 if the GPU is stuck */
 static int cjob_begin(u32 *slot) {
     *slot = ncjob % CSLOTS;
-    if (cslot_seq[*slot] && !seq_wait(cslot_seq[*slot], 200)) return 0;
+    if (cslot_seq[*slot] && !seq_wait(cslot_seq[*slot], 2000)) return 0;
     cp = ccmd.cpu + *slot * (CSLOT_BYTES / 4);
     return 1;
 }
@@ -883,7 +883,10 @@ int gpu_transition(const u32 *from, const u32 *to, int stride, int w, int h, int
     if (cjob_submit(slot, s, NULL, 0) < 0) { g_compute = 0; LOG("off: a transition frame could not be submitted"); return 0; }
     screen_seq = s;
     if (back) {                          /* drawn: shown from the next refresh */
-        if (!seq_wait(s, 100)) { g_compute = 0; LOG("off: a transition frame took over 100 ms - the CPU draws them"); return 0; }
+        /* a slow frame is not a broken GPU: Wi-Fi's start in the secure world stalls the
+         * whole phone for a third of a second (0.28.3 gave up after 100 ms, for good) -
+         * only a GPU silent for 2 s hands the transitions back to the CPU */
+        if (!seq_wait(s, 2000)) { g_compute = 0; LOG("off: a transition frame did not finish in 2 s - the CPU draws them"); return 0; }
         fb32_flip();
     }
     st_tn++; st_tus += k_now_us() - t0;

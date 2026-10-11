@@ -189,6 +189,14 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.28.4: a stall is not a broken GPU
+
+0.28.3 on the Mi A1: the checks passed and the GPU drew the transitions - until Wi-Fi
+was started through the secure world, which stalls the whole phone (352 ms in the
+log): one transition frame took over 100 ms and QRT handed the transitions back to the
+CPU for the rest of the boot.  It waits up to 2 s now; only a GPU silent that long is
+given up.
+
 ## 0.28.3: transitions without the stutter and the tearing
 
 0.28.2 on the Mi A1: the GPU draws the transitions - fast, but each one stuttered and
