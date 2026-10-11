@@ -336,14 +336,10 @@ static int gen_group(char *b, int cap) { return gen_text(b, cap, "root:x:0:\n");
 
 static void synth(const char *path, int (*g)(char *, int)) { vnode_t *n = vfs_create(path, 0); n->gen = g; }
 
-#if defined(__x86_64__)
-int proc_status_text(char *b, int cap);   /* proc.c: /proc/self/status of the calling process */
-#endif
+int proc_status_text(char *b, int cap);   /* src/user/proc.c: /proc/self/status of the calling process */
 
 static void add_synthetic(void) {
-#if defined(__x86_64__)
     synth("/proc/self/status", proc_status_text);
-#endif
     synth("/proc/version", gen_version);
     synth("/proc/cpuinfo", gen_cpuinfo);
     synth("/proc/meminfo", gen_meminfo);
@@ -386,6 +382,9 @@ static void copy_dir(EFI_FILE_PROTOCOL *d, vnode_t *into, int depth) {
     }
     kfree(buf);
 }
+
+/* ARM: the file tree came from the ramdisk (main.c) */
+void vfs_add_synthetic(void) { if (!root) root = new_node(NULL, "", 1); add_synthetic(); }
 
 void vfs_load_boot_volume(void) {
     if (!root) root = new_node(NULL, "", 1);

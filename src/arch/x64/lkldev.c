@@ -37,7 +37,7 @@
  * Interrupt Status bit of the PCI status register (legacy INTx) and raises Linux's IRQ.
  * bdf = bus << 8 | device << 3 | function.
  */
-#include "proc.h"
+#include "../../user/proc.h"
 #include "mm.h"
 #include "../../drivers/pci.h"
 #include "../../net/net.h"

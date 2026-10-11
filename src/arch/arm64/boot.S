@@ -152,7 +152,8 @@ secondary_entry:
     mrs     x0, elr_el1
     stp     x30, x0, [sp, #240]
     mrs     x0, spsr_el1
-    str     x0, [sp, #256]
+    mrs     x1, sp_el0
+    stp     x0, x1, [sp, #256]
     mov     x0, #\kind
     mov     x1, sp
     b       exc_common
@@ -204,6 +205,10 @@ exc_common:
     str     x2, [sp, #512]
     str     x3, [sp, #520]
     bl      arm_exception
+/* back to where the exception came from; a program's new thread starts here too
+ * (arm_enter_user: sp = its FP/SIMD area, the frame right above) */
+    .globl  exc_return
+exc_return:
     ldr     x2, [sp, #512]
     ldr     x3, [sp, #520]
     msr     fpsr, x2
@@ -227,8 +232,9 @@ exc_common:
     add     sp, sp, #528
     ldp     x30, x0, [sp, #240]
     msr     elr_el1, x0
-    ldr     x0, [sp, #256]
+    ldp     x0, x1, [sp, #256]
     msr     spsr_el1, x0
+    msr     sp_el0, x1
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -246,3 +252,10 @@ exc_common:
     ldp     x28, x29, [sp, #224]
     add     sp, sp, #(34 * 8)
     eret
+
+/* void arm_enter_user(void *area): area = 528 bytes of FP/SIMD state, then the frame */
+    .globl  arm_enter_user
+arm_enter_user:
+    msr     daifset, #0xf
+    mov     sp, x0
+    b       exc_return

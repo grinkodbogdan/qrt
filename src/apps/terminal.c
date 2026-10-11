@@ -4,14 +4,14 @@
 #include "../net/net.h"
 #include "../net/netstack.h"
 #include "../net/wlan.h"
-#if defined(__x86_64__)
-#include "../arch/x64/proc.h"
+#if defined(__x86_64__) || defined(__aarch64__)
+#include "../user/proc.h"
 #endif
 
 #define SNAP_MAX (48 * 1024)
 
 static struct {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     term_t term;
     proc_t *proc;
 #endif
@@ -34,7 +34,7 @@ static void icon(canvas_t *c, float cx, float cy, float r, u32 fg) {
 }
 
 static void out(const char *s) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     term_append(&st.term, s, strlen(s));
 #else
     usize n = strlen(s);
@@ -45,7 +45,7 @@ static void out(const char *s) {
 #endif
 }
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 static u32 parse_u32(const char *s) { u32 v = 0; while (*s >= '0' && *s <= '9') v = v * 10 + (u32)(*s++ - '0'); return v; }
 
 /* ---- built-in network commands (they run in the shell, no Linux process) ---- */
@@ -135,7 +135,7 @@ static void run(const char *cmd) {
     char buf[256];
     strlcpy(buf, cmd, sizeof buf);                 /* the event handler already echoed it after the prompt */
     st.scroll = 0;
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     if ((st.proc && !st.proc->exited) || st.ping.active) { out("[a program is still running - stop it first]\n"); return; }
     const char *argv[24];
     int argc = 0;
@@ -249,7 +249,7 @@ static void draw(canvas_t *c, rect_t a) {
 }
 
 static void stop(void) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     if (st.ping.active) { st.ping.active = 0; out("^C\n"); }
     else if (st.proc && !st.proc->exited) { proc_kill(st.proc); out("^C\n"); }
 #endif
@@ -295,7 +295,7 @@ static int event(const event_t *e, rect_t a) {
 static void on_open(void) {
     static int greeted;
     if (greeted++) return;
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     const char *why;
     if (!proc_user_supported(&why)) { char m[160]; fmt(m, sizeof m, "Programs cannot run here: %s\n", why); out(m); }
 #else
@@ -304,22 +304,21 @@ static void on_open(void) {
 }
 
 static int tick(u64 now) {
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     int redraw = ping_tick(now);
 #else
     int redraw = 0;
     (void)now;
 #endif
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     if (st.term.serial != st.seen_serial) {
-        u64 fl;
-        __asm__ volatile("pushfq; pop %0; cli" : "=r"(fl) :: "memory");
+        u64 fl = irq_save();
         usize from = st.term.len > SNAP_MAX ? st.term.len - SNAP_MAX : 0;
         st.snap_len = st.term.len - from;
         if (st.term.buf) memcpy(st.snap, st.term.buf + from, st.snap_len);
         st.snap[st.snap_len] = 0;
         st.seen_serial = st.term.serial;
-        if (fl & 0x200) __asm__ volatile("sti");
+        irq_restore(fl);
         redraw = 1;
     }
     int running = (st.proc && !st.proc->exited) || st.ping.active;
@@ -333,7 +332,7 @@ static void on_close(void) {
     stop();
     st.line[0] = 0;
     st.scroll = 0;
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
     st.term.len = 0;
     st.term.serial++;
 #else

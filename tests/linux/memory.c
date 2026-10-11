@@ -54,7 +54,11 @@ int main(void) {
     CHECK(ok, "8 GiB reservation, mprotect, PROT_NONE keeps contents");
 
     /* write-then-execute, as a JIT does: mov eax, 42; ret */
-    unsigned char code[] = { 0xb8, 42, 0, 0, 0, 0xc3 };
+#if defined(__aarch64__)
+    unsigned char code[] = { 0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6 };   /* mov w0, #42; ret */
+#else
+    unsigned char code[] = { 0xb8, 42, 0, 0, 0, 0xc3 };                         /* mov eax, 42; ret */
+#endif
     unsigned char *jit = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     memcpy(jit, code, sizeof code);
     int nx = faults(call, jit);                                    /* data is not code */
@@ -123,8 +127,12 @@ int main(void) {
     free(big2);
     CHECK(ok, "realloc of 64 MB");
 
-    /* MAP_32BIT and a file mapping */
+    /* MAP_32BIT (x86-64 only) and a file mapping */
+#ifdef MAP_32BIT
     void *low = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+#else
+    void *low = (void *)4096;
+#endif
     int ef = open("/proc/self/exe", O_RDONLY);
     if (ef < 0) ef = open("/bin/memory", O_RDONLY);
     char *img = ef >= 0 ? mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, ef, 0) : MAP_FAILED;

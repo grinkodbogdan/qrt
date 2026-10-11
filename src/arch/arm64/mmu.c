@@ -26,6 +26,9 @@
 static u64 l1[512] __attribute__((aligned(4096)));
 static u64 l2[NL2][512] __attribute__((aligned(4096)));
 static u64 l3[NL3][512] __attribute__((aligned(4096)));
+#define L1_USER 384        /* L1 entries from here: programs' own (umm.c) */
+extern u64 kernel_l1_phys;
+u64 *mmu_kernel_l1(void) { return l1; }
 
 static u64 desc(u64 pa, int attr, u64 type) {
     u64 d = pa | type | D_AF | D_ATTR(attr);
@@ -113,10 +116,16 @@ void mmu_init(const u64 (*ram)[2], int nram, const u64 (*nc)[2], int nnc, const 
     u64 tcr = 25 | (1ull << 8) | (1ull << 10) | (3ull << 12) | (1ull << 23) | (pa_range << 32);   /* T0SZ 25, WB, ISH, 4K, EPD1 */
     SYSREG_W(tcr_el1, tcr);
     SYSREG_W(ttbr0_el1, (u64)(usize)l1);
+    kernel_l1_phys = (u64)(usize)l1;
     __asm__ volatile("dsb sy; tlbi vmalle1; dsb sy; isb" ::: "memory");
     u64 sctlr = SYSREG_R(sctlr_el1);
     sctlr |= 1 | (1 << 2) | (1 << 12);          /* MMU, data cache, instruction cache */
     sctlr &= ~(u64)((1 << 1) | (1 << 3) | (1 << 4) | (1 << 19));   /* no alignment check, no SP alignment check, no WXN */
+    /* programs (EL0) may: clean caches by address (UCI: code they write), read the cache
+     * type (UCT) and zero lines with DC ZVA (DZE) - what libc's memset and JITs use; SPAN:
+     * taking an exception does not set PAN (the kernel reads programs' memory) */
+    sctlr |= (1u << 26) | (1u << 15) | (1u << 14) | (1u << 23);
+    SYSREG_W(cntkctl_el1, SYSREG_R(cntkctl_el1) | 2);            /* EL0 reads the virtual counter */
     SYSREG_W(sctlr_el1, sctlr);
     __asm__ volatile("isb" ::: "memory");
 }
@@ -141,7 +150,10 @@ static u64 *argon_pte(u64 va) {
     u64 *l3 = argon_table(&l2[(va >> 21) & 511]);
     return &l3[(va >> 12) & 511];
 }
-int argon_window(u64 va) { return ((va >> 30) & 511) >= ARGON_L1 && (va >> 39) == 0; }
+int argon_window(u64 va) { return ((va >> 30) & 511) >= ARGON_L1 && ((va >> 30) & 511) < L1_USER && (va >> 39) == 0; }
+/* Argon's second-level tables, all made now: programs' tables copy the kernel's top
+ * level once (umm.c), so it must not change afterwards */
+void mmu_argon_tables(void) { for (int g = ARGON_L1; g < L1_USER; g++) argon_table(&l1[g]); }
 /* [va, va + size) -> [pa, ...), write-back cacheable */
 int argon_map(u64 va, u64 pa, u64 size) {
     if (!argon_window(va) || !argon_window(va + size - 1) || (va | pa | size) & 4095) return -1;

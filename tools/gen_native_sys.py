@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sdk/syscalls.txt -> src/arch/x64/native_sys.h: QRT native call number -> the Linux
+"""sdk/syscalls.txt -> src/user/native_sys.h: QRT native call number -> the Linux
 call with the same semantics (0xffff: none), and the numbers of the QRT-only calls."""
 import sys
 rows = [l.split() for l in open(sys.argv[1]) if l.strip() and not l.startswith('#')]

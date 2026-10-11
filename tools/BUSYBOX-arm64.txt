@@ -1,0 +1,6 @@
+/bin/busybox is BusyBox (https://busybox.net), a separate program licensed
+under the GNU GPL version 2, built unmodified from BusyBox 1.36.1's source
+(https://busybox.net/downloads/busybox-1.36.1.tar.bz2, as Ubuntu's
+busybox_1.36.1.orig.tar.bz2) by ports/busybox-arm64.sh with QRT's ARM SDK
+(musl). QRT runs it through its Linux system-call layer; QRT itself does not
+include BusyBox code.

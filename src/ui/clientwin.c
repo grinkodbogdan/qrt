@@ -2,7 +2,7 @@
  * clientwin.c - windows of native QRT programs, shown by the shell as apps.
  *
  * A native program (built with the SDK in sdk/) asks for a window with a system
- * call (src/arch/x64/qrtcall.c).  The window is an app like the built-in ones: it
+ * call (src/user/qrtcall.c).  The window is an app like the built-in ones: it
  * has a place in the dock, the overview, the launcher; it fills the app area (on
  * the tablet, or on the external monitor in desk mode) and follows it when that
  * changes size (rotation, the on-screen keyboard, desk mode) - the program gets a
@@ -19,8 +19,8 @@
 #include "shell.h"
 #include "clientwin.h"
 
-#if defined(__x86_64__)
-#include "../arch/x64/lfile.h"
+#if defined(__x86_64__) || defined(__aarch64__)
+#include "../user/lfile.h"
 
 #define MAX_WIN 7
 #define QLEN 128

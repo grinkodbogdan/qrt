@@ -165,12 +165,19 @@ void linux_failed(const char *why);
 void gic_irq(void);
 int  gic_init(void);
 void argon_irq_tail(u64 pc);
+void arm_user_sync(void *f);
+void arm_user_irq_tail(void *f);
+int  arm_kernel_user_fault(void *f);
 void arm_exception(u64 kind, u64 *frame) {
-    if (kind == 5) {                                              /* EL1h IRQ: the scheduler's tick */
+    void *uf = (u8 *)frame - 528;                                 /* uentry.c's frame_t: the FP/SIMD area first */
+    if (kind == 5 || kind == 9) {                                 /* IRQ: the scheduler's tick, devices */
         gic_irq();
         argon_irq_tail(frame[31]);                                /* Linux's own interrupts, as a CPU takes them */
+        if (kind == 9) arm_user_irq_tail(uf);                     /* back to a program: its signals */
         return;
     }
+    if (kind == 8) { arm_user_sync(uf); return; }                 /* a program: system call, page fault */
+    if (kind == 4 && arm_kernel_user_fault(uf)) return;           /* the kernel touching a program's page */
     char m[96];
     fmt(m, sizeof m, "%s at %llx (ESR %llx, address %llx)", kind < 12 ? kinds[kind] : "exception", frame[31],
         SYSREG_R(esr_el1), SYSREG_R(far_el1));
@@ -386,6 +393,8 @@ void arm_main(const void *dtb, u64 base) {
     }
     mmu_init((const u64 (*)[2])ram, nram, (const u64 (*)[2])nc, nnc, (const u64 (*)[2])hole, nhole);
     pmm_init(lo, hi);
+    void mmu_argon_tables(void);
+    mmu_argon_tables();
     if (ramoops[1]) {                                               /* the log across resets */
         plog_init(ramoops[0], ramoops[1]);
         for (int i = 0; klog_line(i); i++) plog_line(klog_line(i));
@@ -398,6 +407,8 @@ void arm_main(const void *dtb, u64 base) {
         int files = load_cpio((const u8 *)(usize)initrd_start, (const u8 *)(usize)initrd_end);
         klog("ramdisk: %d files (%llu KB)", files, (initrd_end - initrd_start) >> 10);
     }
+    void vfs_add_synthetic(void);
+    vfs_add_synthetic();                                            /* /proc, /etc: what Linux programs read */
     hal_arm_init();
     time_init();
     if (gic_init()) __asm__ volatile("msr daifclr, #2");          /* preemption from here on */
@@ -506,6 +517,10 @@ void arm_main(const void *dtb, u64 base) {
     }
     int arm_smp_start(void);
     arm_smp_start();                                                /* the other cores: drawing help */
+    void proc_init(void), arm_run_programs(const char *list);
+    proc_init();                                                    /* programs (src/user, uentry.c) */
+    const char *run = bootargs ? strstr(bootargs, "qrt.run=") : NULL;
+    if (run) arm_run_programs(run + 8);                             /* tests: programs at boot, output to the log */
     shell_main();
     panic("the shell returned");
 }

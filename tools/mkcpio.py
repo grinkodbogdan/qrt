@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkcpio.py DIR OUT - a "newc" cpio archive of DIR (the ARM boot image's ramdisk)."""
+"""mkcpio.py DIR [DIR...] OUT - a "newc" cpio archive of the DIRs' files (the ARM boot image's ramdisk)."""
 import os, sys
 
 def entry(out, name, mode, data, ino):
@@ -10,15 +10,17 @@ def entry(out, name, mode, data, ino):
     out += data
     out += b"\0" * (-len(out) % 4)
 
-root, dest = sys.argv[1], sys.argv[2]
-out, ino = bytearray(), 1
-for d, dirs, files in sorted(os.walk(root)):
-    dirs.sort()
-    rel = os.path.relpath(d, root)
-    if rel != ".":
-        entry(out, rel, 0o040755, b"", ino); ino += 1
-    for f in sorted(files):
-        p = os.path.join(d, f)
-        entry(out, os.path.normpath(os.path.join(rel, f)), 0o100644 | (os.stat(p).st_mode & 0o111), open(p, "rb").read(), ino); ino += 1
+roots, dest = sys.argv[1:-1], sys.argv[-1]
+out, ino, seen = bytearray(), 1, set()
+for root in roots:
+    for d, dirs, files in sorted(os.walk(root)):
+        dirs.sort()
+        rel = os.path.relpath(d, root)
+        if rel != "." and rel not in seen:
+            seen.add(rel)
+            entry(out, rel, 0o040755, b"", ino); ino += 1
+        for f in sorted(files):
+            p = os.path.join(d, f)
+            entry(out, os.path.normpath(os.path.join(rel, f)), 0o100644 | (os.stat(p).st_mode & 0o111), open(p, "rb").read(), ino); ino += 1
 entry(out, "TRAILER!!!", 0, b"", 0)
 open(dest, "wb").write(out)

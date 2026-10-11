@@ -18,7 +18,7 @@
 #include "../net/wlan.h"
 #include "../drivers/bt/bt.h"
 #if defined(__x86_64__)
-#include "../arch/x64/proc.h"
+#include "../user/proc.h"
 #endif
 
 static inline void p_outb(u16 port, u8 v)  { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }

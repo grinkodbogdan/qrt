@@ -23,7 +23,7 @@ Requirements: clang, ld.lld, llvm-ar, python3 with PIL (for the font), and gcc's
 ## The native ABI
 
 - **Marking**: an ELF note named `QRT` (type 1). The kernel checks it when it loads the
-  program (`load_elf` in `src/arch/x64/proc.c`) and runs the process with the native
+  program (`load_elf` in `src/user/proc.c`) and runs the process with the native
   personality. `uname` reports `QRT` and QRT's version.
 - **System calls**: `sdk/syscalls.txt` is the single source of truth.
   - Numbers 1–384 are QRT's own, in alphabetical order. They keep the argument and
@@ -31,7 +31,7 @@ Requirements: clang, ld.lld, llvm-ar, python3 with PIL (for the font), and gcc's
     those layouts.
   - Numbers from 1024 up exist only on QRT (windows, events, the keyboard).
   - `tools/gen_native_sys.py` turns the file into the kernel's table
-    (`src/arch/x64/native_sys.h`).
+    (`src/user/native_sys.h`).
   - `sdk/patch_musl.py` turns it into musl's numbers. That includes the six places
     where musl's x86-64 assembly has a number written out.
 - **`syscall()`** takes Linux's numbers: the public `<sys/syscall.h>` has them, and the
@@ -64,7 +64,7 @@ bar (title, minimise, close). It follows that area through rotation, the on-scre
 keyboard and desk mode by sending `QRT_EV_RESIZE`. Its buffer is one contiguous piece of
 kernel memory mapped into the program, so the shell copies the presented rectangle with
 no extra hand-off. The shell side is `src/ui/clientwin.c`, the system calls are
-`src/arch/x64/qrtcall.c`. Up to seven native windows can be open at once.
+`src/user/qrtcall.c`. Up to seven native windows can be open at once.
 
 ## Examples (in the image's `/bin`)
 

@@ -22,7 +22,7 @@
 #include "../../drivers/audio.h"
 #include "../../ui/gfx.h"
 #include "sched.h"
-#include "proc.h"
+#include "../../user/proc.h"
 #include "../../acpi/acpidev.h"
 void smp_programs_start(void);
 int native_smp_workers(void);

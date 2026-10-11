@@ -189,6 +189,29 @@ QRT is 64-bit only (since 0.9.0): the 32-bit UEFI build for the Venue 8 Pro 5830
   the registers and the last lines of the log.  A photo of that screen is enough to find
   the bug.
 
+## 0.29.0: programs on the phone
+
+The first step towards a real browser on the Mi A1: the ARM kernel runs Linux programs
+in user mode (EL0), as the x86-64 kernel has since 0.5.
+
+- **One Linux layer for both**: processes, the Linux system calls, signals, files,
+  pipes, Unix and network sockets, epoll/eventfd/timerfd/signalfd and native windows
+  moved from `src/arch/x64` to `src/user` and are shared; each architecture adds its
+  glue (`src/arch/arm64/uentry.c`, `umm.c`).
+- **ARM**: every program gets its own page tables (virtual 384-512 GB, its own ASID, so
+  a switch needs no TLB flush); system calls come in by SVC with Linux's AArch64
+  numbers and structures and are mapped onto the shared layer (`src/user/linux_a64.h`);
+  page faults, signals with Linux's AArch64 signal frame (registers and FP/SIMD state),
+  fork, threads with their own TPIDR_EL0; a big kernel lock that a thread keeps when the
+  tick preempts it and gives up while it blocks.
+- **An SDK for ARM** (`sdk/build-arm64.sh`): musl for AArch64 and `qrt-a64-cc` (static
+  PIE programs).  BusyBox is built from source with it (`ports/busybox-arm64.sh`) and
+  ships in `/bin` with the Linux-layer tests (`hello`, `threads`, `procs`, `signals`,
+  `memory`, `events`) - all pass on QEMU, with Linux's drivers running beside them.
+- **The Terminal works on the phone**: `ls`, pipes, `busybox sh`, the tests.
+- `qrt.run=/bin/a,/bin/b` on the kernel command line runs programs at boot and puts their
+  output in the log.
+
 ## 0.28.5: where a transition frame's time goes
 
 0.28.4 on the Mi A1: the GPU drew the transitions, but ~0.2 s a frame - three frames in
@@ -1852,7 +1875,7 @@ The QEMU test runs all of them. They are steps L1–L3 of porting a modern brows
 ## Linux programs
 
 Open **Terminal**. It runs x86-64 Linux ELF programs, unmodified, through
-Tessera's Linux system-call layer (`src/arch/x64/linux.c`, `proc.c`), the way
+Tessera's Linux system-call layer (`src/user/linux.c`, `proc.c`), the way
 WSL1 or FreeBSD's Linuxulator do: this is the Linux ABI, not the Linux
 kernel.
 
@@ -1905,7 +1928,7 @@ files run as busybox applets), `wait4`, `pipe`/`pipe2`, `dup`/`dup2`/`dup3`,
 
 Since 0.7.0 (kernel services that native programs use too, see [docs/roadmap.md](docs/roadmap.md)):
 
-- **Signals** (`src/arch/x64/signal.c`): `rt_sigaction` with and without
+- **Signals** (`src/user/signal.c`): `rt_sigaction` with and without
   `SA_SIGINFO`, per-thread masks, pending sets, `sigaltstack`, `kill`,
   `tgkill` (`raise`, `pthread_kill`), `sigsuspend`/`pause`, `sigtimedwait`,
   `alarm`/`setitimer`, `SIGCHLD`, `SIGPIPE`, and the default actions. A
@@ -1928,7 +1951,7 @@ Since 0.7.0 (kernel services that native programs use too, see [docs/roadmap.md]
   `MADV_DONTNEED`, `unlink`/`rename` and 256 descriptors per process are
   supported too.
 - **Event loops**: `epoll`, `eventfd`, `timerfd`, `signalfd`, and Unix
-  sockets (`src/arch/x64/unix.c`):
+  sockets (`src/user/unix.c`):
   - stream, datagram and seqpacket types; `socketpair`;
   - path and abstract names; `listen`/`accept`;
   - descriptors passed with `SCM_RIGHTS`; `SO_PEERCRED`;
@@ -2342,8 +2365,10 @@ network commands work there too.
 src/efi.h              UEFI ABI subset (written from the spec)
 src/kernel/            boot, HAL, VFS, driver model (dev.c), hardware report, runtime
 src/arch/x64/          native kernel: memory, CPU/IDT, APIC, I/O APIC + MSI, scheduler,
-                       SMP trampoline, processes, Linux system calls
-src/arch/x64/lsock.c   Linux sockets over the network stack
+                       SMP trampoline
+src/user/              processes and the Linux system calls (both architectures): proc.c,
+                       linux.c (+ linux_a64.h on ARM), signal.c, lfile.c, unix.c, lsock.c
+                       (Linux sockets over the network stack), qrtcall.c
 src/drivers/           PCI, UART, DesignWare I2C, HID over I2C, touch service, GPIO buttons,
                        e1000, iwm/ (Intel 8260 Wi-Fi), iwn/ (Intel 6235 Wi-Fi), i915/ (Gen8 GPU), driver table
 src/net/               802.11 client + WPA2 (wlan.c), ARP/IP/ICMP/UDP/DHCP/DNS (net.c), TCP (tcp.c),

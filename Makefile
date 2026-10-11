@@ -33,7 +33,7 @@ LDFLAGS := -subsystem:efi_application -entry:efi_main -nodefaultlib
 
 # the native kernel (ExitBootServices, own MM/interrupts/SMP) is 64-bit only
 X64_SRC := src/arch/x64/mm.c src/arch/x64/cpu.c src/arch/x64/apic.c src/arch/x64/native.c \
-           src/arch/x64/sched.c src/arch/x64/smp_native.c src/arch/x64/proc.c src/arch/x64/linux.c src/arch/x64/irq.c src/arch/x64/lsock.c src/arch/x64/signal.c src/arch/x64/lfile.c src/arch/x64/unix.c src/arch/x64/qrtcall.c src/arch/x64/lkldev.c
+           src/arch/x64/sched.c src/arch/x64/smp_native.c src/user/proc.c src/user/linux.c src/arch/x64/irq.c src/user/lsock.c src/user/signal.c src/user/lfile.c src/user/unix.c src/user/qrtcall.c src/arch/x64/lkldev.c
 X64_ASM := src/arch/x64/isr.S src/arch/x64/entry.S src/arch/x64/trampoline.S src/drivers/iwn/fw.S
 
 IA32_OBJ := $(SRC:src/%.c=build/ia32/%.o)
@@ -104,7 +104,8 @@ ARM_SHARED := src/kernel/rt.c src/kernel/vfs.c src/kernel/sound.c src/kernel/tim
               src/apps/lab.c src/apps/terminal.c src/apps/wifi.c src/apps/browser.c src/apps/bluetooth.c src/apps/html.c \
               src/net/wifilog.c src/net/crypto.c src/net/crypto_tls.c src/net/tls.c src/net/http.c src/net/net.c src/net/tcp.c \
               src/net/wlan.c src/net/netstack.c src/drivers/hidparse.c src/drivers/hidmouse.c \
-              src/drivers/bt/hci.c src/drivers/bt/l2cap.c src/drivers/bt/a2dp.c src/drivers/bt/sbc.c
+              src/drivers/bt/hci.c src/drivers/bt/l2cap.c src/drivers/bt/a2dp.c src/drivers/bt/sbc.c \
+              src/user/proc.c src/user/linux.c src/user/signal.c src/user/lfile.c src/user/unix.c src/user/lsock.c src/user/qrtcall.c
 ARM_SRC    := $(wildcard src/arch/arm64/*.c)
 ARM_OBJ    := $(ARM_SHARED:src/%.c=build/arm64/%.o) $(ARM_SRC:src/%.c=build/arm64/%.o) build/arm64/arch/arm64/boot.o build/arm64/arch/arm64/switch.o
 ARM_CFLAGS := -target aarch64-none-elf -fpie -mno-outline-atomics -mstrict-align
@@ -147,8 +148,23 @@ dts-tissot:
 	@test -n "$(LINUX_DTS)" || { echo "set LINUX_DTS to a Linux 6.12 tree"; exit 1; }
 	cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp -I $(LINUX_DTS)/include $(if $(LINUX_INC),-I $(LINUX_INC)/include) -I $(LINUX_DTS)/arch/arm64/boot/dts/qcom \
 	    -I $(LINUX_DTS)/scripts/dtc/include-prefixes $(LINUX_DTS)/arch/arm64/boot/dts/qcom/msm8953-xiaomi-tissot.dts | dtc -q -I dts -O dtb -o src/arch/arm64/dts/msm8953-xiaomi-tissot.dtb -
-build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null)
-	$(PYTHON) tools/mkcpio.py src/arch/arm64/rootfs $@
+# programs for ARM (the SDK: sdk/build-arm64.sh, when an AArch64 libgcc is there): the
+# Linux-layer tests in /bin
+ARM_SDK := $(if $(shell aarch64-linux-gnu-gcc -print-libgcc-file-name 2>/dev/null),yes)
+ARM_PROGS := $(if $(ARM_SDK),$(addprefix build/arm64/rootfs/bin/,hello threads procs signals memory events busybox BUSYBOX.txt))
+build/sdk-arm64/.stamp: sdk/build-arm64.sh sdk/musl-1.2.6.tar.gz
+	sh sdk/build-arm64.sh build/sdk-arm64
+build/arm64/rootfs/bin/busybox: ports/busybox-arm64.sh build/sdk-arm64/.stamp
+	sh ports/busybox-arm64.sh $@
+build/arm64/rootfs/bin/BUSYBOX.txt: tools/BUSYBOX-arm64.txt
+	@mkdir -p $(dir $@)
+	cp $< $@
+build/arm64/rootfs/bin/%: tests/linux/%.c build/sdk-arm64/.stamp
+	@mkdir -p $(dir $@)
+	build/sdk-arm64/bin/qrt-a64-cc -O2 -w $< -o $@ -lpthread
+build/arm64/ramdisk.cpio: $(shell find src/arch/arm64/rootfs -type f 2>/dev/null) $(ARM_PROGS)
+	@mkdir -p build/arm64/rootfs
+	$(PYTHON) tools/mkcpio.py src/arch/arm64/rootfs build/arm64/rootfs $@
 build/arm64/qrt-mi-a1-boot.img: build/arm64/Image build/arm64/tissot.dtb build/arm64/ramdisk.cpio
 	gzip -9nc build/arm64/Image > build/arm64/Image.gz
 	cat build/arm64/Image.gz build/arm64/tissot.dtb > build/arm64/Image.gz-dtb
@@ -316,7 +332,7 @@ build/rootfs/bin/rust-hello: sdk/examples/rust-hello/src/main.rs sdk/examples/ru
 	cd sdk/examples/rust-hello && CARGO_TARGET_DIR=$(CURDIR)/build/rust-hello $(CURDIR)/build/sdk/bin/qrt-cargo build --release -q
 	cp build/rust-hello/x86_64-unknown-linux-musl/release/rust-hello $@
 
-src/arch/x64/native_sys.h: sdk/syscalls.txt tools/gen_native_sys.py
+src/user/native_sys.h: sdk/syscalls.txt tools/gen_native_sys.py
 	$(PYTHON) tools/gen_native_sys.py $< $@
 
 build/rootfs/bin/events: tests/linux/events.c

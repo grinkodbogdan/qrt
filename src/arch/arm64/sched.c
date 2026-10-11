@@ -12,26 +12,15 @@
 #include "arm.h"
 #include "sched.h"
 
-enum { T_READY, T_SLEEP, T_BLOCKED, T_DONE };
-struct thr {
-    u64 sp;
-    u8 *stack;
-    int state, detached, reaped;
-    u64 wake_at;                     /* T_SLEEP: k_now_us() to wake at */
-    void (*fn)(void *);
-    void *arg;
-    void *tls[THR_TLS];
-    const char *name;
-    struct thr *next;                /* every thread, in a ring */
-    struct thr *wnext;               /* a wait queue */
-    struct thr *joiner;
-    u64 run_us;                      /* CPU time since the last thr_report */
-};
+#define T_READY T_RUNNABLE
+#define T_SLEEP T_SLEEPING
+#define T_DONE  T_DEAD
 
 void arm_switch(u64 *save_sp, u64 new_sp);
 void arm_thread_start(void);
 
-static thr_t main_thr = { .state = T_READY, .name = "shell", .next = &main_thr };
+static thr_t main_thr = { .state = T_READY, .name = "shell", .next = &main_thr, .on_cpu = 0 };
+u64 kernel_l1_phys;                  /* mmu.c: the kernel's own tables (TTBR0 of kernel threads) */
 static thr_t *cur = &main_thr;
 static int nthreads = 1;
 static u64 switches;
@@ -45,16 +34,23 @@ int thr_count(void) { return nthreads; }
 u64 thr_switches(void) { return switches; }
 int thr_is_main(void) { return cur == &main_thr; }
 
+/* finished detached threads: their stacks are freed and they leave the ring (the
+ * structure stays: a program's records may still point at it) */
+static thr_t *rr_from;
 static void reap(void) {
-    thr_t *t = &main_thr;
-    do {
+    thr_t *prev = &main_thr, *t = main_thr.next;
+    while (t != &main_thr) {
+        thr_t *next = t->next;
         if (t->state == T_DONE && t->detached && !t->reaped && t != cur) {
             t->reaped = 1;
             kfree(t->stack);
             t->stack = NULL;
-        }
-        t = t->next;
-    } while (t != &main_thr);
+            prev->next = next;
+            nthreads--;
+            if (rr_from == t) rr_from = NULL;
+        } else prev = t;
+        t = next;
+    }
 }
 
 /* switch to t; we come back here when something switches to us again */
@@ -78,13 +74,20 @@ static void sw(thr_t *t) {
     slice_from = now;
     cur = t;
     switches++;
+    /* a program's thread: its address space and thread pointer */
+    prev->fs_base = SYSREG_R(tpidr_el0);
+    SYSREG_W(tpidr_el0, t->fs_base);
+    if (t->cr3 != prev->cr3) {
+        u64 ttbr = t->cr3 ? t->cr3 : kernel_l1_phys;
+        __asm__ volatile("msr ttbr0_el1, %0; isb" : : "r"(ttbr) : "memory");
+        if (t->cr3 && t->cr3 != kernel_l1_phys && !(t->cr3 >> 48)) __asm__ volatile("tlbi aside1, %0; dsb nsh; isb" : : "r"(0ull) : "memory");   /* out of ASIDs: the shared one */
+    }
     arm_switch(&prev->sp, t->sp);
     __asm__ volatile("msr daif, %0" : : "r"(daif) : "memory");
     reap();
 }
 
 /* the next ready thread after the current one, waking sleepers that are due */
-static thr_t *rr_from;
 static thr_t *pick(u64 *soonest) {
     u64 now = k_now_us();
     *soonest = ~0ull;
@@ -111,7 +114,48 @@ static thr_t *pick(u64 *soonest) {
 
 /* interrupts masked: run the next ready thread (maybe the current one); with none, idle
  * until the earliest sleeper is due */
+static void schedule_inner(void);
+static thr_t *bkl_owner;
+static int bkl_depth;
+static void bkl_release(void) {
+    bkl_owner = NULL;
+    bkl_depth = 0;
+    thr_t *t = &main_thr;
+    do { if (t->bkl_waiting) { t->bkl_waiting = 0; if (t->state == T_BLOCKED) { t->state = T_READY; if (t == &main_thr) main_boost = 1; } } t = t->next; } while (t != &main_thr);
+}
+/* interrupts masked: wait for the big lock and take it at depth d */
+static void bkl_take(int d) {
+    while (bkl_owner && bkl_owner != cur) {
+        cur->bkl_waiting = 1;
+        cur->state = T_BLOCKED;
+        schedule_inner();
+    }
+    cur->bkl_waiting = 0;
+    bkl_owner = cur;
+    bkl_depth = d;
+}
+void bkl_lock(void) {
+    u64 f = irq_save();
+    if (bkl_owner == cur) bkl_depth++;
+    else bkl_take(1);
+    irq_restore(f);
+}
+void bkl_unlock(void) {
+    u64 f = irq_save();
+    if (bkl_owner == cur && --bkl_depth == 0) bkl_release();
+    irq_restore(f);
+}
+int bkl_held(void) { return bkl_owner == cur; }
+
+/* a thread that blocks, sleeps or yields gives the big lock up meanwhile (the tick's
+ * preemption does not: the holder is in the middle of something) */
 static void schedule(void) {
+    int d = 0;
+    if (bkl_owner == cur) { d = bkl_depth; bkl_release(); }
+    schedule_inner();
+    if (d) bkl_take(d);
+}
+static void schedule_inner(void) {
     for (;;) {
         u64 soonest;
         thr_t *t = pick(&soonest);
@@ -166,7 +210,7 @@ void thr_entry(thr_t *t) {
     thr_exit();
 }
 
-thr_t *thr_create(const char *name, void (*fn)(void *), void *arg, usize stack) {
+static thr_t *create(const char *name, void (*fn)(void *), void *arg, usize stack, int state) {
     thr_t *t = kalloc(sizeof *t);
     t->stack = kalloc(stack);
     t->fn = fn; t->arg = arg; t->name = name;
@@ -175,7 +219,10 @@ thr_t *thr_create(const char *name, void (*fn)(void *), void *arg, usize stack) 
     sp[0] = (u64)(usize)t;                                        /* x19 */
     sp[11] = (u64)(usize)arm_thread_start;                        /* x30 */
     t->sp = (u64)(usize)sp;
-    t->state = T_READY;
+    t->state = state;
+    t->kstack = (u64)(usize)t->stack;
+    t->kstack_top = (u64)(usize)t->stack + stack;
+    t->on_cpu = -1;
     u64 f = irq_save();
     t->next = cur->next;
     cur->next = t;
@@ -183,6 +230,29 @@ thr_t *thr_create(const char *name, void (*fn)(void *), void *arg, usize stack) 
     irq_restore(f);
     return t;
 }
+
+thr_t *thr_create(const char *name, void (*fn)(void *), void *arg, usize stack) { return create(name, fn, arg, stack, T_READY); }
+thr_t *thr_create_suspended(const char *name, void (*fn)(void *), void *arg, usize stack) {
+    thr_t *t = create(name, fn, arg, stack, T_BLOCKED);
+    t->detached = 1;
+    return t;
+}
+void thr_stop(thr_t *t) {
+    u64 f = irq_save();
+    if (t->state != T_DONE) { t->state = T_DONE; t->detached = 1; }
+    if (bkl_owner == t) bkl_release();
+    irq_restore(f);
+}
+int thr_list(thr_t **out, int max) {
+    int n = 0;
+    u64 f = irq_save();
+    thr_t *t = &main_thr;
+    do { if (t->state != T_DONE && n < max) out[n++] = t; t = t->next; } while (t != &main_thr);
+    irq_restore(f);
+    return n;
+}
+
+void thr_block(void) { u64 f = irq_save(); cur->state = T_BLOCKED; schedule(); irq_restore(f); }
 
 void thr_exit(void) {
     irq_save();

@@ -6,8 +6,8 @@
 enum { QRT_EV_DOWN = 1, QRT_EV_MOVE, QRT_EV_UP, QRT_EV_KEY, QRT_EV_SCROLL, QRT_EV_RESIZE, QRT_EV_CLOSE, QRT_EV_SHOWN };
 typedef struct { u32 type, window; i32 x, y; u32 scan, ch; i32 w, h; } qrt_event_t;   /* 32 bytes */
 
-#if defined(__x86_64__)
-#include "../arch/x64/proc.h"
+#if defined(__x86_64__) || defined(__aarch64__)
+#include "../user/proc.h"
 int  cw_create(proc_t *p, const char *title);
 int  cw_buffer(proc_t *p, int id, kobj_t **shm, int *w, int *h, int *stride, u64 *bytes);
 int  cw_present(proc_t *p, int id, int x, int y, int w, int h);

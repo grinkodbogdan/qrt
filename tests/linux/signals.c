@@ -122,11 +122,15 @@ int main(void) {
     if (!sig) { (void)*(volatile int *)(uintptr_t)8; }
     CHECK(ok1 && sig == SIGSEGV && fault_addr == (void *)8, "SIGSEGV (PROT_NONE, NULL)");
 
-    /* integer division by zero */
+    /* integer division by zero (x86-64 traps; ARM's divide gives 0, no signal) */
     set_info(SIGFPE, h_fault, 0);
     sig = sigsetjmp(jb, 1);
     volatile int zero = 0, r = 1;
+#if defined(__aarch64__)
+    if (!sig) raise(SIGFPE);
+#else
     if (!sig) { r = 10 / zero; }
+#endif
     CHECK(sig == SIGFPE && r == 1, "SIGFPE");
 
     /* the FPU/SSE state survives a handler */
